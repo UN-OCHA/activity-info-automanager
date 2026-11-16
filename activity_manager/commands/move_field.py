@@ -1,3 +1,4 @@
+import ast
 import json
 from collections.abc import Mapping
 from copy import deepcopy
@@ -5,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..command_creator import CommandCreatorDefinition, ParameterDefinition
+from ..command_parser import command_error, parse_string_parameters
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,67 @@ def create_move_field(values: Mapping[str, Any]) -> MoveFieldCommand:
         field_code=values['field_code'],
         position=values['position'],
         before_after_field=values.get('relative_field_code'),
+    )
+
+
+def parse_move_field(text: str, call: ast.Call) -> MoveFieldCommand:
+    """Parse and validate a MoveField call from the Text view."""
+    values = parse_string_parameters(
+        text,
+        call,
+        'MoveField',
+        allowed={'fieldCode', 'position', 'beforeAfterField'},
+        required={'fieldCode', 'position'},
+    )
+    allowed_positions = ('Beginning', 'End', 'Before field', 'After field')
+    positions_by_case = {position.casefold(): position for position in allowed_positions}
+    position = positions_by_case.get(values['position'].casefold())
+    if position is None:
+        position_node = next(
+            keyword.value
+            for keyword in call.keywords
+            if keyword.arg and keyword.arg.casefold() == 'position'
+        )
+        raise command_error(
+            text,
+            position_node,
+            f'MoveField has an invalid position {values["position"]!r}.',
+        )
+
+    relative_field = values.get('beforeAfterField')
+    if position in ('Before field', 'After field') and relative_field is None:
+        raise command_error(
+            text,
+            call,
+            f'MoveField requires parameter {"beforeAfterField"!r} for position {position!r}.',
+        )
+    if position in ('Beginning', 'End') and relative_field is not None:
+        relative_node = next(
+            keyword
+            for keyword in call.keywords
+            if keyword.arg and keyword.arg.casefold() == 'beforeafterfield'
+        )
+        raise command_error(
+            text,
+            relative_node,
+            f'MoveField does not use parameter {"beforeAfterField"!r} '
+            f'for position {position!r}.',
+        )
+    if relative_field == values['fieldCode']:
+        relative_node = next(
+            keyword.value
+            for keyword in call.keywords
+            if keyword.arg and keyword.arg.casefold() == 'beforeafterfield'
+        )
+        raise command_error(
+            text,
+            relative_node,
+            'MoveField cannot position a field relative to itself.',
+        )
+    return MoveFieldCommand(
+        field_code=values['fieldCode'],
+        position=position,
+        before_after_field=relative_field,
     )
 
 

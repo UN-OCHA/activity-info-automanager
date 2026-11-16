@@ -11,6 +11,7 @@ from activity_manager.api import DEFAULT_BASE_URL, ActivityInfoService
 from activity_manager.combobox import FreeTextCombobox
 from activity_manager.command_creator import CommandCreatorRenderer, field_codes_from_schema
 from activity_manager.command_list import CommandListManager
+from activity_manager.command_parser import CommandTextError, parse_command_text
 from activity_manager.commands import (
     DELETE_FIELD,
     MOVE_FIELD,
@@ -296,6 +297,156 @@ class SchemaChangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('failed verification', failed.messages[-1])
 
 
+class CommandParserTests(unittest.TestCase):
+    def test_blank_lines_comments_multiline_calls_and_strings(self):
+        text = '''# Commands may include comments and blank lines.
+
+MoveField(
+    fieldCode="""FIELD
+A""",
+    position="Before field",  # inline comments are allowed
+    beforeAfterField="FIELD_B",
+)
+
+DeleteField(
+    fieldCode="FIELD_C",
+)
+'''
+
+        self.assertEqual(
+            parse_command_text(text),
+            [
+                MoveFieldCommand('FIELD\nA', 'Before field', 'FIELD_B'),
+                DeleteFieldCommand('FIELD_C'),
+            ],
+        )
+        self.assertEqual(parse_command_text('# only a comment\n\n'), [])
+
+    def test_command_names_and_parameter_keys_are_case_insensitive(self):
+        commands = parse_command_text(
+            'movefield(Position="aFtEr FiElD", FIELDCODE="A", '
+            'beforeafterFIELD="B")\nDELETEFIELD(Fieldcode="C")'
+        )
+
+        self.assertEqual(
+            commands,
+            [
+                MoveFieldCommand('A', 'After field', 'B'),
+                DeleteFieldCommand('C'),
+            ],
+        )
+        self.assertEqual(
+            [command.to_syntax() for command in commands],
+            [
+                'MoveField(fieldCode="A", position="After field", beforeAfterField="B")',
+                'DeleteField(fieldCode="C")',
+            ],
+        )
+
+        with self.assertRaisesRegex(CommandTextError, 'specified more than once'):
+            parse_command_text('DeleteField(fieldCode="A", FIELDCODE="B")')
+
+        for entered, canonical in (
+            ('BEGINNING', 'Beginning'),
+            ('end', 'End'),
+            ('BEFORE FIELD', 'Before field'),
+            ('after field', 'After field'),
+        ):
+            relative = (
+                ', beforeAfterField="B"'
+                if canonical in ('Before field', 'After field')
+                else ''
+            )
+            with self.subTest(position=entered):
+                parsed = parse_command_text(
+                    f'MoveField(fieldCode="A", position="{entered}"{relative})'
+                )
+                self.assertEqual(parsed[0].position, canonical)
+
+    def test_document_structure_errors_include_source_location(self):
+        cases = (
+            (
+                'DeleteField(fieldCode="A")\nUnknown(fieldCode="B")',
+                "Unknown command 'Unknown'.",
+                2,
+                'Unknown(fieldCode="B")',
+            ),
+            (
+                'DeleteField(fieldCode="A"); DeleteField(fieldCode="B")',
+                'line break, not a semicolon',
+                1,
+                'DeleteField(fieldCode="A"); DeleteField(fieldCode="B")',
+            ),
+            (
+                'DeleteField(fieldCode="A"',
+                "'(' was never closed",
+                1,
+                'DeleteField(fieldCode="A"',
+            ),
+            (
+                'DeleteField("A")',
+                'accepts named parameters only',
+                1,
+                'DeleteField("A")',
+            ),
+        )
+        for text, message, line, source_line in cases:
+            with self.subTest(text=text):
+                with self.assertRaises(CommandTextError) as raised:
+                    parse_command_text(text)
+                self.assertIn(message, raised.exception.message)
+                self.assertEqual(raised.exception.line, line)
+                self.assertEqual(raised.exception.source_line, source_line)
+
+    def test_multiline_ordinary_string_error_suggests_triple_quotes(self):
+        text = 'MoveField(fieldCode="A", position="before\nfield")'
+
+        with self.assertRaises(CommandTextError) as raised:
+            parse_command_text(text)
+
+        self.assertEqual(raised.exception.line, 1)
+        self.assertIn('unterminated string literal', raised.exception.message)
+        self.assertIn(
+            'Multiline values must use triple quotes (""" or \'\'\').',
+            raised.exception.message,
+        )
+
+    def test_command_specific_parameter_validation(self):
+        cases = (
+            ('DeleteField()', "requires parameter 'fieldCode'"),
+            ('DeleteField(fieldCode=123)', 'must be a string literal'),
+            ('DeleteField(fieldCode="")', 'cannot be empty'),
+            (
+                'DeleteField(fieldCode="A", other="B")',
+                "unknown parameter 'other'",
+            ),
+            (
+                'DeleteField(fieldCode="A", fieldCode="B")',
+                'specified more than once',
+            ),
+            (
+                'MoveField(fieldCode="A", position="Somewhere")',
+                "invalid position 'Somewhere'",
+            ),
+            (
+                'MoveField(fieldCode="A", position="Before field")',
+                "requires parameter 'beforeAfterField'",
+            ),
+            (
+                'MoveField(fieldCode="A", position="End", beforeAfterField="B")',
+                "does not use parameter 'beforeAfterField'",
+            ),
+            (
+                'MoveField(fieldCode="A", position="After field", beforeAfterField="A")',
+                'cannot position a field relative to itself',
+            ),
+        )
+        for text, message in cases:
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(CommandTextError, message):
+                    parse_command_text(text)
+
+
 class UITests(unittest.IsolatedAsyncioTestCase):
     async def test_form_list_errors_are_reported_in_console(self):
         service = AsyncMock(spec=ActivityInfoService)
@@ -515,20 +666,21 @@ class UITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command_list.count_badge.text, '1 command')
         self.assertEqual(command_list.advanced_editor.value, beginning.to_syntax())
 
-        edited = 'ImportedCommand(value="draft")'
-        command_list.advanced_editor.set_value(edited)
-        command_list._advanced_changed(SimpleNamespace(value=edited))
         command_list.add_command(before)
         self.assertEqual(
             command_list.advanced_editor.value,
             f'{beginning.to_syntax()}\n{before.to_syntax()}',
         )
-        command_list._view_changed(SimpleNamespace(value='advanced'))
+        command_list._view_changed(SimpleNamespace(value='text'))
         self.assertFalse(command_list.simple_view.visible)
         self.assertTrue(command_list.advanced_view.visible)
-        command_list._view_changed(SimpleNamespace(value='simple'))
+        self.assertFalse(command_list.execute_button.visible)
+        self.assertTrue(command_list.text_actions.visible)
+        command_list._view_changed(SimpleNamespace(value='list'))
         self.assertTrue(command_list.simple_view.visible)
         self.assertFalse(command_list.advanced_view.visible)
+        self.assertTrue(command_list.execute_button.visible)
+        self.assertFalse(command_list.text_actions.visible)
         self.assertEqual(
             command_list.advanced_draft,
             f'{beginning.to_syntax()}\n{before.to_syntax()}',
@@ -546,6 +698,109 @@ class UITests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(command_list.selected_index)
         self.assertEqual(command_list.count_badge.text, '1 command')
         self.assertEqual(command_list.advanced_draft, beginning.to_syntax())
+
+    def test_text_view_editing_and_discard_workflow(self):
+        command = MoveFieldCommand('A', 'Beginning')
+        text_mode_changes = []
+        with Client(ui.page('/')), ui.column():
+            command_list = CommandListManager(
+                on_text_mode_change=text_mode_changes.append,
+            )
+        command_list.add_command(command)
+
+        command_list._view_changed(SimpleNamespace(value='text'))
+        original = command.to_syntax()
+        self.assertEqual(command_list.stored_text, original)
+        self.assertEqual(command_list.advanced_editor.value, original)
+        self.assertEqual(text_mode_changes, [True])
+        self.assertTrue(command_list.apply_button.props['disable'])
+        self.assertTrue(command_list.discard_button.props['disable'])
+
+        edited = f'{original}\nDeleteField(fieldCode="B")'
+        command_list._advanced_changed(SimpleNamespace(value=edited))
+        self.assertFalse(command_list.apply_button.props['disable'])
+        self.assertFalse(command_list.discard_button.props['disable'])
+
+        command_list._view_changed(SimpleNamespace(value='list'))
+        self.assertEqual(command_list.current_view, 'text')
+        self.assertTrue(command_list.discard_dialog.value)
+        command_list.discard_dialog.close()
+        self.assertEqual(command_list.current_view, 'text')
+
+        command_list._discard_text()
+        self.assertEqual(command_list.current_view, 'list')
+        self.assertEqual(command_list.advanced_draft, original)
+        self.assertEqual(command_list.commands, [command])
+        self.assertEqual(text_mode_changes, [True, False])
+
+    def test_text_view_buttons_disable_when_edit_returns_to_snapshot(self):
+        with Client(ui.page('/')), ui.column():
+            command_list = CommandListManager()
+        command_list._view_changed(SimpleNamespace(value='text'))
+        command_list._advanced_changed(SimpleNamespace(value='changed'))
+        self.assertFalse(command_list.apply_button.props['disable'])
+        command_list._advanced_changed(SimpleNamespace(value=''))
+        self.assertTrue(command_list.apply_button.props['disable'])
+        self.assertTrue(command_list.discard_button.props['disable'])
+
+    def test_text_apply_is_atomic_and_reports_errors_without_losing_edits(self):
+        original = MoveFieldCommand('A', 'Beginning')
+        text_mode_changes = []
+        with Client(ui.page('/')), ui.column():
+            command_list = CommandListManager(
+                on_text_mode_change=text_mode_changes.append,
+            )
+        command_list.add_command(original)
+        command_list._view_changed(SimpleNamespace(value='text'))
+
+        invalid = '# keep this edit\nDeleteField(fieldCode="B"'
+        command_list.advanced_editor.set_value(invalid)
+        command_list._advanced_changed(SimpleNamespace(value=invalid))
+        command_list._apply_text()
+
+        self.assertEqual(command_list.commands, [original])
+        self.assertEqual(command_list.advanced_draft, invalid)
+        self.assertEqual(command_list.advanced_editor.value, invalid)
+        self.assertEqual(command_list.current_view, 'text')
+        self.assertTrue(command_list.parse_error_dialog.value)
+        self.assertEqual(command_list.parse_error_location.text, 'Line 2, column 12')
+        self.assertIn('never closed', command_list.parse_error_message.text)
+        self.assertEqual(
+            command_list.parse_error_source.text,
+            'DeleteField(fieldCode="B"',
+        )
+
+        command_list.parse_error_dialog.close()  # Fix keeps the edited text.
+        self.assertEqual(command_list.advanced_draft, invalid)
+        valid = '# replacement\n\nDeleteField(\n    fieldCode="B",\n)'
+        command_list.advanced_editor.set_value(valid)
+        command_list._advanced_changed(SimpleNamespace(value=valid))
+        command_list._apply_text()
+
+        self.assertEqual(command_list.commands, [DeleteFieldCommand('B')])
+        self.assertEqual(command_list.current_view, 'list')
+        self.assertEqual(command_list.count_badge.text, '1 command')
+        self.assertEqual(
+            command_list.advanced_draft,
+            'DeleteField(fieldCode="B")',
+        )
+        self.assertEqual(text_mode_changes, [True, False])
+
+    def test_parse_error_discard_restores_original_list(self):
+        original = DeleteFieldCommand('A')
+        with Client(ui.page('/')), ui.column():
+            command_list = CommandListManager()
+        command_list.add_command(original)
+        command_list._view_changed(SimpleNamespace(value='text'))
+        command_list._advanced_changed(SimpleNamespace(value='Unknown()'))
+        command_list._apply_text()
+
+        command_list._discard_parse_error()
+
+        self.assertFalse(command_list.parse_error_dialog.value)
+        self.assertEqual(command_list.current_view, 'list')
+        self.assertEqual(command_list.commands, [original])
+        self.assertEqual(command_list.advanced_draft, original.to_syntax())
 
     def test_move_field_creator_controls_and_visibility(self):
         schema = {

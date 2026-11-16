@@ -105,6 +105,7 @@ def connection_page():
     service: ActivityInfoService | None = None
     source_schema: dict | None = None
     pending_execution: dict | None = None
+    text_mode = False
     form_request = 0
     schema_request = 0
 
@@ -194,8 +195,13 @@ def connection_page():
         else:
             (databases.enable if databases.options else databases.disable)()
             (forms.enable if forms.options else forms.disable)()
-        command_creator.set_enabled(not busy)
+        command_creator.set_enabled(not busy and not text_mode)
         command_list.set_busy(busy)
+
+    def text_mode_changed(editing: bool) -> None:
+        nonlocal text_mode
+        text_mode = editing
+        command_creator.set_enabled(not editing and not command_list.busy)
 
     async def execute_confirmed():
         nonlocal pending_execution, source_schema
@@ -363,6 +369,7 @@ def connection_page():
             command_list = CommandListManager(
                 on_selection_change=selection_changed,
                 on_execute=open_execute_confirmation,
+                on_text_mode_change=text_mode_changed,
             )
 
         with ui.card().classes('workbench-panel console-panel w-full no-shadow flex flex-col'):

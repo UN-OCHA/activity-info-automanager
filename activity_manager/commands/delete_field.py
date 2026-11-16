@@ -1,3 +1,4 @@
+import ast
 import json
 from collections.abc import Mapping
 from copy import deepcopy
@@ -5,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..command_creator import CommandCreatorDefinition, ParameterDefinition
+from ..command_parser import parse_string_parameters
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,18 @@ class DeleteFieldCommand:
 
 def create_delete_field(values: Mapping[str, Any]) -> DeleteFieldCommand:
     return DeleteFieldCommand(field_code=values['field_code'])
+
+
+def parse_delete_field(text: str, call: ast.Call) -> DeleteFieldCommand:
+    """Parse and validate a DeleteField call from the Text view."""
+    values = parse_string_parameters(
+        text,
+        call,
+        'DeleteField',
+        allowed={'fieldCode'},
+        required={'fieldCode'},
+    )
+    return DeleteFieldCommand(field_code=values['fieldCode'])
 
 
 DELETE_FIELD = CommandCreatorDefinition(
