@@ -1,0 +1,84 @@
+﻿from urllib.parse import urlsplit
+
+import httpx
+from activity_info_api_client import AuthenticatedClient, errors
+from activity_info_api_client.api.default import get_database_tree, get_form_schema, get_user_databases
+from activity_info_api_client.models.database import Database
+from activity_info_api_client.models.database_resource_type import DatabaseResourceType
+from activity_info_api_client.models.form_schema import FormSchema
+
+DEFAULT_BASE_URL = 'https://www.activityinfo.org/resources'
+
+
+class ActivityInfoService:
+    """Session-scoped adapter around one reusable authenticated API client."""
+
+    def __init__(self, base_url: str, token: str):
+        base_url, token = base_url.strip(), token.strip()
+        url = urlsplit(base_url)
+        if (url.scheme not in ('http', 'https') or not url.hostname or url.username
+                or url.password or url.query or url.fragment):
+            raise ValueError('Enter a valid HTTP(S) API base URL.')
+        if not token:
+            raise ValueError('Enter an API token.')
+        self.client = AuthenticatedClient(
+            base_url=base_url.rstrip('/'), token=token,
+            timeout=httpx.Timeout(30), raise_on_unexpected_status=True,
+        )
+        self._http_client = self.client.get_async_httpx_client()
+
+    async def _request(self, endpoint, **kwargs):
+        if self._http_client.is_closed:
+            raise ValueError('The connection is closed. Connect again.')
+        try:
+            response = await endpoint.asyncio_detailed(client=self.client, **kwargs)
+        except errors.UnexpectedStatus as exc:
+            raise ValueError(f'Could not load data (HTTP {exc.status_code}).') from exc
+        except httpx.HTTPError as exc:
+            raise ValueError('Could not connect. Check the base URL and your network connection.') from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError('The server returned an invalid API response.') from exc
+        if response.status_code == 401:
+            raise ValueError('Authentication failed. Check your API token.')
+        return response.parsed
+
+    async def get_databases(self) -> dict[str, str]:
+        """Return database IDs mapped to sorted display names."""
+        databases = await self._request(get_user_databases)
+        if not isinstance(databases, list):
+            raise ValueError('The server returned an invalid database response.')
+        return {
+            database.database_id: f'{database.label} ({database.database_id})'
+            for database in sorted(
+                databases,
+                key=lambda database: (database.label.casefold(), database.database_id),
+            )
+        }
+
+    async def get_forms(self, database_id: str) -> dict[str, str]:
+        """Include forms and subforms from all folders in the flat database tree."""
+        database = await self._request(get_database_tree, database_id=database_id)
+        if not isinstance(database, Database):
+            raise ValueError('The server returned an invalid database response.')
+        forms = [
+            resource for resource in database.resources
+            if resource.type_ in (DatabaseResourceType.FORM, DatabaseResourceType.SUB_FORM)
+        ]
+        return {
+            resource.id: f'{resource.label or resource.id} ({resource.id})'
+            for resource in sorted(
+                forms,
+                key=lambda resource: (str(resource.label or resource.id).casefold(), resource.id),
+            )
+        }
+
+    async def get_form_schema(self, form_id: str) -> dict:
+        """Return a form schema as JSON-ready data."""
+        schema = await self._request(get_form_schema, form_id=form_id)
+        if not isinstance(schema, FormSchema):
+            raise ValueError('The server returned an invalid form schema response.')
+        return schema.to_dict()
+
+    async def aclose(self) -> None:
+        if not self._http_client.is_closed:
+            await self._http_client.aclose()

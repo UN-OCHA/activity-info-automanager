@@ -1,0 +1,14 @@
+[project]
+name = "activity-info-automanager"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "activity-info-api-client",
+    "httpx>=0.28.1",
+    "nicegui>=4.0.0",
+]
+
+[tool.uv.sources]
+activity-info-api-client = { git = "https://github.com/UN-OCHA/activity-info-python-client.git", tag = "v2.0.0" }
