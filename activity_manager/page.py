@@ -8,7 +8,7 @@ from nicegui import context
 from .api import DEFAULT_BASE_URL, ActivityInfoService
 from .command_creator import CommandCreatorRenderer
 from .command_list import CommandExecution, CommandListManager
-from .commands import MOVE_FIELD
+from .commands import DELETE_FIELD, MOVE_FIELD
 from .listbox import DatabaseListbox
 from .schema_change import apply_form_schema_change
 
@@ -340,7 +340,9 @@ def connection_page():
 
         with ui.card().classes('workbench-panel command-creator-panel w-full no-shadow'):
             ui.label('Command Creator').classes('text-lg font-medium')
-            command_creator = CommandCreatorRenderer((MOVE_FIELD,), on_add=add_command)
+            command_creator = CommandCreatorRenderer(
+                (MOVE_FIELD, DELETE_FIELD), on_add=add_command,
+            )
 
         with ui.card().classes('workbench-panel result-panel w-full no-shadow flex flex-col'):
             with ui.row().classes('w-full items-center justify-between'):

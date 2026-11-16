@@ -11,7 +11,12 @@ from activity_manager.api import DEFAULT_BASE_URL, ActivityInfoService
 from activity_manager.combobox import FreeTextCombobox
 from activity_manager.command_creator import CommandCreatorRenderer, field_codes_from_schema
 from activity_manager.command_list import CommandListManager
-from activity_manager.commands import MOVE_FIELD, MoveFieldCommand
+from activity_manager.commands import (
+    DELETE_FIELD,
+    MOVE_FIELD,
+    DeleteFieldCommand,
+    MoveFieldCommand,
+)
 from activity_manager.listbox import DatabaseListbox
 from activity_manager.page import connection_page
 from activity_manager.schema_change import apply_form_schema_change, schemas_match
@@ -406,6 +411,89 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             command_list.advanced_draft,
             '\n'.join([original_lines[0], original_lines[2]]),
         )
+
+    def test_delete_field_execution_syntax_and_creator_definition(self):
+        source = {
+            'id': 'form-1',
+            'elements': [
+                {'code': 'A', 'label': 'Alpha'},
+                {'code': 'B', 'label': 'Beta'},
+            ],
+        }
+        command = DeleteFieldCommand('A')
+
+        result = command.execute(source)
+
+        self.assertEqual(result['elements'], [{'code': 'B', 'label': 'Beta'}])
+        self.assertEqual(len(source['elements']), 2)
+        self.assertEqual(
+            DeleteFieldCommand('FIELD "A"').to_syntax(),
+            'DeleteField(fieldCode="FIELD \\"A\\"")',
+        )
+        with self.assertRaisesRegex(ValueError, "could not find field code 'missing'"):
+            DeleteFieldCommand('missing').execute(source)
+
+        self.assertEqual(DELETE_FIELD.key, 'delete_field')
+        self.assertEqual(DELETE_FIELD.label, 'Delete field')
+        self.assertEqual(len(DELETE_FIELD.parameters), 1)
+        self.assertEqual(DELETE_FIELD.parameters[0], MOVE_FIELD.parameters[0])
+        self.assertEqual(
+            DELETE_FIELD.create_command({'field_code': 'B'}),
+            DeleteFieldCommand('B'),
+        )
+
+    def test_field_commands_created_through_ui_modify_schema(self):
+        source = {
+            'id': 'form-1',
+            'elements': [
+                {'code': 'A', 'label': 'Alpha'},
+                {'code': 'B', 'label': 'Beta'},
+                {'code': 'C', 'label': 'Gamma'},
+            ],
+        }
+        cases = (
+            {
+                'command_key': 'move_field',
+                'values': {'field_code': 'C', 'position': 'Beginning'},
+                'expected_command': MoveFieldCommand('C', 'Beginning'),
+                'expected_codes': ['C', 'A', 'B'],
+            },
+            {
+                'command_key': 'delete_field',
+                'values': {'field_code': 'B'},
+                'expected_command': DeleteFieldCommand('B'),
+                'expected_codes': ['A', 'C'],
+            },
+        )
+
+        for case in cases:
+            with self.subTest(command=case['command_key']):
+                added = []
+                with Client(ui.page('/')), ui.column():
+                    creator = CommandCreatorRenderer(
+                        (MOVE_FIELD, DELETE_FIELD), on_add=added.append,
+                    )
+                creator.set_schema(source)
+                creator.command_select.set_value(case['command_key'])
+                creator._command_changed(None)
+
+                for parameter, value in case['values'].items():
+                    creator.controls[parameter].set_value(value)
+                    creator._parameter_changed(None)
+
+                self.assertFalse(creator.add_button.props['disable'])
+                creator._add_command()
+                self.assertEqual(added, [case['expected_command']])
+
+                result = added[0].execute(source)
+                self.assertEqual(
+                    [field['code'] for field in result['elements']],
+                    case['expected_codes'],
+                )
+                self.assertEqual(
+                    [field['code'] for field in source['elements']],
+                    ['A', 'B', 'C'],
+                )
 
     def test_move_field_syntax_and_command_list_views(self):
         beginning = MoveFieldCommand('FIELD "A"', 'Beginning')

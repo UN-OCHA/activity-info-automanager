@@ -1,0 +1,57 @@
+import json
+from collections.abc import Mapping
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any
+
+from ..command_creator import CommandCreatorDefinition, ParameterDefinition
+
+
+@dataclass(frozen=True)
+class DeleteFieldCommand:
+    field_code: str
+
+    def to_syntax(self) -> str:
+        return f'DeleteField(fieldCode={json.dumps(self.field_code, ensure_ascii=False)})'
+
+    def execute(self, schema: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(schema, dict):
+            raise TypeError('DeleteField requires a form schema object.')
+        elements = schema.get('elements')
+        if not isinstance(elements, list):
+            raise ValueError('DeleteField requires the schema to contain an elements list.')
+
+        result = deepcopy(schema)
+        result_elements = result['elements']
+        field_index = next(
+            (
+                index for index, element in enumerate(result_elements)
+                if isinstance(element, dict) and element.get('code') == self.field_code
+            ),
+            None,
+        )
+        if field_index is None:
+            raise ValueError(f'DeleteField could not find field code {self.field_code!r}.')
+
+        result_elements.pop(field_index)
+        return result
+
+
+def create_delete_field(values: Mapping[str, Any]) -> DeleteFieldCommand:
+    return DeleteFieldCommand(field_code=values['field_code'])
+
+
+DELETE_FIELD = CommandCreatorDefinition(
+    key='delete_field',
+    label='Delete field',
+    create_command=create_delete_field,
+    parameters=(
+        ParameterDefinition(
+            key='field_code',
+            label='Field code',
+            control='combobox',
+            required=True,
+            option_source='field_codes',
+        ),
+    ),
+)
