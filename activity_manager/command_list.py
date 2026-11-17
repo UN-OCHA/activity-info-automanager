@@ -54,17 +54,17 @@ class CommandListManager:
             self.count_badge = ui.badge('0 commands', color='grey')
         ui.separator()
 
-        self.simple_view = ui.column().classes('panel-body w-full grow gap-2')
+        self.simple_view = ui.column().classes('command-list-body w-full gap-2')
         with self.simple_view:
-            self.simple_content = ui.column().classes('w-full gap-2')
+            self.simple_content = ui.column().classes('w-full shrink-0 gap-2')
 
-        self.advanced_view = ui.column().classes('panel-body w-full grow')
+        self.advanced_view = ui.column().classes('command-text-body w-full')
         with self.advanced_view:
             self.advanced_editor = ui.textarea(
                 'Commands',
                 placeholder='One command per line',
                 on_change=self._advanced_changed,
-            ).props('outlined rows=12').classes('w-full')
+            ).props('outlined rows=1').classes('command-text-editor w-full')
 
         with ui.column().classes('w-full'):
             self.execute_button = ui.button(

@@ -54,6 +54,33 @@ def connection_page():
             grid-column: 3;
             grid-row: 2;
         }
+        .command-list-panel > :not(.command-list-body):not(.command-text-body) {
+            flex-shrink: 0;
+        }
+        .command-list-body, .command-text-body {
+            flex: 1 1 0;
+            min-height: 0;
+            flex-wrap: nowrap;
+        }
+        .command-list-body {
+            overflow-y: auto;
+        }
+        .command-text-body {
+            overflow: hidden;
+        }
+        .command-text-editor,
+        .command-text-editor .q-field__inner,
+        .command-text-editor .q-field__control,
+        .command-text-editor .q-field__control-container {
+            height: 100%;
+            min-height: 0;
+        }
+        .command-text-editor textarea.q-field__native {
+            height: 100%;
+            min-height: 0;
+            resize: none;
+            overflow-y: auto;
+        }
         .console-panel {
             grid-column: 2 / 4;
             grid-row: 3;
@@ -91,7 +118,11 @@ def connection_page():
             .sources-panel { grid-column: 1; grid-row: 1 / 5; }
             .command-creator-panel { grid-column: 2; grid-row: 1; }
             .result-panel { grid-column: 2; grid-row: 2; }
-            .command-list-panel { grid-column: 2; grid-row: 3; }
+            .command-list-panel {
+                grid-column: 2;
+                grid-row: 3;
+                height: max(360px, 50vh);
+            }
             .console-panel { grid-column: 2; grid-row: 4; }
         }
         @media (max-width: 700px) {
@@ -181,13 +212,18 @@ def connection_page():
         console_message.set_text(execution.message)
         show_result(execution.schema)
 
-    async def choose_recovery():
-        with ui.dialog() as dialog, ui.card().classes('w-full max-w-lg'):
+    async def choose_recovery(diff_summary: str):
+        with ui.dialog() as dialog, ui.card().classes('w-full max-w-3xl'):
             dialog.props('persistent')
             ui.label('Form schema application did not fully succeed.').classes(
                 'text-lg font-medium text-red-700'
             )
             ui.label('Roll back changes?')
+            ui.label('Differences from the expected schema:')
+            ui.label(diff_summary).classes(
+                'w-full max-h-80 overflow-y-auto whitespace-pre-wrap break-all '
+                'font-mono text-sm bg-slate-100 rounded p-2'
+            )
             with ui.row().classes('w-full justify-end gap-2'):
                 ui.button('Leave', on_click=lambda: dialog.submit('leave')).props('flat')
                 ui.button(

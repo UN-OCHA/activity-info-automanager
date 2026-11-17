@@ -33,6 +33,7 @@ class ParameterDefinition:
     enabled: bool = True
     help: str | None = None
     option_labels: Mapping[str, str] | None = None
+    inline_rows: bool = False
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,10 @@ class _ParameterEditor:
         self.relevant = True
         self.required = definition.required
         state = state or {}
-        with ui.column().classes('gap-1 rounded bg-slate-50 px-2 py-1') as self.container:
+        self.add_row_button = None
+        with ui.column().classes('creator-parameter gap-1 rounded bg-slate-100 px-2 py-1') as self.container:
+            if definition.inline_rows:
+                self.container.classes('creator-expanding-parameter')
             with ui.row().classes('items-center gap-2 flex-nowrap'):
                 self.activation = ui.checkbox(
                     value=state.get('active', definition.required or definition.initially_active),
@@ -99,7 +103,13 @@ class _ParameterEditor:
         definition = self.definition
         on_change = self.owner._parameter_changed
         if definition.control in ('group', 'repeat'):
-            ui.label(definition.label).classes('font-medium')
+            with ui.row().classes('items-center gap-2 flex-nowrap'):
+                ui.label(definition.label).classes('font-medium whitespace-nowrap')
+                if definition.inline_rows:
+                    self.add_row_button = ui.button(
+                        icon='add', on_click=lambda: self._change_rows(None, 0),
+                    ).props('flat dense round')
+                    self.add_row_button.props['aria-label'] = f'Add {definition.label} row'
         elif definition.control == 'combobox':
             self.control = FreeTextCombobox(
                 definition.label, self._options(), value=value, on_change=on_change,
@@ -110,7 +120,7 @@ class _ParameterEditor:
             ui.label(definition.label).classes('text-sm text-slate-600')
             self.control = ui.radio(
                 definition.option_labels or list(definition.options), value=value, on_change=on_change,
-            ).props('inline')
+            ).props('inline dense size=sm')
         elif definition.control == 'multi_select':
             self.control = ui.select(
                 list(definition.options), label=definition.label, multiple=True,
@@ -151,20 +161,30 @@ class _ParameterEditor:
     def _render_rows(self, states):
         self.body.clear()
         self.rows = []
-        self.buttons = []
+        self.buttons = [self.add_row_button] if self.add_row_button is not None else []
         with self.body:
             for index, state in enumerate(states):
-                with ui.column().classes('border rounded p-2 gap-2'):
+                row_factory = ui.row if self.definition.inline_rows else ui.column
+                with row_factory().classes(
+                    'items-center flex-nowrap gap-2' if self.definition.inline_rows
+                    else 'border rounded p-2 gap-2'
+                ):
                     self.rows.append(self._make_children(state))
-                    with ui.row():
-                        for label, action in [('Up', -1), ('Down', 1), ('Remove', 0)]:
+                    with ui.row().classes('flex-nowrap gap-0'):
+                        for label, icon, action in [('Up', 'keyboard_arrow_up', -1),
+                                                    ('Down', 'keyboard_arrow_down', 1),
+                                                    ('Remove', 'delete_outline', 0)]:
                             button = ui.button(
-                                label, on_click=lambda i=index, a=action: self._change_rows(i, a),
+                                None if self.definition.inline_rows else label,
+                                icon=icon if self.definition.inline_rows else None,
+                                on_click=lambda i=index, a=action: self._change_rows(i, a),
                             ).props('flat dense')
+                            button.props['aria-label'] = f'{label} row'
                             if (action == -1 and index == 0) or (action == 1 and index == len(states) - 1):
                                 button.props['data-boundary'] = True
                             self.buttons.append(button)
-            self.buttons.append(ui.button('Add row', on_click=lambda: self._change_rows(None, 0)))
+            if not self.definition.inline_rows:
+                self.buttons.append(ui.button('Add row', on_click=lambda: self._change_rows(None, 0)))
 
     def _change_rows(self, index, offset):
         states = self.snapshot()['rows']
@@ -198,6 +218,10 @@ class _ParameterEditor:
         self.activation.set_visibility(not self.required)
         self.activation.set_enabled(enabled and self.relevant and not self.required)
         active = enabled and self.relevant and self.activation.value
+        self.container.classes(
+            add='bg-blue-100' if self.activation.value else 'bg-slate-100',
+            remove='bg-slate-100' if self.activation.value else 'bg-blue-100',
+        )
         if self.control is not None:
             if was_relevant and not self.relevant:
                 self.control.set_value(
@@ -286,14 +310,36 @@ class CommandCreatorRenderer:
         self.option_sources: dict[str, list[str]] = {}
         self.enabled = True
         self._updating = False
-        with ui.row().classes('w-full items-end gap-3 flex-wrap'):
+        ui.add_css('''
+            .creator-parameter {
+                height: 64px;
+                flex-shrink: 0;
+                flex-wrap: nowrap;
+                justify-content: center;
+                overflow: auto;
+            }
+            .creator-parameter > .nicegui-row { flex-shrink: 0; }
+            .creator-parameter textarea.q-field__native {
+                min-height: 0;
+                height: 40px;
+                overflow-y: auto;
+            }
+            .creator-parameter .q-radio { min-height: 28px; }
+            .creator-expanding-parameter { height: auto; min-height: 64px; }
+            .creator-expanding-parameter .creator-parameter {
+                background: transparent;
+                padding: 0;
+            }
+        ''')
+        with ui.row().classes('w-full items-start gap-3 flex-nowrap'):
             self.command_select = ui.select(
                 {key: definition.label for key, definition in self.definitions.items()},
                 value=next(iter(self.definitions), None), label='Command',
                 on_change=self._command_changed,
-            ).classes('w-64')
-            self.parameters = ui.row().classes('w-full items-start gap-3 flex-wrap')
-            self.add_button = ui.button('Add command', icon='add', on_click=self._add_command)
+            ).classes('w-48 shrink-0 bg-white')
+            with ui.column().classes('min-w-0 flex-1 gap-3'):
+                self.parameters = ui.row().classes('w-full items-start gap-3 flex-wrap')
+                self.add_button = ui.button('Add command', icon='add', on_click=self._add_command)
         self.error = ui.label('').classes('text-sm text-red-700')
         self._render_selected_command()
 

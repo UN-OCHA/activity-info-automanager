@@ -20,7 +20,7 @@ from activity_manager.commands import (
 )
 from activity_manager.listbox import DatabaseListbox
 from activity_manager.page import connection_page
-from activity_manager.schema_change import apply_form_schema_change, schemas_match
+from activity_manager.schema_change import apply_form_schema_change, compare_schemas, schemas_match
 from activity_info_api_client.models.add_update_form_response import AddUpdateFormResponse
 from activity_info_api_client.models.form_schema import FormSchema
 
@@ -178,6 +178,39 @@ class SchemaChangeTests(unittest.IsolatedAsyncioTestCase):
         changed = FormSchema.from_dict(self.schema('A', version=9, label='Changed'))
         self.assertTrue(schemas_match(first, newer))
         self.assertFalse(schemas_match(first, changed))
+        self.assertEqual(compare_schemas(first, newer).summary, '')
+        self.assertEqual(
+            compare_schemas(first, changed).summary,
+            '$["label"]: expected "Survey"; actual "Changed"',
+        )
+
+    def test_schema_diff_reports_nested_missing_extra_and_reordered_values(self):
+        expected = self.schema('A', 'B')
+        actual = self.schema('B', 'A', 'C', version=5)
+        expected['elements'][0]['description'] = 'Expected description'
+        actual['elements'][0]['unexpected'] = None
+        comparison = compare_schemas(FormSchema.from_dict(expected), FormSchema.from_dict(actual))
+        self.assertFalse(comparison.matches)
+        self.assertIn('$["elements"][0]["code"]: expected "A"; actual "B"', comparison.summary)
+        self.assertIn('["description"]: expected "Expected description"; actual <missing>', comparison.summary)
+        self.assertNotIn('unexpected', comparison.summary)
+        self.assertIn('$["elements"][2]["code"]: expected <missing>; actual "C"', comparison.summary)
+        self.assertNotIn('schemaVersion', comparison.summary)
+
+    def test_schema_diff_ignores_missing_null_and_false_defaults_in_both_directions(self):
+        original = self.schema('A')
+        original['elements'][0]['key'] = False
+        defaults = self.schema('A')
+        defaults['elements'][0].update(description=None, typeParameters={'barcode': False})
+        for expected, actual in ((original, defaults), (defaults, original)):
+            comparison = compare_schemas(FormSchema.from_dict(expected), FormSchema.from_dict(actual))
+            self.assertTrue(comparison.matches, comparison.summary)
+            self.assertEqual(comparison.summary, '')
+        for value in (True, 0, '', [], {'barcode': True}):
+            actual = self.schema('A')
+            actual['elements'][0]['extra'] = value
+            comparison = compare_schemas(FormSchema.from_dict(original), FormSchema.from_dict(actual))
+            self.assertFalse(comparison.matches, repr(value))
 
     async def test_successful_change_is_reread_and_verified(self):
         loaded = self.schema('A', 'B', version=1)
@@ -255,15 +288,19 @@ class SchemaChangeTests(unittest.IsolatedAsyncioTestCase):
             get_form_schema=AsyncMock(side_effect=[loaded, partial]),
             put_form_schema=AsyncMock(),
         )
+        choose_leave = AsyncMock(return_value='leave')
         left = await apply_form_schema_change(
             leave_service,
             'form-1',
             loaded,
             target,
-            AsyncMock(return_value='leave'),
+            choose_leave,
         )
         self.assertEqual(left.status, 'partial_left')
         self.assertEqual(left.actual_schema, partial)
+        summary = compare_schemas(FormSchema.from_dict(target), FormSchema.from_dict(partial)).summary
+        choose_leave.assert_awaited_once_with(summary)
+        self.assertIn(summary, '\n'.join(left.messages))
 
         rollback_actual = self.schema('A', 'B', version=3)
         rollback_service = SimpleNamespace(

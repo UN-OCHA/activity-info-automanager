@@ -69,17 +69,17 @@ class AddFieldTests(unittest.TestCase):
         with Client(ui.page('/')), ui.column():
             creator = CommandCreatorRenderer((ADD_FIELD,), on_add=added.append)
         self.assertEqual(list(creator.controls), [
-            'field_type', 'field_code', 'label', 'description', 'key', 'unique', 'required',
+            'position', 'before_after_field', 'field_type', 'field_code', 'label', 'description', 'key', 'unique', 'required',
             'relevance_condition', 'required_condition', 'validation_condition', 'validation_message',
             'hide_from_entry', 'hide_in_table', 'reviewer_only', 'read_only', 'translation',
             'translation_field', 'translation_language', 'indentation_level', 'prefix_formula',
-            'input_mask', 'calculation_formula', 'metadata', 'units', 'upload_type',
+            'input_mask', 'barcode', 'calculation_formula', 'metadata', 'units', 'upload_type',
             'attachment_cardinality',
             'allowed_file_types', 'geo_accuracy', 'option_list', 'referenced_form',
             'reverse_reference_field', 'lookup_fields', 'default_value', 'default_formula',
         ])
         self.assertEqual(creator.controls['field_type'].value, 'FREE_TEXT')
-        for name in ('field_type', 'field_code', 'label'):
+        for name in ('field_type', 'field_code', 'label', 'required'):
             activation = creator.activations[name]
             self.assertTrue(activation.value)
             self.assertTrue(activation.props['disable'])
@@ -91,8 +91,8 @@ class AddFieldTests(unittest.TestCase):
         creator.controls['field_code'].set_value('name')
         creator._parameter_changed(None)
         creator._add_command()
-        self.assertEqual(added, [AddFieldCommand('name', 'Name')])
-        for name in ('key', 'unique', 'required'):
+        self.assertEqual(added, [AddFieldCommand('name', 'Name', required=False, barcode=False, position='End')])
+        for name in ('key', 'unique'):
             self.assertTrue(creator.activations[name].visible)
             self.assertFalse(creator.activations[name].value)
             creator.activations[name].set_value(True)
@@ -101,7 +101,7 @@ class AddFieldTests(unittest.TestCase):
         creator._parameter_changed(None)
         creator._add_command()
         self.assertEqual(added[-1], AddFieldCommand(
-            'name', 'Name', field_type='NARRATIVE', key=False, unique=False, required=True,
+            'name', 'Name', field_type='NARRATIVE', key=False, unique=False, required=True, position='End',
         ))
         creator.controls['field_type'].set_value('unknown')
         creator._parameter_changed(None)

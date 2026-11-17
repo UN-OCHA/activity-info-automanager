@@ -27,6 +27,44 @@ OPTIONS = {'cardinality': 'multiple', 'presentation': 'dropdown', 'values': [
 
 
 class StandardFieldTests(unittest.TestCase):
+    def test_add_field_positions_roundtrip_and_preserve_source(self):
+        source = schema()
+        before = deepcopy(source)
+        for position, relative, codes in (
+            (None, None, ['old', 'new']),
+            ('End', None, ['old', 'new']),
+            ('Beginning', None, ['new', 'old']),
+            ('Before field', 'old', ['new', 'old']),
+            ('After field', 'old', ['old', 'new']),
+        ):
+            with self.subTest(position=position):
+                command = AddFieldCommand('new', 'New', position=position, before_after_field=relative)
+                self.assertEqual(parse_command_text(command.to_syntax()), [command])
+                result = command.execute(source)
+                self.assertEqual([field['code'] for field in result['elements']], codes)
+                self.assertEqual(source, before)
+        for settings in (
+            {'position': 'Elsewhere'}, {'position': 'Before field'},
+            {'position': 'After field', 'before_after_field': 'new'},
+            {'position': 'End', 'before_after_field': 'old'},
+        ):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                AddFieldCommand('new', 'New', **settings)
+        with self.assertRaisesRegex(ValueError, 'could not find'):
+            AddFieldCommand('new', 'New', position='Before field', before_after_field='missing').execute(source)
+        self.assertEqual(source, before)
+        command = parse_command_text('AddField(fieldCode="new", label="New", position="beginning")')[0]
+        self.assertEqual(command.position, 'Beginning')
+
+    def test_key_is_written_only_when_explicit_and_required_defaults_false(self):
+        field = AddFieldCommand('new', 'New').execute(schema())['elements'][-1]
+        self.assertNotIn('key', field)
+        self.assertIs(field['required'], False)
+        for value in (False, True):
+            command = AddFieldCommand('new', 'New', key=value)
+            field = self.roundtrip(command)
+            self.assertIs(field['key'], value)
+
     def roundtrip(self, command):
         self.assertEqual(parse_command_text(command.to_syntax()), [command])
         return command.execute(schema())['elements'][-1]
@@ -58,6 +96,8 @@ class StandardFieldTests(unittest.TestCase):
             ('section', {'indentation_level': 2}, {'indentationLevel': 2}),
             ('serial', {'prefix_formula': '"ID-"'}, {'prefixFormula': '"ID-"'}),
             ('FREE_TEXT', {'input_mask': 'AAA-999'}, {'inputMask': 'AAA-999'}),
+            ('FREE_TEXT', {'barcode': True}, {'barcode': True}),
+            ('FREE_TEXT', {'barcode': False}, {'barcode': False}),
             ('calculated', {'calculation_formula': '1 + 2'}, {'formula': '1 + 2'}),
             ('quantity', {'units': 'kg', 'default_value': '-2.5'}, {'units': 'kg'}),
             ('geopoint', {'geo_accuracy': 2.5, 'default_value': '{"latitude": -2, "longitude": 3}'},
@@ -233,6 +273,42 @@ class SharedFieldDefinitionTests(unittest.TestCase):
 
 
 class ExpandedEditorTests(unittest.TestCase):
+    def test_add_field_position_controls(self):
+        creator = self.creator()
+        creator.set_schema(schema())
+        self.assertEqual(creator.values()['position'], 'End')
+        self.assertFalse(creator.parameter_containers['before_after_field'].visible)
+        creator.controls['position'].set_value('Before field')
+        creator._parameter_changed(None)
+        self.assertTrue(creator.parameter_containers['before_after_field'].visible)
+        self.assertFalse(creator.activations['before_after_field'].visible)
+        self.assertEqual(creator.controls['before_after_field'].options, ['old'])
+        self.assertTrue(creator.add_button.props['disable'])
+        creator.controls['before_after_field'].set_value('old')
+        creator._parameter_changed(None)
+        self.assertFalse(creator.add_button.props['disable'])
+        command = ADD_FIELD.create_command(creator.values())
+        self.assertEqual(command.execute(schema())['elements'][0]['code'], 'new')
+        creator.controls['position'].set_value('End')
+        creator._parameter_changed(None)
+        self.assertNotIn('before_after_field', creator.values())
+
+    def test_barcode_is_required_only_for_free_text(self):
+        creator = self.creator()
+        self.assertTrue(creator.parameter_containers['barcode'].visible)
+        self.assertFalse(creator.activations['barcode'].visible)
+        self.assertIs(creator.values()['barcode'], False)
+        creator.controls['barcode'].set_value(True)
+        creator._parameter_changed(None)
+        command = ADD_FIELD.create_command(creator.values())
+        self.assertTrue(command.execute(schema())['elements'][-1]['typeParameters']['barcode'])
+        creator.controls['field_type'].set_value('quantity')
+        creator._parameter_changed(None)
+        self.assertFalse(creator.parameter_containers['barcode'].visible)
+        self.assertNotIn('barcode', creator.values())
+        with self.assertRaises(ValueError):
+            AddFieldCommand('new', 'New', field_type='quantity', barcode=False)
+
     def creator(self):
         with Client(ui.page('/')), ui.column():
             creator = CommandCreatorRenderer((ADD_FIELD,))
@@ -241,12 +317,11 @@ class ExpandedEditorTests(unittest.TestCase):
         creator._parameter_changed(None)
         return creator
 
-    def test_required_condition_depends_on_included_true_boolean(self):
+    def test_required_condition_depends_on_required_value(self):
         creator = self.creator()
         self.assertFalse(creator.parameter_containers['required_condition'].visible)
-        creator.activations['required'].set_value(True)
-        creator._parameter_changed(None)
-        self.assertFalse(creator.parameter_containers['required_condition'].visible)
+        self.assertFalse(creator.activations['required'].visible)
+        self.assertIs(creator.values()['required'], False)
         creator.controls['required'].set_value(True)
         creator._parameter_changed(None)
         self.assertTrue(creator.parameter_containers['required_condition'].visible)
@@ -255,14 +330,10 @@ class ExpandedEditorTests(unittest.TestCase):
         creator._parameter_changed(None)
         command = ADD_FIELD.create_command(creator.values())
         self.assertEqual(command.execute(schema())['elements'][-1]['requiredCondition'], 'old != ""')
-        creator.activations['required'].set_value(False)
-        creator._parameter_changed(None)
-        self.assertFalse(creator.parameter_containers['required_condition'].visible)
-        self.assertNotIn('required_condition', creator.values())
-        creator.activations['required'].set_value(True)
         creator.controls['required'].set_value(False)
         creator._parameter_changed(None)
         self.assertFalse(creator.parameter_containers['required_condition'].visible)
+        self.assertNotIn('required_condition', creator.values())
 
     def test_metadata_hides_conflicting_drafts_and_uses_current_database_users(self):
         for metadata in ('ADDED_BY', 'LAST_EDITED_BY'):
@@ -402,7 +473,7 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
             lookup = next(editor for editor in creator.editors if editor.definition.key == 'lookup_fields')
             lookup.activation.set_value(True)
             lookup._change_rows(None, 0)
-            lookup.rows[0][0].control.set_value('CONCAT(Name, Code)')
+            lookup.rows[0][1].control.set_value('CONCAT(Name, Code)')
             creator.controls['referenced_form'].set_value('slow')
             old = asyncio.create_task(creator.on_parameter_change(creator))
             await asyncio.wait_for(started.wait(), timeout=2)
@@ -410,11 +481,11 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
             await creator.on_parameter_change(creator)
             pending.set_result({'elements': [{'code': 'Stale'}]})
             await old
-            self.assertEqual(lookup.rows[0][0].control.options, ['Name', 'Code'])
-            self.assertEqual(lookup.rows[0][0].control.value, 'CONCAT(Name, Code)')
+            self.assertEqual(lookup.rows[0][1].control.options, ['Name', 'Code'])
+            self.assertEqual(lookup.rows[0][1].control.value, 'CONCAT(Name, Code)')
             creator.controls['referenced_form'].set_value('form1')
             await creator.on_parameter_change(creator)
-            self.assertEqual(lookup.rows[0][0].control.options, ['old'])
+            self.assertEqual(lookup.rows[0][1].control.options, ['old'])
             self.assertEqual(service.get_form_schema.await_count, 3)
 
     async def test_reverse_reference_resolves_code_on_target_form_at_write(self):

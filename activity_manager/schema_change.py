@@ -1,5 +1,6 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+import json
 from typing import Literal, Protocol
 
 from activity_info_api_client.models.form_schema import FormSchema
@@ -32,13 +33,59 @@ class SchemaChangeOutcome:
     messages: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class SchemaComparison:
+    matches: bool
+    summary: str
+
+
+def compare_schemas(expected: FormSchema, actual: FormSchema) -> SchemaComparison:
+    """Describe differences by JSON path, ignoring the root schemaVersion.
+
+    Arrays are compared by position because field and option order is significant.
+    Missing properties match null/false, including nested object defaults.
+    An empty summary means the schemas match.
+    """
+    expected_data = expected.to_dict()
+    actual_data = actual.to_dict()
+    expected_data.pop('schemaVersion', None)
+    actual_data.pop('schemaVersion', None)
+    missing = object()
+    differences: list[str] = []
+
+    def display(value):
+        return '<missing>' if value is missing else json.dumps(value, ensure_ascii=False)
+
+    def visit(wanted, found, path):
+        if (wanted is None or wanted is False) and (found is None or found is False):
+            return
+        if wanted is missing or found is missing:
+            present = found if wanted is missing else wanted
+            if present is None or present is False:
+                return
+            if isinstance(present, dict):
+                visit({} if wanted is missing else wanted,
+                      {} if found is missing else found, path)
+                return
+        if isinstance(wanted, dict) and isinstance(found, dict):
+            for key in sorted(wanted.keys() | found.keys()):
+                visit(wanted.get(key, missing), found.get(key, missing),
+                      f'{path}[{json.dumps(key, ensure_ascii=False)}]')
+        elif isinstance(wanted, list) and isinstance(found, list):
+            for index in range(max(len(wanted), len(found))):
+                visit(wanted[index] if index < len(wanted) else missing,
+                      found[index] if index < len(found) else missing,
+                      f'{path}[{index}]')
+        elif wanted != found or (isinstance(wanted, bool) != isinstance(found, bool)):
+            differences.append(f'{path}: expected {display(wanted)}; actual {display(found)}')
+
+    visit(expected_data, actual_data, '$')
+    return SchemaComparison(not differences, '\n'.join(differences))
+
+
 def schemas_match(left: FormSchema, right: FormSchema) -> bool:
-    """Compare complete schemas, ignoring only the server-managed version."""
-    left_data = left.to_dict()
-    right_data = right.to_dict()
-    left_data.pop('schemaVersion', None)
-    right_data.pop('schemaVersion', None)
-    return left_data == right_data
+    """Boolean convenience wrapper for schema comparison."""
+    return compare_schemas(left, right).matches
 
 
 def _as_form_schema(schema: dict, description: str) -> FormSchema:
@@ -53,7 +100,7 @@ async def apply_form_schema_change(
     form_id: str,
     loaded_schema: dict,
     target_schema: dict,
-    choose_recovery: Callable[[], Awaitable[RecoveryChoice]],
+    choose_recovery: Callable[[str], Awaitable[RecoveryChoice]],
 ) -> SchemaChangeOutcome:
     """Safely write, verify, and when requested roll back a form schema."""
     try:
@@ -106,12 +153,14 @@ async def apply_form_schema_change(
         messages.append('Schema not changed: the actual schema matches the rollback schema.')
         return SchemaChangeOutcome('unchanged', actual_schema, tuple(messages))
 
-    if schemas_match(actual_model, target_model):
+    verification = compare_schemas(target_model, actual_model)
+    if verification.matches:
         messages.append('Form schema successfully changed and verified.')
         return SchemaChangeOutcome('success', actual_schema, tuple(messages))
 
     messages.append('Form schema application did not fully succeed.')
-    choice = await choose_recovery()
+    messages.append(f'Differences from the expected schema:\n{verification.summary}')
+    choice = await choose_recovery(verification.summary)
     if choice == 'leave':
         messages.append('User chose Leave; the partially changed schema was not rolled back.')
         return SchemaChangeOutcome('partial_left', actual_schema, tuple(messages))
@@ -130,12 +179,14 @@ async def apply_form_schema_change(
         messages.append(f'Could not verify the rollback: {exc}')
         return SchemaChangeOutcome('rollback_failed', actual_schema, tuple(messages))
 
-    if rollback_error is None and schemas_match(after_rollback_model, rollback_model):
+    rollback_comparison = compare_schemas(rollback_model, after_rollback_model)
+    if rollback_error is None and rollback_comparison.matches:
         messages.append('Rollback successfully applied and verified.')
         return SchemaChangeOutcome('rolled_back', after_rollback, tuple(messages))
 
-    if not schemas_match(after_rollback_model, rollback_model):
-        messages.append('Rollback failed verification: the actual schema does not match the rollback schema.')
+    if not rollback_comparison.matches:
+        messages.append('Rollback failed verification: the actual schema does not match the rollback schema.\n'
+                        + rollback_comparison.summary)
     else:
         messages.append('Rollback schema was restored, but the rollback request reported an error.')
     return SchemaChangeOutcome('rollback_failed', after_rollback, tuple(messages))

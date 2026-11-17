@@ -10,9 +10,17 @@ from ..command_creator import CommandCreatorDefinition
 from ..command_parser import command_error, parse_literal_parameters
 from ..schema_identity import field_code_error, pending_field_id
 from ..field_parameters import (
-    FIELD_ARGUMENTS as ARGUMENTS, FIELD_TYPES_BY_CASE, FILE_TYPES, UPLOAD_TYPES, field_type_error,
+    FIELD_ARGUMENTS, FIELD_TYPES_BY_CASE, FILE_TYPES, UPLOAD_TYPES, field_type_error,
 )
 from .add_field_parameters import ADD_FIELD_PARAMETERS
+
+
+ARGUMENTS = {
+    'field_type': FIELD_ARGUMENTS['field_type'],
+    'position': 'position',
+    'before_after_field': 'beforeAfterField',
+    **{key: value for key, value in FIELD_ARGUMENTS.items() if key != 'field_type'},
+}
 
 
 class FieldParameterError(ValueError):
@@ -68,6 +76,7 @@ class AddFieldCommand:
     indentation_level: int | None = None
     prefix_formula: str | None = None
     input_mask: str | None = None
+    barcode: bool | None = None
     calculation_formula: str | None = None
     metadata: str | None = None
     units: str | None = None
@@ -81,8 +90,22 @@ class AddFieldCommand:
     lookup_fields: list[dict] | None = None
     default_value: Any = None
     default_formula: str | None = None
+    position: str | None = None
+    before_after_field: str | None = None
 
     def __post_init__(self):
+        if self.position is not None:
+            positions = {value.casefold(): value for value in ('Beginning', 'End', 'Before field', 'After field')}
+            if not isinstance(self.position, str) or self.position.casefold() not in positions:
+                fail('position', f'AddField has an invalid position: {self.position!r}.')
+            object.__setattr__(self, 'position', positions[self.position.casefold()])
+        if self.position in ('Before field', 'After field'):
+            if not isinstance(self.before_after_field, str) or not self.before_after_field.strip():
+                fail('before_after_field', 'AddField requires beforeAfterField for this position.')
+            if self.before_after_field == self.field_code:
+                fail('before_after_field', 'AddField cannot position a field relative to itself.')
+        elif self.before_after_field is not None:
+            fail('before_after_field', 'AddField does not use beforeAfterField for this position.')
         error = field_type_error(self.field_type)
         if error:
             fail('field_type', error)
@@ -93,7 +116,7 @@ class AddFieldCommand:
         if not isinstance(self.label, str) or not self.label.strip():
             fail('label', 'Field label is required.')
         bools = ('key', 'unique', 'required', 'hide_from_entry', 'hide_in_table',
-                 'reviewer_only', 'read_only', 'translation')
+                 'reviewer_only', 'read_only', 'translation', 'barcode')
         texts = ('description', 'translation_field', 'prefix_formula', 'input_mask',
                  'calculation_formula', 'metadata', 'units', 'referenced_form', 'default_formula',
                  'relevance_condition', 'required_condition', 'validation_condition', 'validation_message',
@@ -110,7 +133,7 @@ class AddFieldCommand:
             'translation_field': ('FREE_TEXT', 'NARRATIVE', 'calculated'),
             'translation_language': ('FREE_TEXT', 'NARRATIVE', 'calculated'),
             'indentation_level': ('section',), 'prefix_formula': ('serial',),
-            'input_mask': ('FREE_TEXT',), 'calculation_formula': ('calculated',),
+            'input_mask': ('FREE_TEXT',), 'barcode': ('FREE_TEXT',), 'calculation_formula': ('calculated',),
             'metadata': ('reference',), 'units': ('quantity',),
             'upload_type': ('attachment',), 'allowed_file_types': ('attachment',),
             'attachment_cardinality': ('attachment',),
@@ -257,9 +280,8 @@ class AddFieldCommand:
         result = deepcopy(schema)
         field = {'id': pending_field_id(self.field_code), 'code': self.field_code,
                  'label': self.label, 'type': self.field_type,
-                 'required': self.required if self.required is not None else False,
-                 'key': self.key if self.key is not None else False}
-        direct = {'description': 'description', 'unique': 'unique', 'read_only': 'readOnly',
+                 'required': self.required if self.required is not None else False}
+        direct = {'key': 'key', 'description': 'description', 'unique': 'unique', 'read_only': 'readOnly',
                   'default_value': 'defaultValue', 'default_formula': 'defaultValueFormula',
                   'relevance_condition': 'relevanceCondition', 'required_condition': 'requiredCondition',
                   'validation_condition': 'validationCondition', 'validation_message': 'validationMessage'}
@@ -272,7 +294,7 @@ class AddFieldCommand:
                 field[wire_key] = not getattr(self, name)
         parameters = {}
         type_values = {'indentation_level': 'indentationLevel', 'prefix_formula': 'prefixFormula',
-                       'input_mask': 'inputMask', 'calculation_formula': 'formula', 'units': 'units',
+                       'input_mask': 'inputMask', 'barcode': 'barcode', 'calculation_formula': 'formula', 'units': 'units',
                        'upload_type': 'captureMethods', 'allowed_file_types': 'fileTypes',
                        'attachment_cardinality': 'cardinality',
                        'geo_accuracy': 'requiredAccuracy'}
@@ -324,7 +346,18 @@ class AddFieldCommand:
             parameters['range'] = [{'formId': target}]
         if parameters:
             field['typeParameters'] = parameters
-        result['elements'].append(field)
+        elements = result['elements']
+        if self.position == 'Beginning':
+            elements.insert(0, field)
+        elif self.position in ('Before field', 'After field'):
+            relative_index = next((index for index, element in enumerate(elements)
+                                   if isinstance(element, dict)
+                                   and element.get('code') == self.before_after_field), None)
+            if relative_index is None:
+                raise ValueError(f'AddField could not find before/after field code {self.before_after_field!r}.')
+            elements.insert(relative_index + (self.position == 'After field'), field)
+        else:
+            elements.append(field)
         return result
 
 
@@ -343,7 +376,7 @@ def validate_add_field(values):
 def parse_add_field(text: str, call: ast.Call) -> AddFieldCommand:
     types = {argument: str for argument in ARGUMENTS.values()}
     for key in ('key', 'unique', 'required', 'hide_from_entry', 'hide_in_table', 'reviewer_only',
-                'read_only', 'translation'):
+                'read_only', 'translation', 'barcode'):
         types[ARGUMENTS[key]] = bool
     types.update({'indentationLevel': int, 'geoAccuracy': (int, float),
                   'translationLanguage': (str, list), 'uploadType': list, 'allowedFileTypes': list,
