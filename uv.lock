@@ -9,8 +9,8 @@ resolution-markers = [
 
 [[package]]
 name = "activity-info-api-client"
-version = "2.0.1"
-source = { git = "https://github.com/UN-OCHA/activity-info-python-client.git?tag=v2.0.1#f0ff2f812ae2d1c04cef5c08b680815fff9994be" }
+version = "2.0.2"
+source = { git = "https://github.com/UN-OCHA/activity-info-python-client.git?tag=v2.0.2#c8c49ff7d26a254b967d4dabf951462f72281a79" }
 dependencies = [
     { name = "attrs" },
     { name = "httpx" },
@@ -28,7 +28,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "activity-info-api-client", git = "https://github.com/UN-OCHA/activity-info-python-client.git?tag=v2.0.1" },
+    { name = "activity-info-api-client", git = "https://github.com/UN-OCHA/activity-info-python-client.git?tag=v2.0.2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "nicegui", specifier = ">=4.0.0" },
 ]

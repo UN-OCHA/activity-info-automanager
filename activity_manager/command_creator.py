@@ -1,13 +1,15 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Literal
 
-from nicegui import ui
+from nicegui import events, ui
 
 from .combobox import FreeTextCombobox
 
 
-ControlType = Literal['combobox', 'single_select']
+Condition = tuple[str, tuple[Any, ...]] | Callable[[Mapping[str, Any]], bool]
+ControlType = Literal['text', 'combobox', 'single_select', 'multi_select', 'boolean', 'group', 'repeat']
 
 
 @dataclass(frozen=True)
@@ -18,7 +20,19 @@ class ParameterDefinition:
     required: bool = False
     options: tuple[str, ...] = ()
     option_source: str | None = None
-    visible_when: tuple[str, tuple[str, ...]] | None = None
+    visible_when: Condition | None = None
+    required_when: Condition | None = None
+    path: str | None = None
+    value_type: Literal['string', 'integer', 'number', 'boolean'] = 'string'
+    multiline: bool = False
+    blank_action: Literal['empty', 'unset'] = 'empty'
+    children: tuple['ParameterDefinition', ...] = ()
+    default: Any = None
+    initially_active: bool = False
+    validate: Callable[[Any], str | None] | None = None
+    enabled: bool = True
+    help: str | None = None
+    option_labels: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +41,7 @@ class CommandCreatorDefinition:
     label: str
     parameters: tuple[ParameterDefinition, ...]
     create_command: Callable[[Mapping[str, Any]], Any]
+    validate_values: Callable[[Mapping[str, Any]], str | None] | None = None
 
 
 def field_codes_from_schema(schema: dict[str, Any] | None) -> list[str]:
@@ -44,141 +59,347 @@ def field_codes_from_schema(schema: dict[str, Any] | None) -> list[str]:
     return codes
 
 
-class CommandCreatorRenderer:
-    """Render command parameter definitions using shared NiceGUI controls."""
+class _ParameterEditor:
+    """One recursive parameter node; activation is independent of its value."""
 
-    def __init__(
-        self,
-        definitions: tuple[CommandCreatorDefinition, ...],
-        *,
-        on_add: Callable[[Any], None] | None = None,
-    ) -> None:
+    def __init__(self, owner, definition, *, state=None):
+        self.owner = owner
+        self.definition = definition
+        self.children: list[_ParameterEditor] = []
+        self.rows: list[list[_ParameterEditor]] = []
+        self.buttons = []
+        self.control = None
+        self.relevant = True
+        self.required = definition.required
+        state = state or {}
+        with ui.column().classes('gap-1 rounded bg-slate-50 px-2 py-1') as self.container:
+            with ui.row().classes('items-center gap-2 flex-nowrap'):
+                self.activation = ui.checkbox(
+                    value=state.get('active', definition.required or definition.initially_active),
+                    on_change=owner._parameter_changed,
+                ).props('dense size=sm').classes('shrink-0')
+                self.activation.tooltip('Include this parameter')
+                self.activation.props['aria-label'] = f'Include {definition.label}'
+                self.activation.props['data-activation'] = definition.key
+                if definition.help:
+                    self.container.tooltip(definition.help)
+                with ui.column().classes('gap-1 min-w-0'):
+                    self._render_control(state.get('value', definition.default))
+            if definition.control in ('group', 'repeat'):
+                self.body = ui.column().classes('w-full pl-4 gap-2')
+                if definition.control == 'group':
+                    with self.body:
+                        self.children = self._make_children(state.get('children', []))
+                else:
+                    self._render_rows(state.get('rows', []))
+            if self.control is not None:
+                self.control.props['data-parameter'] = definition.key
+
+    def _render_control(self, value):
+        definition = self.definition
+        on_change = self.owner._parameter_changed
+        if definition.control in ('group', 'repeat'):
+            ui.label(definition.label).classes('font-medium')
+        elif definition.control == 'combobox':
+            self.control = FreeTextCombobox(
+                definition.label, self._options(), value=value, on_change=on_change,
+            )
+            if definition.multiline:
+                self.control.props('type=textarea autogrow')
+        elif definition.control == 'single_select':
+            ui.label(definition.label).classes('text-sm text-slate-600')
+            self.control = ui.radio(
+                definition.option_labels or list(definition.options), value=value, on_change=on_change,
+            ).props('inline')
+        elif definition.control == 'multi_select':
+            self.control = ui.select(
+                list(definition.options), label=definition.label, multiple=True,
+                value=list(value or []), on_change=on_change,
+            ).props('dense use-chips').classes('min-w-56')
+        elif definition.control == 'boolean':
+            with ui.row().classes('items-center gap-2 flex-nowrap'):
+                ui.label(f'{definition.label}:').classes('text-sm text-slate-700 whitespace-nowrap')
+                self.control = ui.checkbox(value=bool(value), on_change=on_change).props('dense size=md')
+                self.control.props['aria-label'] = definition.label
+        else:
+            factory = ui.textarea if definition.multiline else ui.input
+            self.control = factory(
+                definition.label, value='' if value is None else str(value), on_change=on_change,
+            )
+
+    def _options(self):
+        if self.definition.option_source == 'field_codes':
+            return field_codes_from_schema(self.owner.schema)
+        if self.definition.option_source in self.owner.option_sources:
+            return self.owner.option_sources[self.definition.option_source]
+        return self.definition.options
+
+    def _make_children(self, states):
+        return [
+            _ParameterEditor(self.owner, child, state=states[index] if index < len(states) else None)
+            for index, child in enumerate(self.definition.children)
+        ]
+
+    def snapshot(self):
+        return {
+            'active': self.activation.value,
+            'value': self.control.value if self.control is not None else None,
+            'children': [child.snapshot() for child in self.children],
+            'rows': [[child.snapshot() for child in row] for row in self.rows],
+        }
+
+    def _render_rows(self, states):
+        self.body.clear()
+        self.rows = []
+        self.buttons = []
+        with self.body:
+            for index, state in enumerate(states):
+                with ui.column().classes('border rounded p-2 gap-2'):
+                    self.rows.append(self._make_children(state))
+                    with ui.row():
+                        for label, action in [('Up', -1), ('Down', 1), ('Remove', 0)]:
+                            button = ui.button(
+                                label, on_click=lambda i=index, a=action: self._change_rows(i, a),
+                            ).props('flat dense')
+                            if (action == -1 and index == 0) or (action == 1 and index == len(states) - 1):
+                                button.props['data-boundary'] = True
+                            self.buttons.append(button)
+            self.buttons.append(ui.button('Add row', on_click=lambda: self._change_rows(None, 0)))
+
+    def _change_rows(self, index, offset):
+        states = self.snapshot()['rows']
+        if index is None:
+            states.append([])
+        elif offset:
+            other = index + offset
+            if not 0 <= other < len(states):
+                return
+            states[index], states[other] = states[other], states[index]
+        else:
+            states.pop(index)
+        self.owner._updating = True
+        try:
+            self._render_rows(states)
+        finally:
+            self.owner._updating = False
+        self.owner._parameter_changed(None)
+
+    def refresh(self, siblings, enabled):
+        definition = self.definition
+        enabled = enabled and definition.enabled
+        was_relevant = self.relevant
+        self.relevant = self._matches(definition.visible_when, siblings)
+        self.required = definition.required or (
+            definition.required_when is not None and self._matches(definition.required_when, siblings)
+        )
+        self.container.set_visibility(self.relevant)
+        if self.required:
+            self.activation.set_value(True)
+        self.activation.set_visibility(not self.required)
+        self.activation.set_enabled(enabled and self.relevant and not self.required)
+        active = enabled and self.relevant and self.activation.value
+        if self.control is not None:
+            if was_relevant and not self.relevant:
+                self.control.set_value(
+                    [] if definition.control == 'multi_select'
+                    else False if definition.control == 'boolean' else None
+                )
+            getattr(self.control, 'enable' if active else 'disable')()
+            if isinstance(self.control, FreeTextCombobox):
+                options = list(self._options())
+                if self.control.options != options:
+                    self.control.set_suggestions(options)
+        for button in self.buttons:
+            button.set_enabled(active and not button.props.get('data-boundary', False))
+        for children in [self.children, *self.rows]:
+            self.owner._refresh_editors(children, active)
+
+    @staticmethod
+    def _matches(condition, values):
+        if callable(condition):
+            return condition(values)
+        return condition is None or values.get(condition[0]) in condition[1]
+
+    def raw_value(self):
+        return (
+            self.control.value
+            if self.control is not None and self.activation.value and self.relevant
+            and self.definition.enabled else None
+        )
+
+    def value(self):
+        definition = self.definition
+        if definition.control == 'group':
+            value = self.owner._collect(self.children)
+        elif definition.control == 'repeat':
+            value = [self.owner._collect(row) for row in self.rows]
+        else:
+            value = self.raw_value()
+            blank = value is None or isinstance(value, str) and not value.strip()
+            if definition.control == 'multi_select':
+                if not isinstance(value, list) or any(item not in definition.options for item in value):
+                    raise ValueError(f'{definition.label} must contain only listed choices.')
+                if self.required and not value:
+                    raise ValueError(f'{definition.label} requires at least one choice.')
+            if self.required and blank:
+                raise ValueError(f'{definition.label} is required.')
+            if blank:
+                value = None if definition.blank_action == 'unset' else ''
+            elif definition.control == 'boolean' or definition.value_type == 'boolean':
+                if not isinstance(value, bool):
+                    raise ValueError(f'{definition.label} must be a boolean.')
+            elif definition.value_type in ('integer', 'number'):
+                try:
+                    value = int(value) if definition.value_type == 'integer' else float(value)
+                    if not isfinite(value):
+                        raise ValueError
+                except (ValueError, TypeError, OverflowError):
+                    raise ValueError(f'{definition.label} must be a finite {definition.value_type}.') from None
+            if definition.control == 'single_select' and value not in definition.options and not blank:
+                raise ValueError(f'{definition.label} must be one of the listed choices.')
+        if self.required and definition.control == 'repeat' and not value:
+            raise ValueError(f'{definition.label} requires at least one row.')
+        if definition.validate:
+            error = definition.validate(value)
+            if error:
+                raise ValueError(error)
+        return value
+
+
+class CommandCreatorRenderer:
+    """Render declarative, typed parameters, including nested and repeated groups.
+
+    Inactive parameters are omitted. Active blank values are '' or None according
+    to blank_action, and an active unchecked boolean is explicitly False.
+    Conditions refer to sibling keys; dotted paths control the output mapping.
+    """
+
+    def __init__(self, definitions: tuple[CommandCreatorDefinition, ...], *, on_add=None, on_parameter_change=None):
         self.definitions = {definition.key: definition for definition in definitions}
         self.on_add = on_add
+        self.on_parameter_change = on_parameter_change
         self.controls: dict[str, Any] = {}
+        self.activations: dict[str, Any] = {}
         self.parameter_containers: dict[str, ui.element] = {}
+        self.editors: list[_ParameterEditor] = []
         self.schema: dict[str, Any] | None = None
-
-        first_key = next(iter(self.definitions), None)
+        self.option_sources: dict[str, list[str]] = {}
+        self.enabled = True
+        self._updating = False
         with ui.row().classes('w-full items-end gap-3 flex-wrap'):
             self.command_select = ui.select(
                 {key: definition.label for key, definition in self.definitions.items()},
-                value=first_key,
-                label='Command',
+                value=next(iter(self.definitions), None), label='Command',
                 on_change=self._command_changed,
             ).classes('w-64')
-            self.parameters = ui.row().classes('grow items-end gap-3 flex-wrap')
-            self.add_button = ui.button(
-                'Add command', icon='add', on_click=self._add_command,
-            )
-            self.add_button.disable()
-
+            self.parameters = ui.row().classes('w-full items-start gap-3 flex-wrap')
+            self.add_button = ui.button('Add command', icon='add', on_click=self._add_command)
+        self.error = ui.label('').classes('text-sm text-red-700')
         self._render_selected_command()
 
-    def _command_changed(self, event) -> None:
+    def _command_changed(self, event):
         self._render_selected_command()
 
-    def _render_selected_command(self) -> None:
-        self.parameters.clear()
-        self.controls.clear()
-        self.parameter_containers.clear()
-        definition = self.definitions.get(self.command_select.value)
-        if not definition:
+    def _render_selected_command(self):
+        self._updating = True
+        try:
+            self.parameters.clear()
+            self.controls.clear()
+            self.activations.clear()
+            self.parameter_containers.clear()
+            definition = self.definitions.get(self.command_select.value)
+            with self.parameters:
+                self.editors = [
+                    _ParameterEditor(self, parameter) for parameter in definition.parameters
+                ] if definition else []
+            for editor in self.editors:
+                key = editor.definition.key
+                self.controls[key] = editor.control
+                self.activations[key] = editor.activation
+                self.parameter_containers[key] = editor.container
+        finally:
+            self._updating = False
+        self._parameter_changed(None)
+
+    def _parameter_changed(self, event):
+        if self._updating:
             return
-
-        with self.parameters:
-            for parameter in definition.parameters:
-                with ui.column().classes('gap-1') as container:
-                    if parameter.control == 'combobox':
-                        options = (
-                            field_codes_from_schema(self.schema)
-                            if parameter.option_source == 'field_codes'
-                            else parameter.options
-                        )
-                        control = FreeTextCombobox(
-                            parameter.label,
-                            options,
-                            on_change=self._parameter_changed,
-                        )
-                    else:
-                        ui.label(parameter.label).classes('text-sm text-slate-600')
-                        control = ui.radio(
-                            list(parameter.options),
-                            on_change=self._parameter_changed,
-                        ).props('inline')
-                    control.props['data-parameter'] = parameter.key
-                self.controls[parameter.key] = control
-                self.parameter_containers[parameter.key] = container
-
         self._update_conditional_visibility()
         self._update_add_button()
+        events.handle_event(self.on_parameter_change, self)
 
-    def _parameter_changed(self, event) -> None:
-        self._update_conditional_visibility()
-        self._update_add_button()
-
-    def _update_conditional_visibility(self) -> None:
-        definition = self.definitions.get(self.command_select.value)
-        if not definition:
-            return
-        for parameter in definition.parameters:
-            if not parameter.visible_when:
-                continue
-            dependency, accepted_values = parameter.visible_when
-            visible = self.controls[dependency].value in accepted_values
-            self.parameter_containers[parameter.key].set_visibility(visible)
-            if not visible:
-                self.controls[parameter.key].set_value(None)
-
-    def _update_add_button(self) -> None:
-        definition = self.definitions.get(self.command_select.value)
-        if not definition:
-            self.add_button.disable()
-            return
-        for parameter in definition.parameters:
-            relevant = self.parameter_containers[parameter.key].visible
-            value = self._control_value(self.controls[parameter.key])
-            has_value = value.strip() != '' if isinstance(value, str) else value is not None
-            if parameter.required and relevant and not has_value:
-                self.add_button.disable()
-                return
-        self.add_button.enable()
-
-    def _add_command(self) -> None:
-        definition = self.definitions.get(self.command_select.value)
-        if not definition or self.add_button.props.get('disable', False):
-            return
-        values = {
-            key: self._control_value(control)
-            for key, control in self.controls.items()
-        }
-        command = definition.create_command(values)
-        if self.on_add:
-            self.on_add(command)
+    def _update_conditional_visibility(self):
+        self._updating = True
+        try:
+            self._refresh_editors(self.editors, self.enabled)
+        finally:
+            self._updating = False
 
     @staticmethod
-    def _control_value(control):
-        return control.entered_value if isinstance(control, FreeTextCombobox) else control.value
+    def _refresh_editors(editors, enabled):
+        # Settle chained sibling conditions in the same event, including when
+        # a hidden dependency has just had its value cleared.
+        for _ in range(len(editors) + 1):
+            values = {editor.definition.key: editor.raw_value() for editor in editors}
+            for editor in editors:
+                editor.refresh(values, enabled)
+            if values == {editor.definition.key: editor.raw_value() for editor in editors}:
+                break
 
-    def set_schema(self, schema: dict[str, Any] | None) -> None:
-        self.schema = schema
-        definition = self.definitions.get(self.command_select.value)
-        if not definition:
-            return
-        codes = field_codes_from_schema(schema)
-        for parameter in definition.parameters:
-            if parameter.option_source == 'field_codes':
-                control = self.controls.get(parameter.key)
-                if isinstance(control, FreeTextCombobox):
-                    control.set_suggestions(codes)
+    @staticmethod
+    def _collect(editors):
+        values = {}
+        for editor in editors:
+            if not editor.relevant or not editor.activation.value or not editor.definition.enabled:
+                continue
+            target = values
+            parts = (editor.definition.path or editor.definition.key).split('.')
+            for part in parts[:-1]:
+                target = target.setdefault(part, {})
+            target[parts[-1]] = editor.value()
+        return values
 
-    def set_enabled(self, enabled: bool) -> None:
-        method = 'enable' if enabled else 'disable'
-        getattr(self.command_select, method)()
-        for control in self.controls.values():
-            getattr(control, method)()
-        if enabled:
-            self._update_add_button()
-        else:
+    def values(self):
+        return self._collect(self.editors)
+
+    def _update_add_button(self):
+        try:
+            values = self.values()
+            definition = self.definitions.get(self.command_select.value)
+            if definition and definition.validate_values:
+                error = definition.validate_values(values)
+                if error:
+                    raise ValueError(error)
+        except ValueError as exc:
+            self.error.set_text(str(exc))
             self.add_button.disable()
+            return
+        self.error.set_text('')
+        self.add_button.set_enabled(self.enabled and self.command_select.value in self.definitions)
 
+    def _add_command(self):
+        if self.add_button.props.get('disable', False):
+            return
+        definition = self.definitions.get(self.command_select.value)
+        if definition:
+            try:
+                command = definition.create_command(self.values())
+            except ValueError as exc:
+                self.error.set_text(str(exc))
+                return
+            if self.on_add:
+                self.on_add(command)
+
+    def set_schema(self, schema):
+        self.schema = schema
+        self._parameter_changed(None)
+
+    def set_enabled(self, enabled):
+        self.enabled = enabled
+        self.command_select.set_enabled(enabled)
+        self._parameter_changed(None)
+
+    def set_suggestions(self, source: str, values):
+        self.option_sources[source] = list(values)
+        self._update_conditional_visibility()
+        self._update_add_button()

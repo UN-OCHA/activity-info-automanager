@@ -1,14 +1,15 @@
 ﻿from nicegui import ui
 
 import json
+import asyncio
 from copy import deepcopy
 
 from nicegui import context
 
 from .api import DEFAULT_BASE_URL, ActivityInfoService
-from .command_creator import CommandCreatorRenderer
+from .command_creator import CommandCreatorRenderer, field_codes_from_schema
 from .command_list import CommandExecution, CommandListManager
-from .commands import DELETE_FIELD, MOVE_FIELD
+from .commands import ADD_FIELD, DELETE_FIELD, MOVE_FIELD
 from .listbox import DatabaseListbox
 from .schema_change import apply_form_schema_change
 
@@ -42,6 +43,8 @@ def connection_page():
         .command-creator-panel {
             grid-column: 2 / 4;
             grid-row: 1;
+            max-height: 45vh;
+            overflow-y: auto;
         }
         .result-panel {
             grid-column: 2;
@@ -108,6 +111,40 @@ def connection_page():
     text_mode = False
     form_request = 0
     schema_request = 0
+    reference_request = 0
+    reference_context = None
+
+    async def refresh_reference_suggestions(creator):
+        nonlocal reference_request, reference_context
+        control = creator.controls.get('referenced_form')
+        reference = control.value if control is not None else None
+        selected = reference if service and source_schema else None
+        current_context = (service, selected, schema_request)
+        if current_context == reference_context:
+            return
+        reference_context = current_context
+        reference_request += 1
+        request = reference_request
+        creator.set_suggestions('reference_field_codes', [])
+        if not selected:
+            return
+        current_service = service
+        def still_current():
+            return (
+                request == reference_request and service is current_service
+                and creator.controls.get('referenced_form') is control
+                and control.value == selected and current_context[2] == schema_request
+            )
+        try:
+            await asyncio.sleep(0.25)
+            if not still_current():
+                return
+            data = source_schema if selected == source_schema.get('id') else await current_service.get_form_schema(selected)
+            if still_current():
+                creator.set_suggestions('reference_field_codes', field_codes_from_schema(data))
+        except ValueError as exc:
+            if still_current():
+                console_message.set_text(f'Reference form suggestions error:\n{exc}')
 
     async def close_service():
         nonlocal service
@@ -268,6 +305,7 @@ def connection_page():
         form_request += 1
         clear_schema()
         forms.set_options({})
+        command_creator.set_suggestions('form_ids', [])
         form_status.set_text('')
 
     async def load_forms():
@@ -280,6 +318,7 @@ def connection_page():
             options = await service.get_forms(databases.value)
             if request == form_request:
                 forms.set_options(options)
+                command_creator.set_suggestions('form_ids', options)
                 form_status.set_text('' if options else 'No forms available.')
         except ValueError as exc:
             if request == form_request:
@@ -347,7 +386,8 @@ def connection_page():
         with ui.card().classes('workbench-panel command-creator-panel w-full no-shadow'):
             ui.label('Command Creator').classes('text-lg font-medium')
             command_creator = CommandCreatorRenderer(
-                (MOVE_FIELD, DELETE_FIELD), on_add=add_command,
+                (MOVE_FIELD, DELETE_FIELD, ADD_FIELD), on_add=add_command,
+                on_parameter_change=refresh_reference_suggestions,
             )
 
         with ui.card().classes('workbench-panel result-panel w-full no-shadow flex flex-col'):

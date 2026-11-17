@@ -11,4 +11,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-activity-info-api-client = { git = "https://github.com/UN-OCHA/activity-info-python-client.git", tag = "v2.0.1" }
+activity-info-api-client = { git = "https://github.com/UN-OCHA/activity-info-python-client.git", tag = "v2.0.2" }

@@ -13,6 +13,8 @@ from activity_info_api_client.models.database import Database
 from activity_info_api_client.models.database_resource_type import DatabaseResourceType
 from activity_info_api_client.models.form_schema import FormSchema
 
+from .schema_identity import prepare_schema_for_write
+
 DEFAULT_BASE_URL = 'https://www.activityinfo.org/resources'
 
 
@@ -106,7 +108,7 @@ class ActivityInfoService:
     async def put_form_schema(self, form_id: str, schema: dict) -> None:
         """Write a complete form schema using the generated API endpoint."""
         try:
-            body = FormSchema.from_dict(schema)
+            body = FormSchema.from_dict(await prepare_schema_for_write(self, schema))
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError('The target form schema is invalid.') from exc
         response = await self._request(

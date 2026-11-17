@@ -4,6 +4,8 @@ from typing import Literal, Protocol
 
 from activity_info_api_client.models.form_schema import FormSchema
 
+from .schema_identity import prepare_schema_for_write
+
 
 RecoveryChoice = Literal['rollback', 'leave']
 SchemaChangeStatus = Literal[
@@ -80,6 +82,12 @@ async def apply_form_schema_change(
             rollback_schema,
             ('no schema changes required',),
         )
+
+    try:
+        target_schema = await prepare_schema_for_write(service, target_schema)
+        target_model = _as_form_schema(target_schema, 'target')
+    except (ValueError, TypeError, KeyError) as exc:
+        return SchemaChangeOutcome('read_error', latest_schema, (f'Could not prepare target schema: {exc}',))
 
     messages: list[str] = []
     try:
