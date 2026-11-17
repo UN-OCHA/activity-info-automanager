@@ -7,6 +7,7 @@ from typing import Any
 
 from ..command_creator import CommandCreatorDefinition, ParameterDefinition
 from ..command_parser import command_error, parse_string_parameters
+from ..command_execution import ExecutionResult
 
 
 @dataclass(frozen=True)
@@ -26,14 +27,14 @@ class MoveFieldCommand:
             )
         return f'MoveField({", ".join(arguments)})'
 
-    def execute(self, schema: dict[str, Any]) -> dict[str, Any]:
+    def execute(self, schema: dict[str, Any]) -> ExecutionResult:
         if not isinstance(schema, dict):
-            raise TypeError('MoveField requires a form schema object.')
+            return ExecutionResult.error(None, 'MoveField requires a form schema object.', 'invalid_schema')
         elements = schema.get('elements')
         if not isinstance(elements, list):
-            raise ValueError('MoveField requires the schema to contain an elements list.')
+            return ExecutionResult.error(schema, 'MoveField requires the schema to contain an elements list.', 'invalid_schema')
         if self.position not in ('Beginning', 'End', 'Before field', 'After field'):
-            raise ValueError(f'MoveField has an invalid position: {self.position!r}.')
+            return ExecutionResult.error(schema, f'MoveField has an invalid position: {self.position!r}.', 'invalid_position')
 
         result = deepcopy(schema)
         result_elements = result['elements']
@@ -45,13 +46,13 @@ class MoveFieldCommand:
             None,
         )
         if field_index is None:
-            raise ValueError(f'MoveField could not find field code {self.field_code!r}.')
+            return ExecutionResult.warning(schema, f'MoveField could not find field code {self.field_code!r}. Command skipped; schema unchanged.', 'missing_target')
 
         if self.position in ('Before field', 'After field'):
             if not self.before_after_field:
-                raise ValueError('MoveField requires beforeAfterField for this position.')
+                return ExecutionResult.error(schema, 'MoveField requires beforeAfterField for this position.', 'missing_relative_field')
             if self.before_after_field == self.field_code:
-                raise ValueError('MoveField cannot position a field relative to itself.')
+                return ExecutionResult.error(schema, 'MoveField cannot position a field relative to itself.', 'self_relative_move')
 
         field = result_elements.pop(field_index)
         if self.position == 'Beginning':
@@ -68,13 +69,10 @@ class MoveFieldCommand:
                 None,
             )
             if relative_index is None:
-                raise ValueError(
-                    f'MoveField could not find before/after field code '
-                    f'{self.before_after_field!r}.'
-                )
+                return ExecutionResult.warning(schema, f'MoveField could not find before/after field code {self.before_after_field!r}. Command skipped; schema unchanged.', 'missing_relative_target')
             insertion_index = relative_index + (self.position == 'After field')
             result_elements.insert(insertion_index, field)
-        return result
+        return ExecutionResult(result)
 
 
 def create_move_field(values: Mapping[str, Any]) -> MoveFieldCommand:
@@ -127,17 +125,6 @@ def parse_move_field(text: str, call: ast.Call) -> MoveFieldCommand:
             relative_node,
             f'MoveField does not use parameter {"beforeAfterField"!r} '
             f'for position {position!r}.',
-        )
-    if relative_field == values['fieldCode']:
-        relative_node = next(
-            keyword.value
-            for keyword in call.keywords
-            if keyword.arg and keyword.arg.casefold() == 'beforeafterfield'
-        )
-        raise command_error(
-            text,
-            relative_node,
-            'MoveField cannot position a field relative to itself.',
         )
     return MoveFieldCommand(
         field_code=values['fieldCode'],

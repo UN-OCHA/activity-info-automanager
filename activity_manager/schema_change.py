@@ -5,7 +5,8 @@ from typing import Literal, Protocol
 
 from activity_info_api_client.models.form_schema import FormSchema
 
-from .schema_identity import prepare_schema_for_write
+from .schema_names import readable_schema, schema_with_ids, resolve_reference_defaults, resolve_form_names
+from .schema_identity import prepare_schema_for_write, prepare_schema_for_put
 
 
 RecoveryChoice = Literal['rollback', 'leave']
@@ -39,15 +40,22 @@ class SchemaComparison:
     summary: str
 
 
-def compare_schemas(expected: FormSchema, actual: FormSchema) -> SchemaComparison:
+def compare_schemas(expected: FormSchema, actual: FormSchema, related_schemas=None,
+                    reference_defaults=None) -> SchemaComparison:
     """Describe differences by JSON path, ignoring the root schemaVersion.
 
     Arrays are compared by position because field and option order is significant.
     Missing properties match null/false, including nested object defaults.
+    Formulas and defaults use canonical identities. Reference label mappings
+    must be resolved by the async caller; unknown labels remain distinct.
     An empty summary means the schemas match.
     """
-    expected_data = expected.to_dict()
-    actual_data = actual.to_dict()
+    def normalized(model):
+        canonical = schema_with_ids(model.to_dict(), related_schemas, reference_defaults)
+        return readable_schema(canonical, related_schemas, formulas_only=True)
+
+    expected_data = normalized(expected)
+    actual_data = normalized(actual)
     expected_data.pop('schemaVersion', None)
     actual_data.pop('schemaVersion', None)
     missing = object()
@@ -83,9 +91,9 @@ def compare_schemas(expected: FormSchema, actual: FormSchema) -> SchemaCompariso
     return SchemaComparison(not differences, '\n'.join(differences))
 
 
-def schemas_match(left: FormSchema, right: FormSchema) -> bool:
+def schemas_match(left: FormSchema, right: FormSchema, related_schemas=None, reference_defaults=None) -> bool:
     """Boolean convenience wrapper for schema comparison."""
-    return compare_schemas(left, right).matches
+    return compare_schemas(left, right, related_schemas, reference_defaults).matches
 
 
 def _as_form_schema(schema: dict, description: str) -> FormSchema:
@@ -101,17 +109,35 @@ async def apply_form_schema_change(
     loaded_schema: dict,
     target_schema: dict,
     choose_recovery: Callable[[str], Awaitable[RecoveryChoice]],
+    *,
+    resolved=False,
+    related_schemas=None,
+    reference_defaults=None,
 ) -> SchemaChangeOutcome:
     """Safely write, verify, and when requested roll back a form schema."""
+    reference_defaults = dict(reference_defaults or {})
+
+    async def compare(left, right):
+        if not resolved:
+            for model in (left, right):
+                await resolve_reference_defaults(service, model.to_dict(), related, reference_defaults)
+        return compare_schemas(left, right, related, reference_defaults)
+
     try:
         loaded_model = _as_form_schema(loaded_schema, 'loaded')
         target_model = _as_form_schema(target_schema, 'target')
         latest_schema = await service.get_form_schema(form_id)
         latest_model = _as_form_schema(latest_schema, 'latest')
+        related = dict(related_schemas or {}) if resolved else (
+            await service.get_form_tree(form_id) if hasattr(service, 'get_form_tree') else {})
+        if not resolved:
+            target_schema = await resolve_form_names(service, target_schema, related)
+        target_model = _as_form_schema(target_schema, 'target')
+        stale_comparison = await compare(latest_model, loaded_model)
     except ValueError as exc:
         return SchemaChangeOutcome('read_error', None, (str(exc),))
 
-    if not schemas_match(latest_model, loaded_model):
+    if not stale_comparison.matches:
         return SchemaChangeOutcome(
             'stale',
             latest_schema,
@@ -123,7 +149,11 @@ async def apply_form_schema_change(
 
     rollback_schema = latest_schema
     rollback_model = latest_model
-    if schemas_match(target_model, rollback_model):
+    try:
+        unchanged = (await compare(target_model, rollback_model)).matches
+    except ValueError as exc:
+        return SchemaChangeOutcome('read_error', latest_schema, (f'Could not compare target defaults: {exc}',))
+    if unchanged:
         return SchemaChangeOutcome(
             'unchanged',
             rollback_schema,
@@ -131,29 +161,33 @@ async def apply_form_schema_change(
         )
 
     try:
-        target_schema = await prepare_schema_for_write(service, target_schema)
+        target_schema = (prepare_schema_for_put(target_schema, related) if resolved else
+                        await prepare_schema_for_write(service, target_schema, related, reference_defaults))
         target_model = _as_form_schema(target_schema, 'target')
     except (ValueError, TypeError, KeyError) as exc:
         return SchemaChangeOutcome('read_error', latest_schema, (f'Could not prepare target schema: {exc}',))
 
     messages: list[str] = []
+    write = (service.put_resolved_form_schema if resolved and hasattr(service, 'put_resolved_form_schema')
+             else service.put_form_schema)
     try:
-        await service.put_form_schema(form_id, target_schema)
+        await write(form_id, target_schema)
     except ValueError as exc:
         messages.append(f'Form schema API error: {exc}')
 
     try:
         actual_schema = await service.get_form_schema(form_id)
         actual_model = _as_form_schema(actual_schema, 'actual')
+        unchanged_comparison = await compare(actual_model, rollback_model)
+        verification = await compare(target_model, actual_model)
     except ValueError as exc:
         messages.append(f'Could not verify the form schema: {exc}')
         return SchemaChangeOutcome('read_error', None, tuple(messages))
 
-    if schemas_match(actual_model, rollback_model):
+    if unchanged_comparison.matches:
         messages.append('Schema not changed: the actual schema matches the rollback schema.')
         return SchemaChangeOutcome('unchanged', actual_schema, tuple(messages))
 
-    verification = compare_schemas(target_model, actual_model)
     if verification.matches:
         messages.append('Form schema successfully changed and verified.')
         return SchemaChangeOutcome('success', actual_schema, tuple(messages))
@@ -167,7 +201,7 @@ async def apply_form_schema_change(
 
     rollback_error: str | None = None
     try:
-        await service.put_form_schema(form_id, rollback_schema)
+        await write(form_id, rollback_schema)
     except ValueError as exc:
         rollback_error = f'Rollback API error: {exc}'
         messages.append(rollback_error)
@@ -175,11 +209,11 @@ async def apply_form_schema_change(
     try:
         after_rollback = await service.get_form_schema(form_id)
         after_rollback_model = _as_form_schema(after_rollback, 'post-rollback')
+        rollback_comparison = await compare(rollback_model, after_rollback_model)
     except ValueError as exc:
         messages.append(f'Could not verify the rollback: {exc}')
         return SchemaChangeOutcome('rollback_failed', actual_schema, tuple(messages))
 
-    rollback_comparison = compare_schemas(rollback_model, after_rollback_model)
     if rollback_error is None and rollback_comparison.matches:
         messages.append('Rollback successfully applied and verified.')
         return SchemaChangeOutcome('rolled_back', after_rollback, tuple(messages))

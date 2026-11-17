@@ -104,7 +104,7 @@ FIELD_PARAMETERS = (
       )),
     P('referenced_form', 'Referenced form', 'combobox', option_source='form_ids',
       visible_when=referenced_form_visible,
-      help='Existing form ID, or <databaseId>@users for a user reference.'),
+      help='Form ID or local form name; use Database/Form for a remote form. Names resolve when the command is applied.'),
     P('reverse_reference_field', 'Reverse-reference field', 'combobox', option_source='reference_field_codes',
       visible_when=for_types('reversereference'),
       validate=field_code_error),
@@ -117,7 +117,8 @@ FIELD_PARAMETERS = (
     P('default_value', 'Default value', 'text',
       visible_when=lambda values: not metadata_enabled(values),
       help='Text for text/date fields; a number for quantity; JSON coordinates for geopoint; '
-           'option codes for selection (a JSON list for multiple selection); record IDs for references.'),
+           'option codes or labels for selection (a JSON list for multiple selection); '
+           'formId:recordId or record labels for references.'),
     P('default_formula', 'Default formula', 'combobox', multiline=True, option_source='field_codes',
       visible_when=lambda values: not metadata_enabled(values)),
 )

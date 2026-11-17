@@ -1,13 +1,17 @@
-﻿from nicegui import ui
+from nicegui import ui
 
 import json
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 
 from nicegui import context
 
 from .api import DEFAULT_BASE_URL, ActivityInfoService
 from .command_creator import CommandCreatorRenderer, field_codes_from_schema
+from .schema_names import readable_schema, load_default_record_labels
+from .schema_display import underline_substitutions
+from .schema_resolution import resolve_command_schema
 from .command_list import CommandExecution, CommandListManager
 from .commands import ADD_FIELD, DELETE_FIELD, MOVE_FIELD
 from .listbox import DatabaseListbox
@@ -108,6 +112,13 @@ def connection_page():
             min-height: 0;
             width: 100%;
         }
+        .result-code u { text-decoration: underline; text-underline-offset: 3px; }
+        .result-code mark {
+            color: inherit;
+            background-color: #fef3c7;
+            text-decoration: underline wavy;
+            text-underline-offset: 3px;
+        }
         @media (max-width: 1100px) {
             .workbench {
                 grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
@@ -142,40 +153,23 @@ def connection_page():
     text_mode = False
     form_request = 0
     schema_request = 0
-    reference_request = 0
-    reference_context = None
-
     async def refresh_reference_suggestions(creator):
-        nonlocal reference_request, reference_context
         control = creator.controls.get('referenced_form')
         reference = control.value if control is not None else None
-        selected = reference if service and source_schema else None
-        current_context = (service, selected, schema_request)
-        if current_context == reference_context:
-            return
-        reference_context = current_context
-        reference_request += 1
-        request = reference_request
-        creator.set_suggestions('reference_field_codes', [])
-        if not selected:
-            return
-        current_service = service
-        def still_current():
-            return (
-                request == reference_request and service is current_service
-                and creator.controls.get('referenced_form') is control
-                and control.value == selected and current_context[2] == schema_request
-            )
-        try:
-            await asyncio.sleep(0.25)
-            if not still_current():
-                return
-            data = source_schema if selected == source_schema.get('id') else await current_service.get_form_schema(selected)
-            if still_current():
-                creator.set_suggestions('reference_field_codes', field_codes_from_schema(data))
-        except ValueError as exc:
-            if still_current():
-                console_message.set_text(f'Reference form suggestions error:\n{exc}')
+        data = None
+        if reference and source_schema:
+            data = source_schema if reference == source_schema.get('id') else command_list.related_schemas.get(reference)
+            if data is None:
+                matches = []
+                for identity, candidate in command_list.related_schemas.items():
+                    db_id = candidate.get('databaseId')
+                    name = candidate.get('label')
+                    qualified = f'{command_list.database_names.get(db_id)}/{name}'
+                    if (reference == name and db_id == source_schema.get('databaseId')) or reference == qualified:
+                        matches.append(candidate)
+                if len(matches) == 1:
+                    data = matches[0]
+        creator.set_suggestions('reference_field_codes', field_codes_from_schema(data))
 
     async def close_service():
         nonlocal service
@@ -183,14 +177,68 @@ def connection_page():
         if current:
             await current.aclose()
 
-    def show_result(data: dict | None, empty_message='No result'):
+    displayed_result = None
+    displayed_names = None
+    record_cache = {}
+    result_request = 0
+    displayed_issues = ()
+
+    async def resolve_preview(data):
+        if service is None:
+            raise ValueError('Connect before resolving command names.')
+        return await resolve_command_schema(service, data, command_list.related_schemas,
+            command_list.database_names, command_list.reference_defaults, command_list.resolution_cache)
+
+    def show_result(data: dict | None, empty_message='No result', names=None, issues=()):
+        nonlocal displayed_result, displayed_names, result_request, displayed_issues
+        displayed_issues = issues
+        result_request += 1
+        displayed_result = data
+        displayed_names = names if names is not None else (
+            readable_schema(data, command_list.related_schemas, command_list.database_names)
+            if data is not None else None)
+        render_result(empty_message)
+        if names is None and data is not None and service is not None and any(
+            field.get('type') in ('reference', 'multiselectreference') and field.get('defaultValue')
+            for field in data.get('elements', [])
+        ):
+            asyncio.create_task(refresh_record_names(data, service, result_request, schema_request))
+
+    async def refresh_record_names(data, current_service, request, source_request):
+        nonlocal displayed_names
+        # A cache belongs to one selected form/connection; stale reads cannot
+        # update its successor, even when both reference the same record ID.
+        cache = record_cache
+        labels = await load_default_record_labels(
+            current_service, data, command_list.related_schemas, cache)
+        if request != result_request or source_request != schema_request or service is not current_service:
+            return
+        displayed_names = readable_schema(data, command_list.related_schemas,
+                                         command_list.database_names, record_labels=labels)
+        for index, execution in enumerate(command_list.executions):
+            if execution.schema is data:
+                command_list.executions[index] = replace(execution, names_schema=displayed_names)
+        render_result()
+
+    def render_result(empty_message='No result'):
+        unresolved_badge.set_text(f'Unresolved: {len(displayed_issues)}')
+        unresolved_badge.set_visibility(bool(displayed_issues))
+        data = displayed_names if result_toggle.value == 'names' else displayed_result
         if data is None:
             schema.set_content('')
             schema.set_visibility(False)
             schema_placeholder.set_text(empty_message)
             schema_placeholder.set_visibility(True)
             return
+        showing_names = result_toggle.value == 'names'
+        # Use Markdown's post-render hook to retain the original code control,
+        # highlighting, fonts, scrolling, copy action, and client sanitization.
+        schema.markdown._sanitize = (
+            (lambda html: underline_substitutions(html, data,
+                [issue.path for issue in displayed_issues], underline=showing_names))
+            if showing_names or displayed_issues else True)
         schema.set_content(json.dumps(data, indent=2, ensure_ascii=False))
+        schema.markdown._handle_content_change(schema._render_markdown())
         schema.set_visibility(True)
         schema_placeholder.set_visibility(False)
 
@@ -210,7 +258,7 @@ def connection_page():
             show_result(None)
             return
         console_message.set_text(execution.message)
-        show_result(execution.schema)
+        show_result(execution.schema, names=execution.names_schema, issues=execution.issues)
 
     async def choose_recovery(diff_summary: str):
         with ui.dialog() as dialog, ui.card().classes('w-full max-w-3xl'):
@@ -246,6 +294,8 @@ def connection_page():
             'form_id': forms.value,
             'loaded_schema': deepcopy(source_schema),
             'target_schema': target_schema,
+            'related_schemas': deepcopy(command_list.related_schemas),
+            'reference_defaults': deepcopy(command_list.reference_defaults),
         }
         database_name = databases.selected_label or databases.value or 'the selected database'
         form_name = forms.selected_label or forms.value
@@ -292,6 +342,9 @@ def connection_page():
                 execution['loaded_schema'],
                 execution['target_schema'],
                 choose_recovery,
+                resolved=True,
+                related_schemas=execution['related_schemas'],
+                reference_defaults=execution['reference_defaults'],
             )
             if outcome.actual_schema is not None:
                 source_schema = deepcopy(outcome.actual_schema)
@@ -311,10 +364,15 @@ def connection_page():
             set_write_busy(False)
 
     def clear_schema():
-        nonlocal schema_request, source_schema
+        nonlocal schema_request, source_schema, record_cache
+        record_cache = {}
         schema_request += 1
         source_schema = None
         command_creator.set_schema(None)
+        command_list.related_schemas = {}
+        command_list.database_names = {}
+        command_list.reference_defaults = {}
+        command_list.resolution_cache = {}
         command_list.set_schema(None)
         schema_status.set_text('')
 
@@ -324,14 +382,29 @@ def connection_page():
         request = schema_request
         if not forms.value or not service:
             return
+        selected_form_id = forms.value
+        selected_service = service
         schema_status.set_text('Loading schema…')
         try:
-            data = await service.get_form_schema(forms.value)
+            related = await selected_service.get_form_tree(selected_form_id)
+            data = related.get(selected_form_id)
+            if not isinstance(data, dict) or not isinstance(data.get('elements'), list):
+                raise ValueError('The form tree did not contain the selected form schema.')
+            if request != schema_request:
+                return
+            db_names = {}
+            warning = ''
+            try:
+                db_names = await selected_service.get_database_names()
+            except ValueError as exc:
+                warning = f'Some names could not be loaded: {exc}'
             if request == schema_request:
+                command_list.related_schemas = related
+                command_list.database_names = db_names
                 source_schema = data
                 command_creator.set_schema(data)
                 command_list.set_schema(data)
-                schema_status.set_text('')
+                schema_status.set_text(warning)
         except ValueError as exc:
             if request == schema_request:
                 schema_status.set_text(str(exc))
@@ -427,9 +500,15 @@ def connection_page():
             )
 
         with ui.card().classes('workbench-panel result-panel w-full no-shadow flex flex-col'):
-            with ui.row().classes('w-full items-center justify-between'):
+            with ui.row().classes('w-full items-center gap-3'):
                 ui.label('Result').classes('text-lg font-medium')
-                ui.label('JSON').classes('text-xs text-slate-500 uppercase')
+                result_toggle = ui.toggle(
+                    {'ids': 'IDs', 'names': 'Names'}, value='ids',
+                    on_change=lambda: render_result(),
+                )
+                unresolved_badge = ui.badge('Unresolved: 0', color='amber-2', text_color='amber-10')
+                unresolved_badge.props['aria-label'] = 'Unresolved names'
+                unresolved_badge.set_visibility(False)
             ui.separator()
             schema_status = ui.label('').classes('text-sm text-red-700')
             with ui.element('div').classes('result-body'):
@@ -443,6 +522,7 @@ def connection_page():
         with ui.card().classes('workbench-panel command-list-panel w-full no-shadow flex flex-col'):
             ui.label('Command List').classes('text-lg font-medium')
             command_list = CommandListManager(
+                resolve_schema=resolve_preview,
                 on_selection_change=selection_changed,
                 on_execute=open_execute_confirmation,
                 on_text_mode_change=text_mode_changed,

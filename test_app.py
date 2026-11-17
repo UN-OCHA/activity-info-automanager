@@ -1,4 +1,5 @@
-﻿import unittest
+import json
+import unittest
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -473,10 +474,6 @@ DeleteField(
                 'MoveField(fieldCode="A", position="End", beforeAfterField="B")',
                 "does not use parameter 'beforeAfterField'",
             ),
-            (
-                'MoveField(fieldCode="A", position="After field", beforeAfterField="A")',
-                'cannot position a field relative to itself',
-            ),
         )
         for text, message in cases:
             with self.subTest(text=text):
@@ -487,6 +484,8 @@ DeleteField(
 class UITests(unittest.IsolatedAsyncioTestCase):
     async def test_form_list_errors_are_reported_in_console(self):
         service = AsyncMock(spec=ActivityInfoService)
+        service.get_form_tree.return_value = {}
+        service.get_database_names.return_value = {}
         service.get_databases.return_value = {'db': 'Database (db)'}
         service.get_forms.side_effect = ValueError(
             "The server returned an invalid API response. ValueError: 'NEW_TYPE'"
@@ -519,7 +518,7 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Form list error:', console.text)
             self.assertIn('NEW_TYPE', console.text)
 
-    def test_move_field_execution_and_fatal_command_trace(self):
+    def test_move_field_execution_and_warning_command_trace(self):
         source = {
             'id': 'form-1',
             'elements': [
@@ -529,7 +528,7 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             ],
         }
         move_c = MoveFieldCommand('C', 'Beginning')
-        moved = move_c.execute(source)
+        moved = move_c.execute(source).schema
         self.assertEqual([field['code'] for field in moved['elements']], ['C', 'A', 'B'])
         self.assertEqual([field['code'] for field in source['elements']], ['A', 'B', 'C'])
         self.assertEqual(
@@ -537,14 +536,16 @@ class UITests(unittest.IsolatedAsyncioTestCase):
                 field['code']
                 for field in MoveFieldCommand(
                     'A', 'After field', 'C',
-                ).execute(source)['elements']
+                ).execute(source).schema['elements']
             ],
             ['B', 'C', 'A'],
         )
-        with self.assertRaisesRegex(ValueError, "could not find field code 'missing'"):
-            MoveFieldCommand('missing', 'End').execute(source)
-        with self.assertRaisesRegex(ValueError, 'relative to itself'):
-            MoveFieldCommand('A', 'Before field', 'A').execute(source)
+        execution = MoveFieldCommand('missing', 'End').execute(source)
+        self.assertRegex(execution.message, "could not find field code 'missing'")
+        self.assertTrue(execution.diagnostics)
+        execution = MoveFieldCommand('A', 'Before field', 'A').execute(source)
+        self.assertRegex(execution.message, 'relative to itself')
+        self.assertTrue(execution.diagnostics)
 
         selections = []
         with Client(ui.page('/')), ui.column():
@@ -558,16 +559,16 @@ class UITests(unittest.IsolatedAsyncioTestCase):
         command_list.set_schema(source)
         self.assertEqual(
             [execution.status for execution in command_list.executions],
-            ['applied', 'error', 'not_executed'],
+            ['applied', 'warning', 'applied'],
         )
-        self.assertTrue(command_list.execute_button.props['disable'])
+        self.assertFalse(command_list.execute_button.props['disable'])
         self.assertEqual(
             [field['code'] for field in command_list.executions[0].schema['elements']],
             ['C', 'A', 'B'],
         )
-        self.assertIsNone(command_list.executions[1].schema)
+        self.assertEqual(command_list.executions[1].schema, command_list.executions[0].schema)
         self.assertIn('missing', command_list.executions[1].message)
-        self.assertEqual(command_list.executions[2].message, 'Did not execute.')
+        self.assertEqual(command_list.executions[2].message, 'Command successfully applied to schema.')
 
         command_list.select_command(0)
         self.assertEqual(command_list.selected_index, 0)
@@ -576,13 +577,13 @@ class UITests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(command_list.selected_index)
         self.assertEqual(selections[-1], (None, None))
         command_list.select_command(1)
-        self.assertIsNone(selections[-1][1].schema)
+        self.assertEqual(selections[-1][1].schema, command_list.executions[0].schema)
         original_lines = [command.to_syntax() for command in command_list.commands]
         command_list.move_command(1, 0)
         self.assertEqual(command_list.selected_index, 0)
         self.assertEqual(
             [execution.status for execution in command_list.executions],
-            ['error', 'not_executed', 'not_executed'],
+            ['warning', 'applied', 'applied'],
         )
         self.assertEqual(
             command_list.advanced_draft,
@@ -610,7 +611,7 @@ class UITests(unittest.IsolatedAsyncioTestCase):
         }
         command = DeleteFieldCommand('A')
 
-        result = command.execute(source)
+        result = command.execute(source).schema
 
         self.assertEqual(result['elements'], [{'code': 'B', 'label': 'Beta'}])
         self.assertEqual(len(source['elements']), 2)
@@ -618,8 +619,9 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             DeleteFieldCommand('FIELD "A"').to_syntax(),
             'DeleteField(fieldCode="FIELD \\"A\\"")',
         )
-        with self.assertRaisesRegex(ValueError, "could not find field code 'missing'"):
-            DeleteFieldCommand('missing').execute(source)
+        execution = DeleteFieldCommand('missing').execute(source)
+        self.assertRegex(execution.message, "could not find field code 'missing'")
+        self.assertTrue(execution.diagnostics)
 
         self.assertEqual(DELETE_FIELD.key, 'delete_field')
         self.assertEqual(DELETE_FIELD.label, 'Delete field')
@@ -673,7 +675,7 @@ class UITests(unittest.IsolatedAsyncioTestCase):
                 creator._add_command()
                 self.assertEqual(added, [case['expected_command']])
 
-                result = added[0].execute(source)
+                result = added[0].execute(source).schema
                 self.assertEqual(
                     [field['code'] for field in result['elements']],
                     case['expected_codes'],
@@ -920,6 +922,8 @@ class UITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_selection_loads_forms_and_ignores_stale_requests(self):
         service = AsyncMock(spec=ActivityInfoService)
+        service.get_form_tree.return_value = {}
+        service.get_database_names.return_value = {}
         service.get_databases.return_value = {'old': 'Old (old)', 'new': 'New (new)'}
         pending = asyncio.get_running_loop().create_future()
 
@@ -955,10 +959,12 @@ class UITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_form_selection_loads_and_clears_pretty_schema(self):
         service = AsyncMock(spec=ActivityInfoService)
+        service.get_form_tree.return_value = {}
+        service.get_database_names.return_value = {}
         service.get_databases.return_value = {'db': 'Database (db)'}
         service.get_forms.return_value = {}
         payload = {'id': 'form-1', 'elements': [{'id': 'field-1'}]}
-        service.get_form_schema.return_value = payload
+        service.get_form_tree.return_value = {'form-1': payload}
         with patch('activity_manager.page.ActivityInfoService', return_value=service):
             with Client(ui.page('/')), ui.column() as page:
                 connection_page()
@@ -973,8 +979,50 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             form_change = next(iter(forms._event_listeners.values())).handler
             database_change = next(iter(databases._event_listeners.values())).handler
             await form_change(SimpleNamespace(args='form-1'))
+            service.get_form_tree.assert_awaited_once_with('form-1')
+            service.get_form_schema.assert_not_awaited()
             self.assertTrue(schema.visible)
             self.assertEqual(schema.content, '{\n  "id": "form-1",\n  "elements": [\n    {\n      "id": "field-1"\n    }\n  ]\n}')
+            payload['elements'][0].update(code='NAME', relevanceCondition='field_1')
+            payload['elements'][0]['id'] = 'field_1'
+            await form_change(SimpleNamespace(args='form-1'))
+            toggle = next(e for e in page.descendants()
+                          if isinstance(e, ui.toggle) and 'names' in e.options)
+            toggle.set_value('names')
+            await asyncio.sleep(0.01)
+            self.assertEqual(json.loads(schema.content)['elements'][0]['relevanceCondition'], 'NAME')
+            toggle.set_value('ids')
+            await asyncio.sleep(0.01)
+            self.assertEqual(json.loads(schema.content)['elements'][0]['relevanceCondition'], 'field_1')
+            self.assertEqual(service.get_form_tree.await_count, 2)
+            service.get_form_schema.assert_not_awaited()
+            payload['elements'][0].update(
+                type='reference', defaultValue='people:record1',
+                typeParameters={'range': [{'formId': 'people'}]},
+            )
+            service.get_form_tree.return_value['people'] = {
+                'id': 'people', 'label': 'People', 'recordLabelFieldId': 'name', 'elements': [],
+            }
+            service.query_rows.return_value = [{'name': 'Alice'}]
+            await form_change(SimpleNamespace(args='form-1'))
+            await asyncio.sleep(0.01)
+            toggle.set_value('names')
+            await asyncio.sleep(0.01)
+            self.assertEqual(json.loads(schema.content)['elements'][0]['defaultValue'], 'People:Alice')
+            self.assertTrue(schema.visible)
+            self.assertIn('<u>', schema.markdown._props['innerHTML'])
+            self.assertNotIn('title=', schema.markdown._props['innerHTML'])
+            self.assertIn('class="codehilite"', schema.markdown._props['innerHTML'])
+            toggle.set_value('ids')
+            await asyncio.sleep(0.01)
+            self.assertEqual(json.loads(schema.content)['elements'][0]['defaultValue'], 'people:record1')
+            self.assertNotIn('<u>', schema.markdown._props['innerHTML'])
+            service.query_rows.assert_awaited_once_with({
+                'rowSources': [{'rootFormId': 'people'}],
+                'columns': [{'id': 'name', 'formula': 'name'}],
+                'filter': '_id == \"record1\"',
+            })
+            self.assertEqual(payload['elements'][0]['defaultValue'], 'people:record1')
             await database_change(SimpleNamespace(args='db-2'))
             self.assertFalse(schema.visible)
             self.assertEqual(schema.content, '')

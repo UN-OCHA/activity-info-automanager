@@ -46,10 +46,11 @@ class AddFieldTests(unittest.TestCase):
         source = schema()
         before = deepcopy(source)
         with patch('activity_manager.schema_identity.secrets.token_hex') as generate:
-            result = command.execute(source)
-            self.assertEqual(command.execute(source), result)
-            with self.assertRaisesRegex(ValueError, 'already exists'):
-                command.execute(result)
+            result = command.execute(source).schema
+            self.assertEqual(command.execute(source).schema, result)
+            execution = command.execute(result)
+            self.assertRegex(execution.message, 'already exists')
+            self.assertTrue(execution.diagnostics)
             with Client(ui.page('/')), ui.column():
                 commands = CommandListManager(on_execute=lambda: None)
             commands.set_schema(source)
@@ -115,23 +116,24 @@ class AddFieldTests(unittest.TestCase):
                          'AddField(fieldType="FREE_TEXT", fieldCode="name", label="Name", '
                          'key=True, unique=False, required=True)')
         self.assertEqual(parse_command_text(command.to_syntax()), [command])
-        field = command.execute(schema())['elements'][-1]
+        field = command.execute(schema()).schema['elements'][-1]
         self.assertEqual((field['type'], field['key'], field['unique'], field['required']),
                          ('FREE_TEXT', True, False, True))
         narrative = AddFieldCommand('notes', 'Notes', field_type='NARRATIVE')
-        self.assertEqual(narrative.execute(schema())['elements'][-1]['type'], 'NARRATIVE')
+        self.assertEqual(narrative.execute(schema()).schema['elements'][-1]['type'], 'NARRATIVE')
         for argument in ('key="True"', 'unique=0', 'required=None', 'required=bool(1)',
                          'key=true', 'key=True, KEY=False', 'fieldType="unknown"'):
             with self.subTest(argument=argument), self.assertRaises(CommandTextError) as error:
                 parse_command_text(f'AddField(fieldCode="name", label="Name", {argument})')
             self.assertEqual(error.exception.line, 1)
         for arguments in ({'field_type': 'unknown'}, {'required': 1}, {'key': 'false'}):
-            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
-                AddFieldCommand('name', 'Name', **arguments)
+            with self.subTest(arguments=arguments):
+                execution = AddFieldCommand('name', 'Name', **arguments).execute(schema())
+                self.assertTrue(execution.has_errors, execution.message)
 
     def test_materialization_preserves_existing_ids_and_preview_and_is_idempotent(self):
-        preview = AddFieldCommand('name', 'Name').execute(schema())
-        preview = AddFieldCommand('surname', 'Surname').execute(preview)
+        preview = AddFieldCommand('name', 'Name').execute(schema()).schema
+        preview = AddFieldCommand('surname', 'Surname').execute(preview).schema
         with patch('activity_manager.schema_identity.secrets.token_hex',
                    side_effect=['a' * 24, 'a' * 24, 'b' * 24]) as generate:
             target = prepare_schema_for_put(preview)
@@ -270,7 +272,7 @@ class GenericCreatorTests(unittest.TestCase):
 class DeferredWriteTests(unittest.IsolatedAsyncioTestCase):
     async def test_write_and_verification_share_one_materialized_target(self):
         source = schema()
-        preview = AddFieldCommand('name', 'Name').execute(source)
+        preview = AddFieldCommand('name', 'Name').execute(source).schema
         reads = 0
         written = None
 
@@ -296,7 +298,7 @@ class DeferredWriteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stale_and_add_then_delete_do_not_allocate_ids(self):
         source = schema()
-        preview = AddFieldCommand('name', 'Name').execute(source)
+        preview = AddFieldCommand('name', 'Name').execute(source).schema
         changed = deepcopy(source)
         changed['label'] = 'Changed elsewhere'
         service = SimpleNamespace(get_form_schema=AsyncMock(return_value=changed),
@@ -305,14 +307,14 @@ class DeferredWriteTests(unittest.IsolatedAsyncioTestCase):
             stale = await apply_form_schema_change(service, 'form1', source, preview, AsyncMock())
             self.assertEqual(stale.status, 'stale')
             service.get_form_schema.return_value = source
-            target = parse_command_text('DeleteField(fieldCode="name")')[0].execute(preview)
+            target = parse_command_text('DeleteField(fieldCode="name")')[0].execute(preview).schema
             noop = await apply_form_schema_change(service, 'form1', source, target, AsyncMock())
             self.assertEqual(noop.status, 'unchanged')
             generate.assert_not_called()
         service.put_form_schema.assert_not_awaited()
 
     async def test_api_materializes_direct_put_calls_without_mutating_input(self):
-        preview = AddFieldCommand('name', 'Name').execute(schema())
+        preview = AddFieldCommand('name', 'Name').execute(schema()).schema
         service = ActivityInfoService(DEFAULT_BASE_URL, 'test-token')
         try:
             response = AddUpdateFormResponse(database=object(), forms=[])

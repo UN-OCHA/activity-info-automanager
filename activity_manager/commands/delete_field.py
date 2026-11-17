@@ -7,6 +7,7 @@ from typing import Any
 
 from ..command_creator import CommandCreatorDefinition, ParameterDefinition
 from ..command_parser import parse_string_parameters
+from ..command_execution import ExecutionResult
 
 
 @dataclass(frozen=True)
@@ -16,12 +17,12 @@ class DeleteFieldCommand:
     def to_syntax(self) -> str:
         return f'DeleteField(fieldCode={json.dumps(self.field_code, ensure_ascii=False)})'
 
-    def execute(self, schema: dict[str, Any]) -> dict[str, Any]:
+    def execute(self, schema: dict[str, Any]) -> ExecutionResult:
         if not isinstance(schema, dict):
-            raise TypeError('DeleteField requires a form schema object.')
+            return ExecutionResult.error(None, 'DeleteField requires a form schema object.', 'invalid_schema')
         elements = schema.get('elements')
         if not isinstance(elements, list):
-            raise ValueError('DeleteField requires the schema to contain an elements list.')
+            return ExecutionResult.error(schema, 'DeleteField requires the schema to contain an elements list.', 'invalid_schema')
 
         result = deepcopy(schema)
         result_elements = result['elements']
@@ -33,10 +34,10 @@ class DeleteFieldCommand:
             None,
         )
         if field_index is None:
-            raise ValueError(f'DeleteField could not find field code {self.field_code!r}.')
+            return ExecutionResult.warning(schema, f'DeleteField could not find field code {self.field_code!r}. Command skipped; schema unchanged.', 'missing_target')
 
         result_elements.pop(field_index)
-        return result
+        return ExecutionResult(result)
 
 
 def create_delete_field(values: Mapping[str, Any]) -> DeleteFieldCommand:

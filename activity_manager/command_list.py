@@ -1,19 +1,20 @@
 from copy import deepcopy
+import asyncio
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from nicegui import ui
 
+from .command_execution import (
+    Diagnostic, ExecutionResult, ExecutionStatus, EXECUTABLE_STATUSES, apply_command, apply_command_locally,
+)
 from .command_parser import CommandTextError, parse_command_text
 
 
 class Command(Protocol):
     def to_syntax(self) -> str: ...
 
-    def execute(self, schema: dict[str, Any]) -> dict[str, Any]: ...
-
-
-ExecutionStatus = Literal['applied', 'error', 'not_executed']
+    def execute(self, schema: dict[str, Any]) -> ExecutionResult: ...
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,16 @@ class CommandExecution:
     status: ExecutionStatus
     schema: dict[str, Any] | None
     message: str
+    names_schema: dict[str, Any] | None = None
+    diagnostics: tuple[Diagnostic, ...] = ()
+
+    @property
+    def issues(self):
+        return tuple(item for item in self.diagnostics if item.path is not None)
+
+    @classmethod
+    def from_result(cls, result):
+        return cls(result.status, result.schema, result.message, result.names_schema, result.diagnostics)
 
 
 class CommandListManager:
@@ -32,7 +43,15 @@ class CommandListManager:
         on_selection_change=None,
         on_execute=None,
         on_text_mode_change=None,
+        resolve_schema=None,
     ) -> None:
+        self.related_schemas = {}
+        self.database_names = {}
+        self.resolve_schema = resolve_schema
+        self.reference_defaults = {}
+        self.resolution_cache = {}
+        self._evaluation_version = 0
+        self._evaluation_task = None
         self.commands: list[Command] = []
         self.executions: list[CommandExecution] = []
         self.source_schema: dict[str, Any] | None = None
@@ -169,7 +188,7 @@ class CommandListManager:
 
     def target_schema(self) -> dict[str, Any] | None:
         if not self.executions or not all(
-            execution.status == 'applied' for execution in self.executions
+            execution.status in EXECUTABLE_STATUSES for execution in self.executions
         ):
             return None
         return deepcopy(self.executions[-1].schema)
@@ -183,6 +202,18 @@ class CommandListManager:
         self._update_text_action_buttons()
 
     def _evaluate_commands(self) -> None:
+        self._evaluation_version += 1
+        if self._evaluation_task is not None:
+            self._evaluation_task.cancel()
+            self._evaluation_task = None
+        if self.resolve_schema is not None and self.source_schema is not None and self.commands:
+            self.executions = [CommandExecution('resolving' if index == 0 else 'not_executed', None,
+                'Resolving names…' if index == 0 else 'Waiting for the previous command.')
+                for index in range(len(self.commands))]
+            self._publish_evaluation()
+            self._evaluation_task = asyncio.create_task(self._resolve_commands(
+                self._evaluation_version, deepcopy(self.source_schema), list(self.commands)))
+            return
         self.executions.clear()
         current_schema = deepcopy(self.source_schema)
         stopped = current_schema is None
@@ -196,21 +227,38 @@ class CommandListManager:
                 )
                 self.executions.append(CommandExecution('not_executed', None, message))
                 continue
-            try:
-                current_schema = command.execute(current_schema)
-                self.executions.append(CommandExecution(
-                    'applied',
-                    deepcopy(current_schema),
-                    'Command successfully applied to schema.',
-                ))
-            except Exception as exc:
-                message = str(exc) or f'{type(exc).__name__} while executing command.'
-                self.executions.append(CommandExecution('error', None, message))
-                stopped = True
+            result = apply_command_locally(command, current_schema, self.related_schemas, self.database_names)
+            self.executions.append(CommandExecution.from_result(result))
+            current_schema = result.schema
+            stopped = result.has_errors
 
         self._render_simple_view()
         self._notify_selection()
         self._update_execute_button()
+
+    def _publish_evaluation(self):
+        self._render_simple_view()
+        self._notify_selection()
+        self._update_execute_button()
+
+    async def _resolve_commands(self, version, current, commands):
+        for index, command in enumerate(commands):
+            if version != self._evaluation_version:
+                return
+            self.executions[index] = CommandExecution('resolving', None, 'Resolving names…')
+            self._publish_evaluation()
+            result = await apply_command(command, current, self.resolve_schema)
+            if version != self._evaluation_version:
+                return
+            current = result.schema
+            execution = CommandExecution.from_result(result)
+            self.executions[index] = execution
+            if execution.status == 'error':
+                for later in range(index + 1, len(commands)):
+                    self.executions[later] = CommandExecution('not_executed', None, 'Did not execute: the previous command failed.')
+                self._publish_evaluation()
+                return
+            self._publish_evaluation()
 
     def _render_simple_view(self) -> None:
         self.simple_content.clear()
@@ -244,6 +292,8 @@ class CommandListManager:
                         icon, color = {
                             'applied': ('check_circle', 'text-green-600'),
                             'error': ('error', 'text-red-600'),
+                            'warning': ('warning', 'text-yellow-600'),
+                            'resolving': ('hourglass_top', 'text-blue-600'),
                             'not_executed': ('fiber_manual_record', 'text-slate-400'),
                         }[execution.status]
                         ui.icon(icon).classes(color)
@@ -298,7 +348,7 @@ class CommandListManager:
             and self.on_execute is not None
             and bool(self.commands)
             and len(self.executions) == len(self.commands)
-            and all(execution.status == 'applied' for execution in self.executions)
+            and all(execution.status in EXECUTABLE_STATUSES for execution in self.executions)
         )
         if ready:
             self.execute_button.enable()

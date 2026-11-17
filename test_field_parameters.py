@@ -40,7 +40,7 @@ class StandardFieldTests(unittest.TestCase):
             with self.subTest(position=position):
                 command = AddFieldCommand('new', 'New', position=position, before_after_field=relative)
                 self.assertEqual(parse_command_text(command.to_syntax()), [command])
-                result = command.execute(source)
+                result = command.execute(source).schema
                 self.assertEqual([field['code'] for field in result['elements']], codes)
                 self.assertEqual(source, before)
         for settings in (
@@ -48,16 +48,18 @@ class StandardFieldTests(unittest.TestCase):
             {'position': 'After field', 'before_after_field': 'new'},
             {'position': 'End', 'before_after_field': 'old'},
         ):
-            with self.subTest(settings=settings), self.assertRaises(ValueError):
-                AddFieldCommand('new', 'New', **settings)
-        with self.assertRaisesRegex(ValueError, 'could not find'):
-            AddFieldCommand('new', 'New', position='Before field', before_after_field='missing').execute(source)
+            with self.subTest(settings=settings):
+                execution = AddFieldCommand('new', 'New', **settings).execute(schema())
+                self.assertTrue(execution.has_errors, execution.message)
+        execution = AddFieldCommand('new', 'New', position='Before field', before_after_field='missing').execute(source)
+        self.assertRegex(execution.message, 'could not find')
+        self.assertTrue(execution.diagnostics)
         self.assertEqual(source, before)
         command = parse_command_text('AddField(fieldCode="new", label="New", position="beginning")')[0]
         self.assertEqual(command.position, 'Beginning')
 
     def test_key_is_written_only_when_explicit_and_required_defaults_false(self):
-        field = AddFieldCommand('new', 'New').execute(schema())['elements'][-1]
+        field = AddFieldCommand('new', 'New').execute(schema()).schema['elements'][-1]
         self.assertNotIn('key', field)
         self.assertIs(field['required'], False)
         for value in (False, True):
@@ -67,7 +69,7 @@ class StandardFieldTests(unittest.TestCase):
 
     def roundtrip(self, command):
         self.assertEqual(parse_command_text(command.to_syntax()), [command])
-        return command.execute(schema())['elements'][-1]
+        return command.execute(schema()).schema['elements'][-1]
 
     def test_common_properties_conditions_and_false_values_survive(self):
         command = AddFieldCommand(
@@ -111,7 +113,7 @@ class StandardFieldTests(unittest.TestCase):
                 command = AddFieldCommand('new', 'New', field_type=field_type, **settings)
                 field = self.roundtrip(command)
                 self.assertEqual(field['typeParameters'], expected)
-                target = prepare_schema_for_put(command.execute(schema()))
+                target = prepare_schema_for_put(command.execute(schema()).schema)
                 self.assertEqual(FormSchema.from_dict(target).to_dict(), target)
         quantity = AddFieldCommand('new', 'New', field_type='quantity', default_value='0')
         self.assertEqual(quantity.default_value, 0.0)
@@ -129,7 +131,7 @@ class StandardFieldTests(unittest.TestCase):
                 command = AddFieldCommand('files', 'Files', field_type='attachment',
                                           attachment_cardinality=cardinality)
                 self.assertEqual(self.roundtrip(command)['typeParameters'], {'cardinality': cardinality})
-                target = prepare_schema_for_put(command.execute(schema()))
+                target = prepare_schema_for_put(command.execute(schema()).schema)
                 self.assertEqual(FormSchema.from_dict(target).to_dict(), target)
 
     def test_options_defaults_and_lookup_ids_are_deferred_and_consistent(self):
@@ -139,7 +141,7 @@ class StandardFieldTests(unittest.TestCase):
                                    lookup_fields=[{'label': 'Name', 'formula': 'Name'},
                                                   {'label': 'Region', 'formula': 'Region.Name'}])
         with patch('activity_manager.schema_identity.secrets.token_hex') as generate:
-            preview = reference.execute(selection.execute(schema()))
+            preview = reference.execute(selection.execute(schema()).schema).schema
             self.assertEqual(parse_command_text(selection.to_syntax()), [selection])
             self.assertEqual(parse_command_text(reference.to_syntax()), [reference])
             generate.assert_not_called()
@@ -161,7 +163,7 @@ class StandardFieldTests(unittest.TestCase):
                                   translation_field='translated', translation_language='fr, ar, fr')
         translated = AddFieldCommand('translated', 'Translation')
         self.assertEqual(parse_command_text(original.to_syntax()), [original])
-        preview = translated.execute(original.execute(schema()))
+        preview = translated.execute(original.execute(schema()).schema).schema
         self.assertEqual(preview['elements'][1]['typeParameters']['translationConfig']['fieldId'],
                          'field-code:translated')
         target = prepare_schema_for_put(preview)
@@ -169,10 +171,10 @@ class StandardFieldTests(unittest.TestCase):
                          {'fieldId': target['elements'][2]['id'], 'languages': ['fr', 'ar']})
         self.assertEqual(FormSchema.from_dict(target).to_dict(), target)
         with self.assertRaisesRegex(ValueError, 'exactly one'):
-            prepare_schema_for_put(original.execute(schema()))
+            prepare_schema_for_put(original.execute(schema()).schema)
         with self.assertRaisesRegex(ValueError, 'distinct'):
             prepare_schema_for_put(AddFieldCommand('old', 'New', translation=True,
-                translation_field='old', translation_language='fr').execute({'id': 'form1', 'elements': []}))
+                translation_field='old', translation_language='fr').execute({'id': 'form1', 'elements': []}).schema)
 
     def test_metadata_uses_reserved_identity_and_user_reference(self):
         for metadata, reserved in [('ADDED_BY', '_addedBy'), ('LAST_EDITED_BY', '_lastEditedBy')]:
@@ -182,12 +184,13 @@ class StandardFieldTests(unittest.TestCase):
                 self.assertTrue(field['readOnly'])
                 self.assertEqual(field['typeParameters']['range'], [{'formId': 'db1@users'}])
                 with patch('activity_manager.schema_identity.secrets.token_hex') as generate:
-                    target = prepare_schema_for_put(command.execute(schema()))
+                    target = prepare_schema_for_put(command.execute(schema()).schema)
                     generate.assert_not_called()
                 self.assertEqual(target['elements'][-1]['id'], reserved)
                 self.assertEqual(FormSchema.from_dict(target).to_dict(), target)
-                with self.assertRaisesRegex(ValueError, 'already contains'):
-                    AddFieldCommand('otherAuthor', 'Other', field_type='reference', metadata=metadata).execute(target)
+                execution = AddFieldCommand('otherAuthor', 'Other', field_type='reference', metadata=metadata).execute(target)
+                self.assertRegex(execution.message, 'already contains')
+                self.assertTrue(execution.diagnostics)
 
     def test_validation_rejects_wrong_types_combinations_and_nested_shapes(self):
         cases = [
@@ -207,21 +210,21 @@ class StandardFieldTests(unittest.TestCase):
             {'attachment_cardinality': 'single'},
             {'field_type': 'attachment', 'upload_type': ['AUDIO'], 'allowed_file_types': ['PDF']},
             {'field_type': 'enumerated', 'option_list': {'cardinality': 'single', 'values': []}},
-            {'field_type': 'enumerated', 'option_list': OPTIONS, 'default_value': ['unknown']},
             {'field_type': 'reference', 'referenced_form': 'other', 'lookup_fields': [{'formula': 'Name'}]},
             {'field_type': 'quantity', 'default_value': True},
             {'field_type': 'geopoint', 'default_value': {'latitude': 91, 'longitude': 0}},
         ]
         for values in cases:
-            with self.subTest(values=values), self.assertRaises(ValueError):
-                AddFieldCommand('new', 'New', **values)
+            with self.subTest(values=values):
+                execution = AddFieldCommand('new', 'New', **values).execute(schema())
+                self.assertTrue(execution.has_errors, execution.message)
 
     def test_nested_text_rejects_calls_expansion_duplicate_keys_and_invalid_literals(self):
         for extra in (
             'lookupFields=[dict(label="Name", formula="Name")]',
             'lookupFields=[{"label": "Name", "label": "Other", "formula": "Name"}]',
             'lookupFields=[{**other}]', 'lookupFields=[item for item in values]',
-            'geoAccuracy=1e999', 'indentationLevel=True', 'reviewerOnly=True',
+            'geoAccuracy=1e999', 'indentationLevel=True',
         ):
             with self.subTest(extra=extra), self.assertRaises(CommandTextError) as error:
                 parse_command_text(f'AddField(fieldCode="new", label="New", {extra})')
@@ -288,7 +291,7 @@ class ExpandedEditorTests(unittest.TestCase):
         creator._parameter_changed(None)
         self.assertFalse(creator.add_button.props['disable'])
         command = ADD_FIELD.create_command(creator.values())
-        self.assertEqual(command.execute(schema())['elements'][0]['code'], 'new')
+        self.assertEqual(command.execute(schema()).schema['elements'][0]['code'], 'new')
         creator.controls['position'].set_value('End')
         creator._parameter_changed(None)
         self.assertNotIn('before_after_field', creator.values())
@@ -301,13 +304,13 @@ class ExpandedEditorTests(unittest.TestCase):
         creator.controls['barcode'].set_value(True)
         creator._parameter_changed(None)
         command = ADD_FIELD.create_command(creator.values())
-        self.assertTrue(command.execute(schema())['elements'][-1]['typeParameters']['barcode'])
+        self.assertTrue(command.execute(schema()).schema['elements'][-1]['typeParameters']['barcode'])
         creator.controls['field_type'].set_value('quantity')
         creator._parameter_changed(None)
         self.assertFalse(creator.parameter_containers['barcode'].visible)
         self.assertNotIn('barcode', creator.values())
-        with self.assertRaises(ValueError):
-            AddFieldCommand('new', 'New', field_type='quantity', barcode=False)
+        execution = AddFieldCommand('new', 'New', field_type='quantity', barcode=False).execute(schema())
+        self.assertTrue(execution.has_errors, execution.message)
 
     def creator(self):
         with Client(ui.page('/')), ui.column():
@@ -329,7 +332,7 @@ class ExpandedEditorTests(unittest.TestCase):
         creator.controls['required_condition'].set_value('old != ""')
         creator._parameter_changed(None)
         command = ADD_FIELD.create_command(creator.values())
-        self.assertEqual(command.execute(schema())['elements'][-1]['requiredCondition'], 'old != ""')
+        self.assertEqual(command.execute(schema()).schema['elements'][-1]['requiredCondition'], 'old != ""')
         creator.controls['required'].set_value(False)
         creator._parameter_changed(None)
         self.assertFalse(creator.parameter_containers['required_condition'].visible)
@@ -360,7 +363,7 @@ class ExpandedEditorTests(unittest.TestCase):
                 command = ADD_FIELD.create_command(creator.values())
                 source = schema()
                 source['databaseId'] = 'selectedDatabase'
-                field = command.execute(source)['elements'][-1]
+                field = command.execute(source).schema['elements'][-1]
                 self.assertEqual(field['typeParameters'], {'range': [{'formId': 'selectedDatabase@users'}]})
                 self.assertTrue(field['readOnly'])
                 self.assertNotIn('defaultValue', field)
@@ -428,22 +431,17 @@ class ExpandedEditorTests(unittest.TestCase):
 
 
 class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
-    async def test_reference_suggestions_ignore_stale_reads_and_preserve_custom_formulas(self):
+    async def test_reference_suggestions_are_cache_only_and_preserve_custom_formulas(self):
         service = AsyncMock(spec=ActivityInfoService)
+        service.get_form_tree.return_value = {}
+        service.get_database_names.return_value = {}
         service.get_databases.return_value = {'db1': 'Database (db1)'}
         service.get_forms.return_value = {'form1': 'Survey (form1)', 'other': 'Other (other)'}
-        pending = asyncio.Future()
-        started = asyncio.Event()
-
-        async def get_schema(form_id):
-            if form_id == 'slow':
-                started.set()
-                return await pending
-            if form_id == 'form1':
-                return schema()
-            return {'elements': [{'code': 'Name'}, {'code': 'Code'}]}
-
-        service.get_form_schema.side_effect = get_schema
+        service.get_form_schema.side_effect = AssertionError('Creator must not read schemas')
+        service.get_form_tree.return_value = {
+            'form1': schema(),
+            'other': {'elements': [{'code': 'Name'}, {'code': 'Code'}]},
+        }
         captured = []
 
         def create_renderer(*args, **kwargs):
@@ -475,23 +473,25 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
             lookup._change_rows(None, 0)
             lookup.rows[0][1].control.set_value('CONCAT(Name, Code)')
             creator.controls['referenced_form'].set_value('slow')
-            old = asyncio.create_task(creator.on_parameter_change(creator))
-            await asyncio.wait_for(started.wait(), timeout=2)
+            await creator.on_parameter_change(creator)
+            self.assertEqual(lookup.rows[0][1].control.options, [])
             creator.controls['referenced_form'].set_value('other')
             await creator.on_parameter_change(creator)
-            pending.set_result({'elements': [{'code': 'Stale'}]})
-            await old
             self.assertEqual(lookup.rows[0][1].control.options, ['Name', 'Code'])
             self.assertEqual(lookup.rows[0][1].control.value, 'CONCAT(Name, Code)')
+            service.get_form_schema.assert_not_awaited()
+            service.get_form_names.assert_not_awaited()
+            service.query_rows.assert_not_awaited()
             creator.controls['referenced_form'].set_value('form1')
             await creator.on_parameter_change(creator)
             self.assertEqual(lookup.rows[0][1].control.options, ['old'])
-            self.assertEqual(service.get_form_schema.await_count, 3)
+            service.get_form_tree.assert_awaited_once_with('form1')
+            service.get_form_schema.assert_not_awaited()
 
     async def test_reverse_reference_resolves_code_on_target_form_at_write(self):
         command = AddFieldCommand('backlink', 'Backlink', field_type='reversereference',
                                   referenced_form='other', reverse_reference_field='parent')
-        preview = command.execute(schema())
+        preview = command.execute(schema()).schema
         self.assertEqual(parse_command_text(command.to_syntax()), [command])
         external = {'id': 'other', 'elements': [{'id': 'referenceid', 'code': 'parent', 'type': 'reference',
                                               'typeParameters': {'range': [{'formId': 'form1'}]}}]}
@@ -509,7 +509,7 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_code_resolution_stops_without_write_or_recovery_prompt(self):
         loaded = schema()
         preview = AddFieldCommand('new', 'New', translation=True, translation_field='missing',
-                                  translation_language='fr').execute(loaded)
+                                  translation_language='fr').execute(loaded).schema
         service = SimpleNamespace(get_form_schema=AsyncMock(return_value=loaded), put_form_schema=AsyncMock())
         choose = AsyncMock()
         outcome = await apply_form_schema_change(service, 'form1', loaded, preview, choose)
@@ -521,7 +521,7 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
     async def test_nested_write_verifies_materialized_target_without_mutating_preview(self):
         source = schema()
         preview = AddFieldCommand('choice', 'Choice', field_type='enumerated',
-                                  option_list=OPTIONS, default_value=['yes']).execute(source)
+                                  option_list=OPTIONS, default_value=['yes']).execute(source).schema
         written = None
 
         async def write(form_id, target):

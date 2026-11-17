@@ -4,6 +4,8 @@ from copy import deepcopy
 import re
 import secrets
 
+from .schema_names import FORMULA_KEYS, readable_schema, schema_with_ids, resolve_reference_defaults, resolve_form_names
+
 
 PENDING_FIELD_PREFIX = 'pending-field:'
 
@@ -24,7 +26,9 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
     Commands and previews never allocate CUIDs. Existing IDs are preserved.
     The caller retains this exact target for post-write verification.
     """
-    result = deepcopy(schema)
+    # Pending references in preview formulas must be mapped back through codes
+    # before the pending field IDs themselves are materialized.
+    result = readable_schema(schema, referenced_schemas, formulas_only=True)
     elements = result.get('elements')
     if not isinstance(elements, list):
         raise ValueError('The target schema must contain an elements list.')
@@ -84,6 +88,8 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
             continue
         parameters = element.get('typeParameters', {})
         reverse_field = parameters.get('fieldId')
+        if isinstance(reverse_field, str):
+            parameters['fieldId'] = replacements.get(reverse_field, reverse_field)
         if element.get('type') == 'reversereference' and isinstance(reverse_field, str) and reverse_field.startswith('field-code:'):
             code = reverse_field.removeprefix('field-code:')
             form_id = parameters.get('formId')
@@ -100,6 +106,8 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
                 raise ValueError('The reverse-reference field must point back to this form.')
             parameters['fieldId'] = candidate['id']
         config = element.get('typeParameters', {}).get('translationConfig')
+        if config and isinstance(config.get('fieldId'), str):
+            config['fieldId'] = replacements.get(config['fieldId'], config['fieldId'])
         if config and isinstance(config.get('fieldId'), str) and config['fieldId'].startswith('field-code:'):
             code = config['fieldId'].removeprefix('field-code:')
             matches = by_code.get(code, [])
@@ -115,18 +123,58 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
                 element['defaultValue'] = [replacements.get(item, item) for item in value]
             elif isinstance(value, str):
                 element['defaultValue'] = replacements.get(value, value)
+    result = schema_with_ids(result, referenced_schemas)
+    for field in result['elements']:
+        if field.get('type') != 'enumerated' or field.get('defaultValue') is None:
+            continue
+        options = (field.get('typeParameters') or {}).get('values') or []
+        identities = {option.get('id') for option in options}
+        value = field['defaultValue']
+        for item in value if isinstance(value, list) else [value]:
+            if not isinstance(item, str) or item not in identities:
+                raise ValueError(f'Enumerated default {item!r} for field '
+                                 f'{field.get("code", field.get("id"))!r} must resolve to exactly one option ID.')
     return result
 
 
-async def prepare_schema_for_write(service, schema):
-    """Load only schemas needed to resolve code-first reverse references."""
-    referenced_schemas = {}
+async def prepare_schema_for_write(service, schema, related_schemas=None, reference_defaults=None):
+    """Resolve names on a copy only after the user confirms execution."""
+    load_root_tree = related_schemas is None
+    related_schemas = dict(related_schemas or {})
+    schema = await resolve_form_names(service, schema, related_schemas)
+    def has_formula(node):
+        if isinstance(node, dict):
+            return any((key in FORMULA_KEYS and isinstance(value, str)) or has_formula(value)
+                       for key, value in node.items())
+        return isinstance(node, list) and any(has_formula(value) for value in node)
+
+    needed = set()
+    reverse_needed = set()
+    formulas = has_formula(schema)
     for element in schema.get('elements', []):
         parameters = element.get('typeParameters', {})
         field_id = parameters.get('fieldId')
         form_id = parameters.get('formId')
         if (element.get('type') == 'reversereference' and isinstance(field_id, str)
-                and field_id.startswith('field-code:') and form_id != schema.get('id')
-                and form_id not in referenced_schemas):
+                and field_id.startswith('field-code:') and form_id != schema.get('id')):
+            needed.add(form_id)
+            reverse_needed.add(form_id)
+        for entry in parameters.get('range') or []:
+            reference = entry.get('formId')
+            defaults = element.get('defaultValue', [])
+            values = defaults if isinstance(defaults, list) else [defaults]
+            unresolved = any(type(value) in (str, int, float) and not (
+                isinstance(value, str) and value.startswith(f'{reference}:')) for value in values)
+            if reference and reference != schema.get('id') and (formulas or unresolved):
+                needed.add(reference)
+    referenced_schemas = dict(related_schemas or {})
+    if needed and load_root_tree and hasattr(service, 'get_form_tree'):
+        referenced_schemas.update(await service.get_form_tree(schema['id']))
+    for form_id in needed - referenced_schemas.keys():
+        # Tree entries without schemas represent inaccessible/deleted forms.
+        # Leave their formulas/defaults unresolved; strict reverse references
+        # still require the schema to validate that they point back correctly.
+        if form_id in reverse_needed or not hasattr(service, 'get_form_tree'):
             referenced_schemas[form_id] = await service.get_form_schema(form_id)
-    return prepare_schema_for_put(schema, referenced_schemas)
+    result = prepare_schema_for_put(schema, referenced_schemas)
+    return await resolve_reference_defaults(service, result, referenced_schemas, reference_defaults, strict=True)

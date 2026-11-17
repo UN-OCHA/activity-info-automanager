@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from ..command_execution import ExecutionResult
 from ..command_creator import CommandCreatorDefinition
 from ..command_parser import command_error, parse_literal_parameters
 from ..schema_identity import field_code_error, pending_field_id
@@ -94,6 +95,36 @@ class AddFieldCommand:
     before_after_field: str | None = None
 
     def __post_init__(self):
+        # Creation parses values only. Cross-parameter and schema checks belong
+        # to execute(), on a copy, so UI edits never apply a command.
+        if isinstance(self.field_type, str):
+            object.__setattr__(self, 'field_type', FIELD_TYPES_BY_CASE.get(self.field_type.casefold(), self.field_type))
+        if isinstance(self.position, str):
+            positions = {value.casefold(): value for value in ('Beginning', 'End', 'Before field', 'After field')}
+            object.__setattr__(self, 'position', positions.get(self.position.casefold(), self.position))
+        if isinstance(self.translation_language, str):
+            object.__setattr__(self, 'translation_language', [value.strip() for value in self.translation_language.split(',')])
+        value = self.default_value
+        if isinstance(value, str):
+            try:
+                if self.field_type == 'quantity':
+                    number = float(value)
+                    if math.isfinite(number):
+                        value = number
+                elif self.field_type in ('geopoint', 'multiselectreference') or (
+                    self.field_type == 'enumerated' and isinstance(self.option_list, dict)
+                    and self.option_list.get('cardinality') == 'multiple'
+                ):
+                    value = json.loads(value)
+            except (ValueError, TypeError):
+                pass  # Application reports an invalid value as a diagnostic.
+            object.__setattr__(self, 'default_value', value)
+        for name in ARGUMENTS:
+            value = getattr(self, name)
+            if isinstance(value, (dict, list)):
+                object.__setattr__(self, name, deepcopy(value))
+
+    def _validate(self):
         if self.position is not None:
             positions = {value.casefold(): value for value in ('Beginning', 'End', 'Before field', 'After field')}
             if not isinstance(self.position, str) or self.position.casefold() not in positions:
@@ -187,7 +218,7 @@ class AddFieldCommand:
                 fail('default_value', 'Server-maintained metadata fields cannot have client defaults.')
         if self.field_type in ('reference', 'multiselectreference', 'subform', 'reversereference'):
             if not self.metadata and not (self.referenced_form or '').strip():
-                fail('referenced_form', 'This field type requires a referenced form ID.')
+                fail('referenced_form', 'This field type requires a referenced form ID or name.')
             if self.field_type == 'reversereference' and field_code_error(self.reverse_reference_field):
                 fail('reverse_reference_field', 'Reverse references require a reference-field code.')
         if self.field_type == 'enumerated':
@@ -247,8 +278,11 @@ class AddFieldCommand:
                 except ValueError:
                     fail('default_value', 'Use JSON for coordinates or multiple default values.')
             if multiple:
-                if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-                    fail('default_value', 'Multiple default values must be a list of strings.')
+                if not isinstance(value, list) or any(
+                    not isinstance(item, str) and not (self.field_type == 'multiselectreference' and finite_number(item))
+                    for item in value
+                ):
+                    fail('default_value', 'Multiple defaults require strings, or numbers for reference labels.')
             else:
                 if not isinstance(value, dict) or set(value) != {'latitude', 'longitude'}:
                     fail('default_value', 'Geopoint defaults require latitude and longitude.')
@@ -256,13 +290,10 @@ class AddFieldCommand:
                     number = value[key]
                     if not finite_number(number) or abs(number) > limit:
                         fail('default_value', f'Invalid default {key}.')
+        elif self.field_type == 'reference' and finite_number(value):
+            pass
         elif not isinstance(value, str):
             fail('default_value', 'This field type requires a string default value.')
-        if self.field_type == 'enumerated':
-            codes = {option['code'] for option in self.option_list['values']}
-            selected = value if multiple else [value]
-            if any(code not in codes for code in selected):
-                fail('default_value', 'Selection defaults must use codes from the option list.')
         return deepcopy(value)
 
     def to_syntax(self) -> str:
@@ -271,12 +302,20 @@ class AddFieldCommand:
             for key, argument in ARGUMENTS.items() if getattr(self, key) is not None
         ) + ')'
 
-    def execute(self, schema: dict[str, Any]) -> dict[str, Any]:
+    def execute(self, schema: dict[str, Any]) -> ExecutionResult:
+        candidate = deepcopy(self)
+        try:
+            candidate._validate()
+        except FieldParameterError as exc:
+            return ExecutionResult.error(schema, str(exc), f'invalid_{exc.parameter}')
+        return candidate._apply(schema)
+
+    def _apply(self, schema: dict[str, Any]) -> ExecutionResult:
         if not isinstance(schema, dict) or not isinstance(schema.get('elements'), list):
-            raise ValueError('AddField requires a form schema with an elements list.')
+            return ExecutionResult.error(None, 'AddField requires a form schema with an elements list.', 'invalid_schema')
         if any(isinstance(element, dict) and element.get('code') == self.field_code
                for element in schema['elements']):
-            raise ValueError(f'AddField field code {self.field_code!r} already exists.')
+            return ExecutionResult.error(schema, f'AddField field code {self.field_code!r} already exists.', 'duplicate_field')
         result = deepcopy(schema)
         field = {'id': pending_field_id(self.field_code), 'code': self.field_code,
                  'label': self.label, 'type': self.field_type,
@@ -314,7 +353,8 @@ class AddFieldCommand:
                 for option in self.option_list['values']
             ]
             if self.default_value is not None:
-                token = lambda code: f'pending-option:{self.field_code}:{code}'
+                codes = {option['code'] for option in self.option_list['values']}
+                token = lambda code: f'pending-option:{self.field_code}:{code}' if code in codes else code
                 field['defaultValue'] = [token(code) for code in self.default_value] if isinstance(
                     self.default_value, list
                 ) else token(self.default_value)
@@ -334,13 +374,13 @@ class AddFieldCommand:
         if self.metadata:
             database_id = schema.get('databaseId')
             if not isinstance(database_id, str) or not database_id:
-                raise ValueError('Metadata fields require a database ID in the form schema.')
+                return ExecutionResult.error(schema, 'Metadata fields require a database ID in the form schema.', 'missing_database')
             target = f'{database_id}@users'
             if self.referenced_form and self.referenced_form != target:
-                raise ValueError('Metadata fields must reference this database\'s users.')
+                return ExecutionResult.error(schema, "Metadata fields must reference this database's users.", "invalid_metadata_target")
             if any(isinstance(element, dict) and element.get('metadata') == self.metadata
                    for element in schema['elements']):
-                raise ValueError(f'The form already contains {self.metadata} metadata.')
+                return ExecutionResult.error(schema, f'The form already contains {self.metadata} metadata.', 'duplicate_metadata')
             field['metadata'] = self.metadata
             field['readOnly'] = True
             parameters['range'] = [{'formId': target}]
@@ -354,23 +394,15 @@ class AddFieldCommand:
                                    if isinstance(element, dict)
                                    and element.get('code') == self.before_after_field), None)
             if relative_index is None:
-                raise ValueError(f'AddField could not find before/after field code {self.before_after_field!r}.')
+                return ExecutionResult.error(schema, f'AddField could not find before/after field code {self.before_after_field!r}.', 'missing_relative_target')
             elements.insert(relative_index + (self.position == 'After field'), field)
         else:
             elements.append(field)
-        return result
+        return ExecutionResult(result)
 
 
 def create_add_field(values: Mapping[str, Any]) -> AddFieldCommand:
     return AddFieldCommand(**{key: value for key, value in values.items() if key in ARGUMENTS})
-
-
-def validate_add_field(values):
-    try:
-        create_add_field(values)
-    except ValueError as exc:
-        return str(exc)
-    return None
 
 
 def parse_add_field(text: str, call: ast.Call) -> AddFieldCommand:
@@ -385,17 +417,20 @@ def parse_add_field(text: str, call: ast.Call) -> AddFieldCommand:
         text, call, 'AddField', types=types, required={'fieldCode', 'label'},
         allow_empty=set(types) - {'fieldType', 'fieldCode', 'label'},
     )
+    for argument, error in (
+        ('fieldCode', field_code_error(values['fieldCode'])),
+        ('fieldType', field_type_error(values.get('fieldType', 'FREE_TEXT'))),
+        ('label', None if values['label'].strip() else 'Field label is required.'),
+    ):
+        if error:
+            node = next((keyword.value for keyword in call.keywords
+                         if keyword.arg and keyword.arg.casefold() == argument.casefold()), call)
+            raise command_error(text, node, error)
     by_argument = {argument: key for key, argument in ARGUMENTS.items()}
-    try:
-        return create_add_field({by_argument[key]: value for key, value in values.items()})
-    except FieldParameterError as exc:
-        argument = ARGUMENTS.get(exc.parameter, '')
-        node = next((keyword.value for keyword in call.keywords
-                     if keyword.arg and keyword.arg.casefold() == argument.casefold()), call)
-        raise command_error(text, node, str(exc)) from None
+    return create_add_field({by_argument[key]: value for key, value in values.items()})
 
 
 ADD_FIELD = CommandCreatorDefinition(
     key='add_field', label='Add field', create_command=create_add_field,
-    parameters=ADD_FIELD_PARAMETERS, validate_values=validate_add_field,
+    parameters=ADD_FIELD_PARAMETERS,
 )

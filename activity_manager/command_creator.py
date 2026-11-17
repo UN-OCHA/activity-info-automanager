@@ -42,7 +42,6 @@ class CommandCreatorDefinition:
     label: str
     parameters: tuple[ParameterDefinition, ...]
     create_command: Callable[[Mapping[str, Any]], Any]
-    validate_values: Callable[[Mapping[str, Any]], str | None] | None = None
 
 
 def field_codes_from_schema(schema: dict[str, Any] | None) -> list[str]:
@@ -267,6 +266,8 @@ class _ParameterEditor:
                     raise ValueError(f'{definition.label} requires at least one choice.')
             if self.required and blank:
                 raise ValueError(f'{definition.label} is required.')
+            if definition.control == 'single_select' and blank and definition.blank_action != 'unset':
+                raise ValueError(f'{definition.label} requires a choice.')
             if blank:
                 value = None if definition.blank_action == 'unset' else ''
             elif definition.control == 'boolean' or definition.value_type == 'boolean':
@@ -410,12 +411,7 @@ class CommandCreatorRenderer:
 
     def _update_add_button(self):
         try:
-            values = self.values()
-            definition = self.definitions.get(self.command_select.value)
-            if definition and definition.validate_values:
-                error = definition.validate_values(values)
-                if error:
-                    raise ValueError(error)
+            self.values()
         except ValueError as exc:
             self.error.set_text(str(exc))
             self.add_button.disable()
