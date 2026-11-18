@@ -72,18 +72,20 @@ def connection_page():
         .command-text-body {
             overflow: hidden;
         }
-        .command-text-editor,
-        .command-text-editor .q-field__inner,
-        .command-text-editor .q-field__control,
-        .command-text-editor .q-field__control-container {
+        .command-text-editor {
+            flex: 1 1 0;
+            min-height: 0;
+            min-width: 0;
+            overflow: hidden;
+        }
+        .command-text-editor .cm-editor {
             height: 100%;
             min-height: 0;
         }
-        .command-text-editor textarea.q-field__native {
-            height: 100%;
-            min-height: 0;
-            resize: none;
-            overflow-y: auto;
+        .command-text-editor .cm-scroller {
+            overflow: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.875rem;
         }
         .console-panel {
             grid-column: 2 / 4;

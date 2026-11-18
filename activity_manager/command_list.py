@@ -5,6 +5,7 @@ from typing import Any, Protocol
 
 from nicegui import ui
 
+from .command_card import render_command_card
 from .command_execution import (
     Diagnostic, ExecutionResult, ExecutionStatus, EXECUTABLE_STATUSES, apply_command, apply_command_locally,
 )
@@ -65,6 +66,7 @@ class CommandListManager:
         self.selected_index: int | None = None
         self.selected_iteration: int | None = None
         self.expanded_commands: set[int] = set()
+        self.expanded_text_commands: set[int] = set()
         self.advanced_draft = ''
         self.stored_text = ''
         self.on_selection_change = on_selection_change
@@ -88,11 +90,48 @@ class CommandListManager:
 
         self.advanced_view = ui.column().classes('command-text-body w-full')
         with self.advanced_view:
-            self.advanced_editor = ui.textarea(
-                'Commands',
-                placeholder='One command per line',
+            self.advanced_editor = ui.codemirror(
+                language='Python', line_wrapping=True,
                 on_change=self._advanced_changed,
-            ).props('outlined rows=1').classes('command-text-editor w-full')
+            ).classes('command-text-editor w-full border rounded').props('aria-label=Commands')
+            with ui.row().classes('w-full shrink-0 gap-1'):
+                self.wrap_button = ui.button(
+                    'Wrap', icon='wrap_text', on_click=self._toggle_word_wrap,
+                ).props('flat dense color=primary aria-pressed=true')
+                self.copy_button = ui.button(
+                    'Copy', icon='content_copy',
+                ).props('flat dense')
+                # Copy the live CodeMirror document, including edits that have
+                # not yet reached Python, without a server round trip.
+                self.copy_button.on('click', self._copy_failed, js_handler='''async () => {
+                    if (!navigator.clipboard?.writeText) {
+                        emit({error: 'unavailable'});
+                        return;
+                    }
+                    try {
+                        const editor = getElement(__EDITOR_ID__).editor;
+                        await navigator.clipboard.writeText(editor.state.doc.toString());
+                    } catch (error) {
+                        emit({error: 'failed'});
+                    }
+                }'''.replace('__EDITOR_ID__', str(self.advanced_editor.id)))
+                self.paste_button = ui.button(
+                    'Paste & replace', icon='content_paste',
+                ).props('flat dense')
+                # Read during the browser click, before a server round trip can
+                # lose the user activation required by Firefox.
+                self.paste_button.on('click', self._paste_text, js_handler='''async () => {
+                    if (!navigator.clipboard?.readText) {
+                        emit({error: 'unavailable'});
+                        return;
+                    }
+                    try {
+                        const text = await navigator.clipboard.readText();
+                        emit({text});
+                    } catch (error) {
+                        emit({error: 'denied'});
+                    }
+                }''')
 
         with ui.column().classes('w-full'):
             self.execute_button = ui.button(
@@ -172,6 +211,7 @@ class CommandListManager:
             raise IndexError('command index out of range')
         command = self.commands.pop(index)
         self.expanded_commands.discard(id(command))
+        self.expanded_text_commands.discard(id(command))
         if self.selected_index == index:
             self.selected_index = None
             self.selected_iteration = None
@@ -290,7 +330,7 @@ class CommandListManager:
 
     def set_busy(self, busy: bool) -> None:
         self.busy = busy
-        for control in (self.view_toggle, self.advanced_editor):
+        for control in (self.view_toggle, self.advanced_editor, self.paste_button):
             (control.disable if busy else control.enable)()
         self._render_simple_view()
         self._update_execute_button()
@@ -389,102 +429,49 @@ class CommandListManager:
             for index, command in enumerate(self.commands):
                 execution = self.executions[index]
                 expanded = id(command) in self.expanded_commands
-                if expanded:
-                    with ui.column().classes('w-full gap-1 pl-5 border-l-2 border-slate-300'):
-                        for iteration, child in enumerate(execution.iterations):
-                            selected_child = index == self.selected_index and iteration == self.selected_iteration
-                            included_child = self.selected_index is not None and (index < self.selected_index or (
-                                index == self.selected_index and (self.selected_iteration is None or iteration < self.selected_iteration)))
-                            shade = 'bg-blue-200 border-blue-500' if selected_child else (
-                                'bg-blue-100 border-blue-300' if included_child else 'bg-slate-50 border-slate-200')
-                            with ui.row().classes(
-                                f'w-full cursor-pointer items-center gap-2 rounded border px-2 py-1 {shade}'
-                            ).on('click', lambda _, i=index, n=iteration: self.select_iteration(i, n)):
-                                self._status_icon(child.status)
-                                ui.label(f'Iteration {iteration + 1} ({child.field_code})').classes('text-xs font-mono break-all')
-                selected = index == self.selected_index and self.selected_iteration is None
-                included = self.selected_index is not None and index < self.selected_index
-                background = (
-                    'bg-blue-200 border-blue-500'
-                    if selected
-                    else 'bg-blue-100 border-blue-300'
-                    if included
-                    else 'bg-slate-50 border-slate-200'
+                render_command_card(
+                    command, execution,
+                    index=index,
+                    command_count=len(self.commands),
+                    selected_index=self.selected_index,
+                    selected_iteration=self.selected_iteration,
+                    expanded=expanded,
+                    busy=self.busy,
+                    text_expanded=id(command) in self.expanded_text_commands,
+                    on_toggle_text=self._toggle_command_text,
+                    on_select=self.select_command,
+                    on_select_iteration=self.select_iteration,
+                    on_toggle_iterations=self.toggle_iterations,
+                    on_move=self.move_command,
+                    on_delete=self.delete_command,
                 )
-                with ui.row().classes(
-                    f'w-full cursor-pointer items-center gap-2 rounded border p-2 {background}'
-                ).on(
-                    'click',
-                    lambda _, selected_index=index: self.select_command(selected_index),
-                ):
-                    with ui.row().classes(
-                        'min-w-0 grow items-center gap-2'
-                    ):
-                        self._status_icon(execution.status)
-                        ui.label(command.to_syntax()).classes(
-                            'min-w-0 grow font-mono text-sm break-all'
-                        )
-                    with ui.row().classes('shrink-0 gap-0') as actions:
-                        actions.on(
-                            'click',
-                            js_handler='(event) => event.stopPropagation()',
-                        )
-                        if isinstance(command, IterativeCommand):
-                            count = len(execution.iterations)
-                            completed = sum(child.status in EXECUTABLE_STATUSES for child in execution.iterations)
-                            label = f'{count} iterations'
-                            if execution.status == 'resolving' and count:
-                                label = f'{completed} / {count} completed'
-                            elif execution.status == 'error' and count:
-                                failed = sum(child.status == 'error' for child in execution.iterations)
-                                skipped = sum(child.status == 'not_executed' for child in execution.iterations)
-                                label = f'{completed} applied · {failed} failed · {skipped} skipped'
-                            ui.badge(label, color='grey').classes('self-start')
-                            self._command_button('expand_less' if expanded else 'expand_more',
-                                'Collapse iterations' if expanded else 'Expand iterations',
-                                lambda index=index: self.toggle_iterations(index))
-                        up = self._command_button(
-                            'keyboard_arrow_up',
-                            'Move command up',
-                            lambda index=index: self.move_command(index, index - 1),
-                        )
-                        down = self._command_button(
-                            'keyboard_arrow_down',
-                            'Move command down',
-                            lambda index=index: self.move_command(index, index + 1),
-                        )
-                        delete = self._command_button(
-                            'delete_outline',
-                            'Delete command',
-                            lambda index=index: self.delete_command(index),
-                        ).classes('text-red-600')
-                        if index == 0:
-                            up.disable()
-                        if index == len(self.commands) - 1:
-                            down.disable()
-                        if self.busy:
-                            for button in (up, down, delete):
-                                button.disable()
 
-    @staticmethod
-    def _status_icon(status):
-        icon, color = {
-            'applied': ('check_circle', 'text-green-600'),
-            'error': ('error', 'text-red-600'),
-            'warning': ('warning', 'text-yellow-600'),
-            'resolving': ('hourglass_top', 'text-blue-600'),
-            'not_executed': ('fiber_manual_record', 'text-slate-400'),
-        }[status]
-        return ui.icon(icon).classes(color)
+    def _toggle_command_text(self, index: int) -> None:
+        key = id(self.commands[index])
+        if key in self.expanded_text_commands:
+            self.expanded_text_commands.remove(key)
+        else:
+            self.expanded_text_commands.add(key)
+        self._render_simple_view()
 
-    @staticmethod
-    def _command_button(icon: str, label: str, handler):
-        button = ui.button(
-            icon=icon, on_click=handler,
-        ).props('flat dense round color=grey-7')
-        button.props['aria-label'] = label
-        button.tooltip(label)
-        return button
+    def _toggle_word_wrap(self) -> None:
+        enabled = not self.advanced_editor.line_wrapping
+        self.advanced_editor.set_line_wrapping(enabled)
+        self.wrap_button.props(f'color={"primary" if enabled else "grey-7"} aria-pressed={str(enabled).lower()}')
+
+    def _copy_failed(self, event) -> None:
+        ui.notify('Could not copy to the clipboard. Select the editor contents and press Ctrl+C.', type='warning')
+
+    def _paste_text(self, event) -> None:
+        """Replace the draft with text read by the browser's click handler."""
+        if self.busy or self.current_view != 'text':
+            return
+        if event.args.get('error') == 'unavailable':
+            ui.notify('Clipboard access is unavailable. Paste directly into the editor.', type='warning')
+        elif event.args.get('error'):
+            ui.notify('Clipboard read was cancelled or blocked. In Firefox, choose Paste in the browser prompt, or paste directly into the editor.', type='warning')
+        elif isinstance(event.args.get('text'), str):
+            self.advanced_editor.set_value(event.args['text'])
 
     def _update_count(self) -> None:
         count = len(self.commands)
@@ -580,6 +567,7 @@ class CommandListManager:
         self.selected_index = None
         self.selected_iteration = None
         self.expanded_commands.clear()
+        self.expanded_text_commands.clear()
         self._evaluate_commands()
         self._update_count()
         self._regenerate_advanced_draft()
