@@ -468,7 +468,30 @@ def parse_modify_field(text, call):
         raise command_error(text, call, str(exc)) from None
 
 
-MODIFY_FIELD = CommandCreatorDefinition('modify_field', 'Modify field', MODIFY_FIELD_PARAMETERS, create_modify_field)
+def target_defaults(schema, target):
+    """Suggest target selectors from cached fields, preferring exact codes."""
+    elements = schema.get('elements', []) if schema else []
+    if not target or not isinstance(elements, list):
+        return {}
+    fields = [element for element in elements if isinstance(element, dict)]
+    matches = [element for element in fields if element.get('code') == target]
+    if not matches:
+        matches = [element for element in fields if element.get('label') == target]
+    if len(matches) != 1:
+        return {}
+    field = matches[0]
+    kind = FIELD_TYPES_BY_CASE.get(str(field.get('type', '')).casefold())
+    if kind is None:
+        return {}
+    try:
+        variant = schema_variant(field)
+    except ValueError:
+        return {}
+    return {'field_type': kind, 'field_variant': variant}
+
+
+MODIFY_FIELD = CommandCreatorDefinition('modify_field', 'Modify field', MODIFY_FIELD_PARAMETERS, create_modify_field,
+                                        target_defaults=target_defaults)
 
 
 COMMAND = CommandDefinition('ModifyField', parse_modify_field, MODIFY_FIELD)

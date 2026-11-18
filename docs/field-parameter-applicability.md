@@ -94,8 +94,9 @@ the designer differs.
 - Future matching: exact code first; a code match with a different type/variant
   is an error. Only when no code matches, try the supplied `fieldCode` as an exact
   label. Reject ambiguous matches. Note/Section use this same targeting argument.
-- Creation never reads existing field values. Cached suggestions are optional;
-  selected schemas do not determine target type, variant, values or rows.
+- Selecting an existing ModifyField target populates its type and variant from
+  the cached schema (exact code first, then an unambiguous exact label). Both
+  selectors remain editable. Other edit values and rows are not populated.
 - Excluded edits are omitted (unchanged). Included blank text/numbers/choices and
   empty collections produce explicit `None` (remove). Included unchecked booleans
   produce `False`. No separate Clear control or literal empty-string operation.

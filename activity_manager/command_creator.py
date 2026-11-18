@@ -45,6 +45,7 @@ class CommandCreatorDefinition:
     label: str
     parameters: tuple[ParameterDefinition, ...]
     create_command: Callable[[Mapping[str, Any]], Any]
+    target_defaults: Callable[[dict[str, Any] | None, str], Mapping[str, Any]] | None = None
 
 
 def field_codes_from_schema(schema: dict[str, Any] | None) -> list[str]:
@@ -383,6 +384,7 @@ class CommandCreatorRenderer:
     def _render_selected_command(self):
         self._updating = True
         try:
+            self._last_target = None
             self.parameters.clear()
             self.controls.clear()
             self.activations.clear()
@@ -404,9 +406,29 @@ class CommandCreatorRenderer:
     def _parameter_changed(self, event):
         if self._updating:
             return
+        self._populate_target_defaults()
         self._update_conditional_visibility()
         self._update_add_button()
         events.handle_event(self.on_parameter_change, self)
+
+    def _populate_target_defaults(self):
+        definition = self.definitions.get(self.command_select.value)
+        if definition is None or definition.target_defaults is None:
+            return
+        target = self.controls['field_code'].value
+        if target == self._last_target:
+            return
+        self._last_target = target
+        defaults = definition.target_defaults(self.schema, target)
+        self._updating = True
+        try:
+            if 'field_type' in defaults:
+                self.controls['field_type'].set_value(defaults['field_type'])
+                # Refresh variant choices before assigning the detected variant.
+                self._refresh_editors(self.editors, self.enabled)
+                self.controls['field_variant'].set_value(defaults.get('field_variant'))
+        finally:
+            self._updating = False
 
     def _update_conditional_visibility(self):
         self._updating = True

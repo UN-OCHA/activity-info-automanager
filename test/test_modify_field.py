@@ -40,6 +40,42 @@ class ModifyFieldCreatorTests(unittest.TestCase):
         creator._parameter_changed(None)
         self.assertIsNone(self.command(creator).changes['units'])
 
+    def test_target_selection_populates_editable_selectors(self):
+        creator = self.creator()
+        creator.set_schema({'elements': [
+            {'code': 'choices', 'type': 'enumerated', 'typeParameters': {'cardinality': 'multiple'}},
+            {'code': 'barcode', 'type': 'FREE_TEXT', 'typeParameters': {'barcode': True}},
+            {'code': 'date', 'type': 'date'},
+            {'code': 'owner', 'label': 'Owner', 'type': 'reference',
+             'typeParameters': {'range': [{'formId': 'db@users'}]}},
+        ]})
+        for target, kind, variant in [('choices', 'enumerated', 'multiple'),
+                                      ('barcode', 'FREE_TEXT', 'barcode'),
+                                      ('Owner', 'reference', 'user'), ('date', 'date', None)]:
+            creator.controls['field_code'].set_value(target)
+            creator._parameter_changed(None)
+            self.assertEqual(creator.controls['field_type'].value, kind)
+            self.assertEqual(creator.controls['field_variant'].value, variant)
+            self.assertFalse(creator.controls['field_type'].props.get('disable', False))
+            if variant:
+                self.assertFalse(creator.controls['field_variant'].props.get('disable', False))
+        creator.controls['field_type'].set_value('quantity')
+        creator._parameter_changed(None)
+        self.assertEqual(creator.controls['field_type'].value, 'quantity')
+        creator.controls['field_code'].set_value('unknown')
+        creator._parameter_changed(None)
+        self.assertEqual(creator.controls['field_type'].value, 'quantity')
+
+    def test_target_defaults_prefer_code_and_skip_ambiguous_labels(self):
+        from activity_manager.commands.modify_field import target_defaults
+        schema = {'elements': [
+            {'code': 'x', 'label': 'Duplicate', 'type': 'date'},
+            {'code': 'y', 'label': 'Duplicate', 'type': 'quantity'},
+            {'code': 'z', 'label': 'x', 'type': 'quantity'},
+        ]}
+        self.assertEqual(target_defaults(schema, 'x'), {'field_type': 'date', 'field_variant': None})
+        self.assertEqual(target_defaults(schema, 'Duplicate'), {})
+
     def test_creator_recognizes_functions_without_evaluating_them(self):
         creator = self.creator()
         for key in ('new_code', 'description', 'validation_condition', 'default_value'):
