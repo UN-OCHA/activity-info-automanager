@@ -25,10 +25,11 @@ class Diagnostic:
 
 @dataclass(frozen=True)
 class CommandContext:
-    """Cached schema context for transformations; commands perform no API reads."""
+    """Cached schema context and the current evaluation's text variables."""
 
     related_schemas: dict | None = None
     database_names: dict | None = None
+    variables: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class ExecutionResult:
     schema: dict | None
     diagnostics: tuple[Diagnostic, ...] = ()
     names_schema: dict | None = None
+    success_message: str | None = None
 
     @property
     def has_errors(self):
@@ -47,7 +49,9 @@ class ExecutionResult:
 
     @property
     def message(self):
-        return '\n'.join(item.console_line() for item in self.diagnostics) or 'Command successfully applied to schema.'
+        lines = [self.success_message] if self.success_message and not self.has_errors else []
+        lines.extend(item.console_line() for item in self.diagnostics)
+        return '\n'.join(lines) or 'Command successfully applied to schema.'
 
     @property
     def issues(self):
@@ -69,7 +73,7 @@ def transform_command(command, schema, context=None):
         from .command_templates import command_parameters
         if not isinstance(command, PreparedCommand):
             try:
-                command = command_parameters(command, {})
+                command = command_parameters(command, context.variables if context and context.variables is not None else {})
             except ValueError as exc:
                 return ExecutionResult.error(schema, str(exc), 'invalid_parameter')
         result = command.execute(schema, context=context)
@@ -80,27 +84,48 @@ def transform_command(command, schema, context=None):
         return ExecutionResult.error(schema, f'{type(exc).__name__}: {exc}', 'unexpected_command_error')
 
 
-def apply_command_locally(command, schema, related_schemas=None, database_names=None):
+def apply_command_locally(command, schema, related_schemas=None, database_names=None, *, variables=None):
     """Application without a connected resolver still uses the same contract."""
-    result = transform_command(command, schema, CommandContext(related_schemas, database_names))
+    result = transform_command(command, schema, CommandContext(related_schemas, database_names, variables if variables is not None else {}))
     if result.has_errors:
         return result
     diagnostics = tuple(Diagnostic('warning', f'Unresolved formula reference {token!r}.', path)
         for path, token, _ in unresolved_formula_references(result.schema, related_schemas))
     return ExecutionResult(result.schema, result.diagnostics + diagnostics,
-        readable_schema(result.schema, related_schemas, database_names))
+        readable_schema(result.schema, related_schemas, database_names), result.success_message)
 
 
-async def apply_command(command, schema, resolver, *, related_schemas=None, database_names=None):
+async def apply_command(command, schema, resolver, *, related_schemas=None, database_names=None, variables=None, lookup_variable=None):
     """Run transformation then resolution, preserving diagnostics in order."""
-    result = transform_command(command, schema, CommandContext(related_schemas, database_names))
+    from .commands.set_variable import SetVariableCommand
+    from .command_iteration import PreparedCommand
+    from .command_templates import command_parameters
+    context = CommandContext(related_schemas, database_names, variables if variables is not None else {})
+    try:
+        prepared = command.command if isinstance(command, PreparedCommand) else command_parameters(command, context.variables)
+    except ValueError as exc:
+        return ExecutionResult.error(schema, str(exc), 'invalid_parameter')
+    except Exception as exc:
+        return ExecutionResult.error(schema, f'{type(exc).__name__}: {exc}', 'unexpected_command_error')
+    if isinstance(prepared, SetVariableCommand):
+        try:
+            result = (await prepared.execute_lookup(schema, context, lookup_variable)
+                      if prepared.method == 'lookup' else prepared.execute(schema, context=context))
+            return ExecutionResult(result.schema, result.diagnostics,
+                readable_schema(result.schema, related_schemas, database_names), result.success_message)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return ExecutionResult.error(schema, str(exc), 'invalid_variable')
+    result = transform_command(PreparedCommand(prepared), schema, context)
     if result.has_errors:
         return result
     try:
         resolved = await resolver(result.schema)
         if not isinstance(resolved, ExecutionResult):
             raise TypeError('The name resolver must return ExecutionResult.')
-        return ExecutionResult(resolved.schema, result.diagnostics + resolved.diagnostics, resolved.names_schema)
+        return ExecutionResult(resolved.schema, result.diagnostics + resolved.diagnostics,
+                               resolved.names_schema, result.success_message)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

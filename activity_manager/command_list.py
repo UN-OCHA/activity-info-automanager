@@ -52,10 +52,12 @@ class CommandListManager:
         on_execute=None,
         on_text_mode_change=None,
         resolve_schema=None,
+        lookup_variable=None,
     ) -> None:
         self.related_schemas = {}
         self.database_names = {}
         self.resolve_schema = resolve_schema
+        self.lookup_variable = lookup_variable
         self.reference_defaults = {}
         self.resolution_cache = {}
         self._evaluation_version = 0
@@ -259,7 +261,7 @@ class CommandListManager:
         self._render_simple_view()
         self._notify_selection()
 
-    def _application_steps(self, index, current):
+    def _application_steps(self, index, current, variables=None):
         """One orchestration path shared by synchronous and connected evaluation.
 
         Yield concrete applications; callers send back their normal results.
@@ -269,7 +271,7 @@ class CommandListManager:
             result = yield command
             return CommandExecution.from_result(result)
         try:
-            targets = command.targets(current)
+            targets = command.targets(current, variables)
         except ValueError as exc:
             return CommandExecution.from_result(ExecutionResult.error(current, str(exc), 'invalid_selector'))
         if not targets:
@@ -283,7 +285,7 @@ class CommandListManager:
                                                     field_code=target.original_code, target=target)
             self.executions[index] = self._summarize_iterations(children, current)
             try:
-                concrete = target.prepare(command, current, previous)
+                concrete = target.prepare(command, current, previous, variables)
             except ValueError as exc:
                 concrete = None
                 result = ExecutionResult.error(current, str(exc), 'invalid_iteration')
@@ -350,6 +352,7 @@ class CommandListManager:
                 self._evaluation_version, deepcopy(self.source_schema), list(self.commands)))
             return
         self.executions.clear()
+        variables = {}
         current_schema = deepcopy(self.source_schema)
         stopped = current_schema is None
 
@@ -363,11 +366,11 @@ class CommandListManager:
                 self.executions.append(CommandExecution('not_executed', None, message))
                 continue
             self.executions.append(CommandExecution('resolving', None, 'Applying command…'))
-            steps = self._application_steps(index, current_schema)
+            steps = self._application_steps(index, current_schema, variables)
             try:
                 application = next(steps)
                 while True:
-                    result = apply_command_locally(application, current_schema, self.related_schemas, self.database_names)
+                    result = apply_command_locally(application, current_schema, self.related_schemas, self.database_names, variables=variables)
                     current_schema = result.schema
                     application = steps.send(result)
             except StopIteration as finished:
@@ -386,18 +389,20 @@ class CommandListManager:
         self._update_execute_button()
 
     async def _resolve_commands(self, version, current, commands):
+        variables = {}
         for index, command in enumerate(commands):
             if version != self._evaluation_version:
                 return
             self.executions[index] = CommandExecution('resolving', None, 'Resolving names…')
             self._publish_evaluation()
-            steps = self._application_steps(index, current)
+            steps = self._application_steps(index, current, variables)
             try:
                 application = next(steps)
                 while True:
                     self._publish_evaluation()
                     result = await apply_command(application, current, self.resolve_schema,
-                        related_schemas=self.related_schemas, database_names=self.database_names)
+                        related_schemas=self.related_schemas, database_names=self.database_names,
+                        variables=variables, lookup_variable=self.lookup_variable)
                     if version != self._evaluation_version:
                         return
                     current = result.schema

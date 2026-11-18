@@ -5,7 +5,11 @@ from .add_field import ADD_FIELD, AddFieldCommand
 from .delete_field import DELETE_FIELD, DeleteFieldCommand
 from .move_field import MOVE_FIELD, MoveFieldCommand
 
+from .set_variable import SET_VARIABLE, SetVariableCommand
+
 __all__ = [
+    'SET_VARIABLE',
+    'SetVariableCommand',
     'CommandDefinition',
     'COMMANDS',
     'COMMANDS_BY_NAME',

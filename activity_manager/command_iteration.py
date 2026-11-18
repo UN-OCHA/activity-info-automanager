@@ -6,7 +6,7 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, replace
 
-from .command_templates import command_parameters
+from .command_templates import FIELD_BUILTINS, command_parameters, substitute_selector
 
 
 ITERABLE_COMMANDS = frozenset({'movefield', 'deletefield', 'modifyfield'})
@@ -20,9 +20,18 @@ def compile_pattern(pattern):
         compiled = re.compile(pattern)
     except re.error as exc:
         raise ValueError(f'Invalid field code pattern: {exc}') from None
-    if 'code' in compiled.groupindex:
-        raise ValueError("Capture group 'code' is reserved for the original field code.")
+    for name in sorted(FIELD_BUILTINS.intersection(compiled.groupindex)):
+        raise ValueError(f'Capture group {name!r} is reserved for built-in field context.')
     return compiled
+
+
+def validate_pattern(pattern):
+    """Validate authored templates; compile after substitution at selection time."""
+    if not isinstance(pattern, str) or not pattern:
+        raise ValueError('Field code pattern is required.')
+    substitute_selector(pattern)
+    if '${' not in pattern:
+        compile_pattern(pattern)
 
 
 @dataclass(frozen=True)
@@ -31,7 +40,7 @@ class IterativeCommand:
     field_pattern: str
 
     def __post_init__(self):
-        compile_pattern(self.field_pattern)
+        validate_pattern(self.field_pattern)
         command_parameters(self.command)
 
     def to_syntax(self):
@@ -44,10 +53,10 @@ class IterativeCommand:
                 arguments.append(keyword.arg + '=' + ast.unparse(keyword.value))
         return f'{call.func.id}({", ".join(arguments)})'
 
-    def targets(self, schema):
+    def targets(self, schema, variables=None):
         if not isinstance(schema, dict) or not isinstance(schema.get('elements'), list):
             raise ValueError('Multi-field commands require a form schema with an elements list.')
-        pattern = compile_pattern(self.field_pattern)
+        pattern = compile_pattern(substitute_selector(self.field_pattern, variables if variables is not None else {}))
         targets = []
         for element in schema['elements']:
             if not isinstance(element, dict) or not isinstance(element.get('code'), str):
@@ -56,10 +65,10 @@ class IterativeCommand:
             match = pattern.fullmatch(code)
             if match is None:
                 continue
-            variables = {'match.code': code, 'iteration.index': len(targets) + 1}
-            variables.update({f'match.{index}': value for index, value in enumerate(match.groups(), 1)})
-            variables.update({f'match.{key}': value for key, value in match.groupdict().items()})
-            targets.append(IterationTarget(element.get('id'), code, variables))
+            field_variables = {'field.code': code, 'field.index': len(targets) + 1}
+            field_variables.update({f'field.{index}': value for index, value in enumerate(match.groups(), 1)})
+            field_variables.update({f'field.{key}': value for key, value in match.groupdict().items()})
+            targets.append(IterationTarget(element.get('id'), code, field_variables))
         return tuple(targets)
 
 
@@ -69,7 +78,7 @@ class IterationTarget:
     original_code: str
     variables: dict
 
-    def prepare(self, authored, schema, previous=None):
+    def prepare(self, authored, schema, previous=None, variables=None):
         elements = schema['elements']
         matches = [field for field in elements if isinstance(field, dict) and (
             field.get('id') == self.field_id if self.field_id else field.get('code') == self.original_code)]
@@ -79,7 +88,8 @@ class IterationTarget:
         if not isinstance(code, str) or sum(isinstance(field, dict) and field.get('code') == code
                                          for field in elements) != 1:
             raise ValueError(f'Target {self.original_code!r} has an ambiguous or missing current code.')
-        command = command_parameters(replace(authored.command, field_code=code), self.variables)
+        command = command_parameters(replace(authored.command, field_code=code),
+                                     {**(variables or {}), **self.variables}, selector_resolved=True)
         from .commands.move_field import MoveFieldCommand
         if isinstance(command, MoveFieldCommand) and previous is not None:
             command = replace(command, position='After field', before_after_field=previous)
@@ -111,7 +121,7 @@ def parse_authored_command(text, call, definition):
         if not isinstance(pattern_node, ast.Constant) or not isinstance(pattern_node.value, str):
             raise ValueError('fieldPattern must be a string literal.')
         pattern = pattern_node.value
-        compile_pattern(pattern)
+        validate_pattern(pattern)
         concrete = deepcopy(call)
         for keyword in concrete.keywords:
             if keyword.arg and keyword.arg.casefold() == 'fieldpattern':

@@ -64,8 +64,8 @@ trips preserve that distinction. Calls are also available through command Text
 mode and programmatic FunctionCall values. The creator never evaluates functions.
 
 During application, target lookup and applicability checks precede evaluation.
-String arguments can contain `${match.name}`, `${match.1}`, `${match.code}`, or
-`${iteration.index}` in an iterative command. Shared command substitution resolves
+String arguments can contain `${field.name}`, `${field.1}`, `${field.code}`, or
+`${field.index}` in an iterative command. Shared command substitution resolves
 these before function evaluation, with `$${` escaping a literal `${`. Undefined
 references are application errors. Function output is not substituted again.
 Every function sees its own parameter's value from before this command's edits.

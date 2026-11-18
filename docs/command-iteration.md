@@ -13,18 +13,30 @@ schema order. Each target stores its original code, ID, and local variables.
 Target IDs bind subsequent execution to the original field; ID-less schemas fall
 back to an unambiguous code. Ambiguous or missing bindings fail explicitly.
 
+`command_templates.py` centrally defines namespace member syntax: `field`,
+`form`, and `database` accept named/numbered members; `vars` accepts variable
+names. `form` and `database` are reserved and fail at execution because their
+iteration context is not implemented. The former `match` and `iteration`
+namespaces are rejected. Field targets provide `field.code`, `field.index`, and
+`field.<name>` / `field.<number>` captures. Capture names `code` and `index` are
+reserved to prevent overriding built-in members.
+
 `command_templates.py` validates placeholder syntax and performs one substitution
 pass over supported parameter values, including literal containers and FunctionCall
-arguments. Dictionary keys and field selectors remain literal. This is text
+arguments. Dictionary keys remain literal. Field selectors resolve only `vars`
+references before target selection; `field` context is rejected. This is text
 substitution, not Python evaluation, recursive expansion, or formula escaping.
-The variable mapping interface reserves `vars.name` for future command-scoped
-state; no SetVariable implementation or shared mutable state is introduced.
+SetVariable writes `vars.name` text into a mapping owned by one command-list
+evaluation. Iteration preparation merges that mapping with its local captures.
+Variable names remain literal. Re-evaluation starts fresh. Pattern templates
+are compiled after substitution, without automatic regex escaping. Iteration
+preparation preserves the resolved target code without substituting it again.
 
 Concrete commands are reconstructed after substitution to revalidate parameters.
 `PreparedCommand` prevents the ordinary execution boundary from applying a second
 substitution pass. Functions and schema resolution then follow the existing
-pipeline. Non-iterative commands use the same substitution boundary with an empty
-variable scope, allowing literal escapes while rejecting unavailable variables.
+pipeline. Non-iterative commands use the same substitution boundary with the
+current evaluation variables, allowing literal escapes and rejecting undefined variables.
 
 `CommandListManager._application_steps` is a generator shared by local and async
 evaluation. It yields concrete applications and receives normal ExecutionResults.

@@ -379,7 +379,7 @@ class CommandCreatorRenderer:
                 ).classes('w-full bg-white')
                 self.target_help = ui.label(
                     'Whole-code regex; captures: (?P<year>...). '
-                    'Values: ${match.year}. Literal escape: $${'
+                    'Values: ${field.year}. Literal escape: $${'
                 ).classes('text-xs text-slate-500')
             with ui.column().classes('min-w-0 flex-1 gap-3'):
                 self.parameters = ui.row().classes('w-full items-start gap-3 flex-wrap')
@@ -490,9 +490,11 @@ class CommandCreatorRenderer:
     def values(self):
         values = self._collect(self.editors)
         if self._multiple_fields():
-            from .command_iteration import compile_pattern
-            compile_pattern(values.get('field_code'))
-        from .command_templates import substitute_value
+            from .command_iteration import validate_pattern
+            validate_pattern(values.get('field_code'))
+        from .command_templates import substitute_selector, substitute_value
+        if isinstance(values.get('field_code'), str):
+            substitute_selector(values['field_code'])
         substitute_value({key: value for key, value in values.items() if key != 'field_code'})
         return values
 

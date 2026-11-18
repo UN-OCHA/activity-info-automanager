@@ -34,36 +34,75 @@ def manager(text, *, schema=None, **kwargs):
 
 
 class TemplateTests(unittest.TestCase):
+    def test_old_namespaces_are_rejected_without_aliases(self):
+        for reference in ('match.code', 'match.year', 'match.1', 'iteration.index'):
+            for variables in (None, {reference: 'old value'}):
+                with self.subTest(reference=reference, variables=variables), self.assertRaises(ValueError):
+                    substitute_text('${' + reference + '}', variables)
+            with self.subTest(reference=reference), self.assertRaises(CommandTextError):
+                parse_command_text('ModifyField(fieldCode="anchor", fieldType="quantity", label="${' + reference + '}")')
+
+    def test_future_namespaces_validate_but_have_no_execution_context(self):
+        for namespace in ('form', 'database'):
+            for member in ('code', 'index', 'region', '1'):
+                text = '${' + namespace + '.' + member + '}'
+                with self.subTest(text=text):
+                    self.assertEqual(substitute_text(text), text)
+                    # Reserved namespaces cannot be supplied accidentally by a caller.
+                    with self.assertRaisesRegex(ValueError, 'iteration context is not available'):
+                        substitute_text(text, {namespace + '.' + member: 'unexpected'})
+                    command = parse_command_text('ModifyField(fieldCode="anchor", fieldType="quantity", label="' + text + '")')[0]
+                    result = apply_command_locally(command, source())
+                    self.assertEqual(result.status, 'error')
+                    self.assertIn('iteration context is not available', result.message)
+                    self.assertEqual(result.schema, source())
+
+    def test_namespace_member_rules(self):
+        for text in ('${unknown.code}', '${field.0}', '${form.-1}', '${database.name.extra}',
+                     '${vars.1}', '${field.}', '${.index}'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                substitute_text(text)
+
     def test_single_pass_and_escape(self):
-        self.assertEqual(substitute_text('[$${match.x}] ${match.x} $$ $ {x}',
-                                        {'match.x': '${vars.other}'}),
-                         '[${match.x}] ${vars.other} $$ $ {x}')
-        self.assertEqual(substitute_text('x ${match.x} $${vars.y}'), 'x ${match.x} $${vars.y}')
+        self.assertEqual(substitute_text('[$${field.x}] ${field.x} $$ $ {x}',
+                                        {'field.x': '${vars.other}'}),
+                         '[${field.x}] ${vars.other} $$ $ {x}')
+        self.assertEqual(substitute_text('x ${field.x} $${vars.y}'), 'x ${field.x} $${vars.y}')
 
     def test_unknown_optional_and_malformed(self):
-        for text, values in [('${vars.no}', {}), ('${match.x}', {'match.x': None}),
-                             ('${match.x', {}), ('${match.x + 1}', {}), ('${}', {})]:
+        for text, values in [('${vars.no}', {}), ('${field.x}', {'field.x': None}),
+                             ('${field.x', {}), ('${field.x + 1}', {}), ('${}', {})]:
             with self.subTest(text=text), self.assertRaises(ValueError):
                 substitute_text(text, values)
 
-    def test_future_variable_lookup(self):
-        self.assertEqual(substitute_text('${vars.prefix}_${iteration.index}',
-                                        {'vars.prefix': 'budget', 'iteration.index': 2}), 'budget_2')
+    def test_field_index_and_explicit_variable_lookup(self):
+        self.assertEqual(substitute_text('${vars.prefix}_${field.index}',
+                                        {'vars.prefix': 'budget', 'field.index': 2}), 'budget_2')
 
     def test_single_command_escapes_and_missing_iteration_context(self):
         result = apply_command_locally(ModifyFieldCommand('anchor', 'quantity', changes={
-            'label': '$${match.year}'}), source())
-        self.assertEqual(result.schema['elements'][0]['label'], '${match.year}')
+            'label': '$${field.year}'}), source())
+        self.assertEqual(result.schema['elements'][0]['label'], '${field.year}')
         result = apply_command_locally(ModifyFieldCommand('anchor', 'quantity', changes={
-            'label': '${match.year}'}), source())
+            'label': '${field.year}'}), source())
         self.assertEqual(result.status, 'error')
         self.assertEqual(result.schema, source())
 
 
 class ParsingTests(unittest.TestCase):
+    def test_built_in_capture_names_are_reserved(self):
+        for name in ('code', 'index'):
+            with self.subTest(name=name), self.assertRaisesRegex(CommandTextError, 'reserved'):
+                parse_command_text(f'DeleteField(fieldPattern="(?P<{name}>.*)")')
+            with self.subTest(name=name), Client(ui.page('/')), ui.column():
+                instance = manager(f'''SetVariable(name="pattern", method="literal", value="(?P<{name}>.*)")
+DeleteField(fieldPattern="${{vars.pattern}}")''')
+                self.assertEqual(instance.executions[-1].status, 'error')
+                self.assertIn('reserved', instance.executions[-1].message)
+
     def test_roundtrip_preserves_pattern_functions_and_placeholders(self):
         text = r'''ModifyField(fieldPattern=r"cost_(?P<year>\d{4})", fieldType="quantity",
-            newCode="budget_${match.year}", label=Append("End", " ", "${match.1}"))'''
+            newCode="budget_${field.year}", label=Append("End", " ", "${field.1}"))'''
         command = parse_command_text(text)[0]
         self.assertIsInstance(command, IterativeCommand)
         self.assertEqual(parse_command_text(command.to_syntax())[0], command)
@@ -79,11 +118,19 @@ class ParsingTests(unittest.TestCase):
                 parse_command_text(text)
             self.assertEqual(error.exception.line, 1)
 
-    def test_selectors_stay_literal(self):
+    def test_authored_selectors_preserve_templates_until_execution(self):
         command = parse_command_text('DeleteField(fieldPattern=r"cost_\\d{4}$")')[0]
         self.assertEqual(len(command.targets(source())), 2)
         literal = parse_command_text('DeleteField(fieldCode="${vars.literal}")')[0]
         self.assertEqual(literal.field_code, '${vars.literal}')
+
+    def test_selectors_reject_iteration_context(self):
+        for selector in ('fieldCode', 'fieldPattern'):
+            for reference in ('field.code', 'field.year', 'field.1', 'field.index', 'form.code', 'database.index'):
+                text = f'DeleteField({selector}="${{{reference}}}")'
+                with self.subTest(text=text), self.assertRaises(CommandTextError) as error:
+                    parse_command_text(text)
+                self.assertIn('only vars references', str(error.exception))
 
 
 class IterationTests(unittest.TestCase):
@@ -105,7 +152,7 @@ class IterationTests(unittest.TestCase):
     def test_rename_capture_function_and_subsequent_command(self):
         with Client(ui.page('/')), ui.column():
             instance = manager(r'''ModifyField(fieldPattern=r"cost_(?P<year>\d{4})", fieldType="quantity",
-                newCode="budget_${match.year}", label=Append("End", " ", "${iteration.index}"))
+                newCode="budget_${field.year}", label=Append("End", " ", "${field.index}"))
 DeleteField(fieldCode="budget_2024")''')
             parent = instance.executions[0]
             self.assertEqual([child.field_code for child in parent.iterations], ['cost_2024', 'cost_2025'])
@@ -150,7 +197,7 @@ DeleteField(fieldCode="last")''')
     def test_optional_group_error_is_atomic(self):
         with Client(ui.page('/')), ui.column():
             instance = manager('''ModifyField(fieldPattern=r"cost_(?P<year>2024)?(?:2025)?", fieldType="quantity",
-                label="${match.year}")''')
+                label="${field.year}")''')
             self.assertEqual([child.status for child in instance.executions[0].iterations], ['applied', 'error'])
             self.assertIn('did not match', instance.executions[0].message)
 
@@ -161,7 +208,7 @@ DeleteField(fieldCode="last")''')
         data['elements'][1]['code'] = 'renamed'
         prepared = target.prepare(command, data)
         self.assertEqual(prepared.command.field_code, 'renamed')
-        self.assertEqual(target.variables['match.code'], 'cost_2024')
+        self.assertEqual(target.variables['field.code'], 'cost_2024')
 
     def test_nested_values_substitute_once(self):
         data = source()
@@ -169,7 +216,7 @@ DeleteField(fieldCode="last")''')
             'cardinality': 'single', 'values': [{'id': 'yes', 'label': 'Yes'}]})
         with Client(ui.page('/')), ui.column():
             instance = manager('''ModifyField(fieldPattern="cost_2024", fieldType="enumerated", fieldVariant="single",
-                optionList={"values": [{"label": "Option ${match.code}"}]})''', schema=data)
+                optionList={"values": [{"label": "Option ${field.code}"}]})''', schema=data)
             self.assertEqual(instance.executions[0].status, 'applied')
             self.assertEqual(instance.target_schema()['elements'][1]['typeParameters']['values'][0]['label'],
                              'Option cost_2024')
@@ -179,7 +226,7 @@ DeleteField(fieldCode="last")''')
         data['elements'][1]['description'] = 'Remove this'
         with Client(ui.page('/')), ui.column():
             instance = manager('''ModifyField(fieldPattern="cost_2024(?P<empty>)", fieldType="quantity",
-                description="${match.empty}")''', schema=data)
+                description="${field.empty}")''', schema=data)
             self.assertEqual(instance.executions[0].status, 'applied')
             self.assertNotIn('description', instance.target_schema()['elements'][1])
 
@@ -188,11 +235,11 @@ DeleteField(fieldCode="last")''')
         data['elements'][1]['code'] = '${vars.literal}'
         with Client(ui.page('/')), ui.column():
             instance = manager('''ModifyField(fieldPattern=r"\\$\\{vars.literal\\}", fieldType="quantity",
-                label="${match.code}", description="$${match.code}")''', schema=data)
+                label="${field.code}", description="$${field.code}")''', schema=data)
             self.assertEqual(instance.executions[0].status, 'applied')
             field = instance.target_schema()['elements'][1]
             self.assertEqual(field['label'], '${vars.literal}')
-            self.assertEqual(field['description'], '${match.code}')
+            self.assertEqual(field['description'], '${field.code}')
 
     def test_changed_source_reselects_parent_when_iteration_disappears(self):
         with Client(ui.page('/')), ui.column():

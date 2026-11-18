@@ -1,4 +1,4 @@
-﻿# ActivityInfo Manager
+# ActivityInfo Manager
 
 Tools for updating ActivityInfo form schemas. The feature set is under construction;
 this reference covers the available commands and functions.
@@ -13,6 +13,36 @@ Use the command creator to see the available parameters for each command.
 | `ModifyField` | Updates selected settings on an existing field while preserving its identity and unrelated settings. Omitted settings remain unchanged; explicit empty values clear settings where permitted. The field's type and variant cannot be changed. |
 | `MoveField` | Moves an existing field to the beginning or end of the form, or before or after another field. |
 | `DeleteField` | Removes an existing field from the form. It does not check for references to that field elsewhere. |
+
+### SetVariable
+
+`SetVariable` stores text for later `${vars.name}` substitutions. Names are
+case-sensitive and must match `[A-Za-z_][A-Za-z0-9_]*`. Reassignment replaces the
+previous value only after the new value is valid. Each command-list evaluation
+starts with no variables; reordering or deleting commands recalculates them.
+
+```python
+SetVariable(name="year", method="literal", value="2027")
+SetVariable(name="threshold", method="lookup",
+            referencedForm="Configuration/Targets",
+            filter="YEAR == ${vars.year}", returnFormula="TARGET * 2")
+ModifyField(fieldCode="amount", fieldType="quantity",
+            validationCondition="amount <= ${vars.threshold}")
+```
+
+Literal values are stored as text; numeric and boolean literals are also accepted
+and converted to text (`0` becomes `"0"`, `False` becomes `"False"`). Lookup uses
+the same form ID, local form name, or `Database/Form` selection as AddField.
+`filter` and `returnFormula` are ActivityInfo formulas evaluated by the POST query
+endpoint, after variable substitution. `returnFormula` is used because `return`
+is reserved in the command syntax. Formula text is sent directly to ActivityInfo.
+
+A lookup uses the first record in API response order. Multiple matches produce a
+warning and later commands continue; no stable ordering is implied. No records,
+a missing/null value, empty text, or whitespace-only text produce an error and
+stop the chain. The same blank-value rule applies to literals, including after
+substitution. Zero and false are valid; nonblank text retains its whitespace.
+Lookup/API/form-resolution errors stop the chain without replacing a prior value.
 
 `ModifyField` identifies its target by exact field code, then falls back to an exact
 label with the specified type and variant. `MoveField` and `DeleteField` identify
@@ -29,8 +59,8 @@ mode, supply `fieldPattern` instead of `fieldCode`:
 ModifyField(
     fieldPattern=r"cost_(?P<year>\d{4})",
     fieldType="quantity",
-    newCode="budget_${match.year}",
-    label="Budget for ${match.year}",
+    newCode="budget_${field.year}",
+    label="Budget for ${field.year}",
 )
 MoveField(fieldPattern=r"budget_\d{4}", position="Beginning")
 ```
@@ -50,22 +80,32 @@ values and parameter-function string arguments:
 
 | Reference | Value |
 | --- | --- |
-| `${match.code}` | Original matched code |
-| `${match.year}` | Named capture group `year` |
-| `${match.1}` | Numbered capture group, starting at 1 |
-| `${iteration.index}` | Iteration number, starting at 1 |
-| `${vars.prefix}` | Reserved explicit-variable namespace; currently undefined |
+| `${field.code}` | Original matched code |
+| `${field.year}` | Named capture group `year` |
+| `${field.1}` | Numbered capture group, starting at 1 |
+| `${field.index}` | Iteration number, starting at 1 |
+| `${vars.prefix}` | Text assigned by an earlier SetVariable command |
+| `${form.*}` | Reserved for future form iteration; unavailable currently |
+| `${database.*}` | Reserved for future database iteration; unavailable currently |
 
-The capture name `code` is reserved. Write `$${match.year}` to insert the literal
-`${match.year}`. Ordinary dollar signs and braces are unchanged. Undefined
+`field` provides the current field iteration context; `vars` contains only values
+assigned by SetVariable. The `form` and `database` namespaces are recognized but
+have no execution context yet. The former `match.*` and `iteration.index`
+references are no longer supported.
+
+The capture names `code` and `index` are reserved. Write `$${field.year}` to insert the literal
+`${field.year}`. Ordinary dollar signs and braces are unchanged. Undefined
 references, unmatched optional capture groups, and malformed placeholders are
 errors. Substitution runs once, before parameter functions and schema resolution;
 inserted values and function outputs are never substituted again. It inserts
 text without evaluating expressions, quoting formula literals, or converting
 text to numeric/boolean values. Existing parameter types and selection choices
-still apply. Target selectors (`fieldCode` and `fieldPattern`) stay literal.
-There is no SetVariable command yet; iteration variables are local to their
-application, so using `${match.year}` in a single-field command is an error.
+still apply. Target selectors (`fieldCode` and `fieldPattern`) support only
+`${vars.name}` substitutions, resolved before selecting fields. `field` references in selectors are errors because that context does not yet
+exist. Pattern variables are inserted as regex text without automatic escaping;
+the resolved pattern is then compiled and matched. Use `$${...}` for literal
+placeholder text. Selectors and inserted values are never substituted twice.
+Iteration variables are local to their application, so using `${field.year}` in a single-field command is an error.
 
 The List view keeps one parent command with an iteration count and an expansion
 button. Expand it to see smaller iteration boxes above the parent, each with its
@@ -259,12 +299,12 @@ separator. Otherwise:
 
 The boundary check is case-insensitive, including the separator. A match leaves
 the existing text and capitalization unchanged. Text elsewhere in the value does
-not count as a match. Spacing is exact and is not trimmed; whitespace-only current
+not count as a field. Spacing is exact and is not trimmed; whitespace-only current
 text counts as non-empty.
 
 For example, `"Notes - REVIEWED"` remains unchanged with the call above, while
 `"Notes Reviewed"` becomes `"Notes Reviewed - Reviewed"` because the separator
-does not match. Invalid positions cause an error without applying the command.
+does not field. Invalid positions cause an error without applying the command.
 Formula inputs use `AppendFormula` instead. Normal text-value validation and
 parameter-removal rules still apply.
 

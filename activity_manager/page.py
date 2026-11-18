@@ -192,6 +192,14 @@ def connection_page():
             command_list.database_names, command_list.reference_defaults, command_list.resolution_cache,
             source_schema=source_schema)
 
+    async def lookup_variable(command, schema):
+        from .commands.set_variable import query_variable
+        from .schema_resolution import CachedResolutionService
+        if service is None:
+            raise ValueError('Connect before looking up variables.')
+        return await query_variable(CachedResolutionService(service, command_list.resolution_cache),
+                                    command, schema, command_list.related_schemas)
+
     def show_result(data: dict | None, empty_message='No result', names=None, issues=()):
         nonlocal displayed_result, displayed_names, result_request, displayed_issues
         displayed_issues = issues
@@ -534,6 +542,7 @@ def connection_page():
             ui.label('Command List').classes('text-lg font-medium')
             command_list = CommandListManager(
                 resolve_schema=resolve_preview,
+                lookup_variable=lookup_variable,
                 on_selection_change=selection_changed,
                 on_execute=open_execute_confirmation,
                 on_text_mode_change=text_mode_changed,

@@ -90,7 +90,7 @@ target mode. Multiple mode uses `fieldPattern` (whole-code regex) instead of
 `fieldCode`; type/variant autofill applies only in single mode. Multiple mode
 retains explicit type/variant selectors and validates each matched field against
 them; incompatible matches warn and are skipped. Editable text
-values, including nested option/lookup values, support `${match.name}` capture
+values, including nested option/lookup values, support `${field.name}` capture
 substitution. Parameter types and applicability remain as documented below.
 
 - Both creators use `fieldType` and conditional `fieldVariant` selectors:
