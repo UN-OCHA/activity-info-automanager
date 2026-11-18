@@ -6,11 +6,14 @@ import json
 import math
 
 from ..command_creator import CommandCreatorDefinition
+from .models import CommandDefinition
 from ..command_execution import ExecutionResult
 from ..command_parser import command_error, parse_literal_parameters
+from ..functions import FunctionCall, FunctionContext, evaluate_function, validate_function
 from ..field_parameters import FIELD_ARGUMENTS, FIELD_TYPES_BY_CASE, FIELD_VARIANTS, field_type_error
 from .add_field import AddFieldCommand, literal_syntax
-from ..schema_identity import field_code_error, pending_row_id, schema_identities
+from ..schema_identity import pending_row_id, schema_identities
+from ..schema_names import readable_schema
 from .modify_field_parameters import MODIFY_FIELD_PARAMETERS
 
 
@@ -53,9 +56,9 @@ class ModifyFieldCommand:
             arguments.append(('fieldVariant', self.field_variant))
         arguments.extend((argument, self.changes[key]) for key, argument in EDIT_ARGUMENTS.items()
                          if key in self.changes)
-        return 'ModifyField(' + ', '.join(f'{key}={literal_syntax(value)}' for key, value in arguments) + ')'
+        return 'ModifyField(' + ', '.join(f'{key}={edit_syntax(value)}' for key, value in arguments) + ')'
 
-    def execute(self, schema):
+    def execute(self, schema, *, context=None):
         if not isinstance(schema, dict) or not isinstance(schema.get('elements'), list):
             return ExecutionResult.error(None, 'ModifyField requires a form schema with an elements list.', 'invalid_schema')
         try:
@@ -64,6 +67,8 @@ class ModifyFieldCommand:
             index = find_target(command, schema['elements'])
             if index is None:
                 return ExecutionResult.warning(schema, f'ModifyField could not find field {self.field_code!r}.', 'missing_target')
+            check_applicability(command, schema['elements'][index])
+            command = resolve_function_edits(command, schema, index, context)
             result = deepcopy(schema)
             target = result['elements'][index]
             apply_edits(command, target, result)
@@ -87,6 +92,51 @@ TYPE_PROPERTIES = {
     'upload_type': 'captureMethods', 'allowed_file_types': 'fileTypes',
     'geo_accuracy': 'requiredAccuracy',
 }
+
+
+FUNCTION_PARAMETERS = {
+    parameter.key: EDIT_ARGUMENTS[parameter.key]
+    for parameter in MODIFY_FIELD_PARAMETERS
+    if parameter.key in EDIT_ARGUMENTS
+    and parameter.control in ('text', 'combobox') and parameter.value_type == 'string'
+}
+
+
+def edit_syntax(value):
+    if isinstance(value, FunctionCall):
+        return value.name + '(' + ', '.join(literal_syntax(arg) for arg in value.arguments) + ')'
+    return literal_syntax(value)
+
+
+def resolve_function_edits(command, schema, index, context=None):
+    changes = dict(command.changes)
+    if not any(isinstance(value, FunctionCall) for value in changes.values()):
+        return command
+    # Only the function input uses readable text; the original IDs schema remains
+    # the basis for applying edits and for the existing post-command resolver.
+    names = readable_schema(schema,
+        context.related_schemas if context else None,
+        context.database_names if context else None)
+    target = names['elements'][index]
+    definitions = {parameter.key: parameter for parameter in MODIFY_FIELD_PARAMETERS}
+    for key, call in command.changes.items():
+        if not isinstance(call, FunctionCall):
+            continue
+        params = target.get('typeParameters') or {}
+        if key in ('translation_field', 'translation_language'):
+            config = params.get('translationConfig') or {}
+            value = config.get('fieldId' if key == 'translation_field' else 'languages')
+            if key == 'translation_language' and isinstance(value, list) and all(isinstance(item, str) for item in value):
+                value = ', '.join(value)
+        else:
+            container = target if key in DIRECT_PROPERTIES else params
+            wire_key = DIRECT_PROPERTIES[key] if key in DIRECT_PROPERTIES else TYPE_PROPERTIES[key]
+            value = container.get(wire_key)
+        function_context = FunctionContext(FUNCTION_PARAMETERS[key],
+            str(value) if isinstance(value, str) else value, command='ModifyField')
+        changes[key] = normalize_blank_edit(definitions[key], evaluate_function(call, function_context))
+    return ModifyFieldCommand(command.field_code, command.field_type, command.field_variant,
+                             changes)
 
 
 def schema_variant(element):
@@ -248,9 +298,6 @@ def validate_result(command, target, schema, target_index):
     if not isinstance(target.get('label'), str) or not target['label'].strip():
         raise ValueError('The required field label cannot be removed or blank.')
     if 'new_code' in command.changes and target.get('code') is not None:
-        error = field_code_error(target['code'])
-        if error:
-            raise ValueError(error)
         if any(index != target_index and isinstance(element, dict) and element.get('code') == target['code']
                for index, element in enumerate(schema['elements'])):
             raise ValueError(f'Field code {target["code"]!r} already exists.')
@@ -290,8 +337,14 @@ def validate_result(command, target, schema, target_index):
         raise ValueError('The field variant cannot be changed.')
 
 
-def validate_edit(definition, value):
+def validate_edit(definition, value, *, allow_functions=True):
     """Check literal structure only; schema-dependent validity is deferred."""
+    if isinstance(value, FunctionCall):
+        parameter = FUNCTION_PARAMETERS.get(definition.key)
+        if parameter is None or not allow_functions:
+            raise ValueError(f'{definition.label} does not support function calls.')
+        validate_function(value, parameter, command_name='ModifyField')
+        return
     if value is None:
         if definition.required:
             raise ValueError(f'{definition.label} is required.')
@@ -304,7 +357,7 @@ def validate_edit(definition, value):
         if set(value) - children.keys():
             raise ValueError(f'{definition.label} contains an unknown or immutable property.')
         for key, item in value.items():
-            validate_edit(children[key], item)
+            validate_edit(children[key], item, allow_functions=False)
     elif control == 'repeat':
         if not isinstance(value, list):
             raise ValueError(f'{definition.label} must be a list of rows.')
@@ -313,7 +366,7 @@ def validate_edit(definition, value):
             if not isinstance(row, dict) or set(row) != children.keys():
                 raise ValueError(f'{definition.label} rows require {", ".join(children)}.')
             for key, item in row.items():
-                validate_edit(children[key], item)
+                validate_edit(children[key], item, allow_functions=False)
     elif control == 'boolean':
         if type(value) is not bool:
             raise ValueError(f'{definition.label} must be a boolean.')
@@ -405,6 +458,7 @@ def parse_modify_field(text, call):
         types[EDIT_ARGUMENTS[parameter.key]] = (*expected, type(None))
     values = parse_literal_parameters(text, call, 'ModifyField', types=types,
                                       required={'fieldCode', 'fieldType'},
+                                      function_parameters=set(FUNCTION_PARAMETERS.values()),
                                       allow_empty=set(types) - {'fieldCode', 'fieldType', 'fieldVariant'})
     names = {'fieldCode': 'field_code', 'fieldType': 'field_type', 'fieldVariant': 'field_variant',
              **{argument: key for key, argument in EDIT_ARGUMENTS.items()}}
@@ -415,3 +469,6 @@ def parse_modify_field(text, call):
 
 
 MODIFY_FIELD = CommandCreatorDefinition('modify_field', 'Modify field', MODIFY_FIELD_PARAMETERS, create_modify_field)
+
+
+COMMAND = CommandDefinition('ModifyField', parse_modify_field, MODIFY_FIELD)

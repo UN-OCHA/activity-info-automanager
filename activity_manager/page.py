@@ -13,7 +13,7 @@ from .schema_names import readable_schema, load_default_record_labels
 from .schema_display import underline_substitutions
 from .schema_resolution import resolve_command_schema
 from .command_list import CommandExecution, CommandListManager
-from .commands import ADD_FIELD, DELETE_FIELD, MOVE_FIELD, MODIFY_FIELD
+from .commands import COMMAND_CREATORS
 from .listbox import DatabaseListbox
 from .schema_change import apply_form_schema_change
 
@@ -498,7 +498,7 @@ def connection_page():
         with ui.card().classes('workbench-panel command-creator-panel w-full no-shadow'):
             ui.label('Command Creator').classes('text-lg font-medium')
             command_creator = CommandCreatorRenderer(
-                (MOVE_FIELD, DELETE_FIELD, ADD_FIELD, MODIFY_FIELD), on_add=add_command,
+                COMMAND_CREATORS, on_add=add_command,
                 on_parameter_change=refresh_reference_suggestions,
             )
 

@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from .models import CommandDefinition
 from ..command_execution import ExecutionResult
 from ..command_creator import CommandCreatorDefinition
 from ..command_parser import command_error, parse_literal_parameters
@@ -319,7 +320,7 @@ class AddFieldCommand:
             and not (key == 'barcode' and self.field_variant is not None)
         ) + ')'
 
-    def execute(self, schema: dict[str, Any]) -> ExecutionResult:
+    def execute(self, schema: dict[str, Any], *, context=None) -> ExecutionResult:
         candidate = deepcopy(self)
         try:
             candidate._validate()
@@ -474,3 +475,6 @@ ADD_FIELD = CommandCreatorDefinition(
     key='add_field', label='Add field', create_command=create_add_field,
     parameters=ADD_FIELD_PARAMETERS,
 )
+
+
+COMMAND = CommandDefinition('AddField', parse_add_field, ADD_FIELD)

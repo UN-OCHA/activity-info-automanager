@@ -9,6 +9,7 @@ from activity_manager.command_creator import CommandCreatorRenderer
 from activity_manager.command_list import CommandListManager
 from activity_manager.command_parser import CommandTextError, parse_command_text
 from activity_manager.commands import ADD_FIELD, MODIFY_FIELD, ModifyFieldCommand
+from activity_manager.functions import FunctionCall
 
 
 class ModifyFieldCreatorTests(unittest.TestCase):
@@ -38,6 +39,88 @@ class ModifyFieldCreatorTests(unittest.TestCase):
         creator.activations['units'].set_value(True)
         creator._parameter_changed(None)
         self.assertIsNone(self.command(creator).changes['units'])
+
+    def test_creator_recognizes_functions_without_evaluating_them(self):
+        creator = self.creator()
+        for key in ('new_code', 'description', 'validation_condition', 'default_value'):
+            creator.activations[key].set_value(True)
+            creator.controls[key].set_value('rEpLaCe("old", "new")')
+        creator._parameter_changed(None)
+        self.assertFalse(creator.add_button.props.get('disable', False))
+        added = []
+        creator.on_add = added.append
+        with patch('activity_manager.commands.modify_field.evaluate_function',
+                   side_effect=AssertionError('Creation must not run functions')):
+            creator._add_command()
+        self.assertEqual(len(added), 1)
+        command = added[0]
+        for key in ('new_code', 'description', 'validation_condition', 'default_value'):
+            self.assertEqual(command.changes[key], FunctionCall('Replace', ['old', 'new']))
+        self.assertEqual(parse_command_text(command.to_syntax()), [command])
+        self.assertIn('newCode=Replace("old", "new")', command.to_syntax())
+
+    def test_creator_replacement_uses_current_names_and_preserves_source(self):
+        creator = self.creator()
+        creator.controls['field_code'].set_value('old_code')
+        for key in ('new_code', 'validation_condition'):
+            creator.activations[key].set_value(True)
+            creator.controls[key].set_value('Replace("old", "new")')
+        creator._parameter_changed(None)
+        source = {'id': 'form', 'elements': [{'id': 'fieldid', 'code': 'old_code',
+            'type': 'quantity', 'label': 'Target', 'validationCondition': 'fieldid > 0'}]}
+        original = deepcopy(source)
+        result = self.command(creator).execute(source)
+        self.assertFalse(result.has_errors, result.message)
+        self.assertEqual(result.schema['elements'][0]['code'], 'new_code')
+        self.assertEqual(result.schema['elements'][0]['validationCondition'], 'new_code > 0')
+        self.assertEqual(source, original)
+
+    def test_creator_invalid_function_syntax_disables_add(self):
+        creator = self.creator()
+        creator.activations['description'].set_value(True)
+        for text in ('Replace(', 'Replace("old")', 'Replace("old", 1)',
+                     'Replace(FindText="old", ReplaceText="new")',
+                     'Replace(*["old", "new"])', 'Replace(__import__("os"), "new")',
+                     'Replace("old", "new") + "suffix"'):
+            with self.subTest(text=text):
+                creator.controls['description'].set_value(text)
+                creator._parameter_changed(None)
+                self.assertTrue(creator.add_button.props['disable'])
+                self.assertTrue(creator.error.text)
+        creator.controls['description'].set_value('Replace("old", "new")')
+        creator._parameter_changed(None)
+        self.assertFalse(creator.add_button.props.get('disable', False))
+        self.assertEqual(creator.error.text, '')
+
+    def test_creator_preserves_ordinary_formulas_and_explicit_literal_calls(self):
+        creator = self.creator()
+        creator.activations['validation_condition'].set_value(True)
+        for text in ('SUM(old) > 0', '  ordinary text  ', '"old" == "new"'):
+            with self.subTest(text=text):
+                creator.controls['validation_condition'].set_value(text)
+                creator._parameter_changed(None)
+                self.assertEqual(self.command(creator).changes['validation_condition'], text)
+        creator.controls['validation_condition'].set_value(repr('Replace("old", "new")'))
+        creator._parameter_changed(None)
+        command = self.command(creator)
+        self.assertEqual(command.changes['validation_condition'], 'Replace("old", "new")')
+        self.assertEqual(parse_command_text(command.to_syntax()), [command])
+
+    def test_creator_limits_function_parsing_to_permitted_inputs(self):
+        creator = self.creator('FREE_TEXT', 'text')
+        self.assertIsNone(creator.editors[0].definition.parse_text)
+        for key in ('translation_field', 'translation_language'):
+            creator.activations[key].set_value(True)
+            creator.controls[key].set_value('Replace("old", "new")')
+        creator._parameter_changed(None)
+        command = self.command(creator)
+        self.assertIsInstance(command.changes['translation_field'], FunctionCall)
+        self.assertIsInstance(command.changes['translation_language'], FunctionCall)
+        added = self.creator('quantity', definition=ADD_FIELD)
+        added.activations['description'].set_value(True)
+        added.controls['description'].set_value('Replace("old", "new")')
+        added._parameter_changed(None)
+        self.assertEqual(self.command(added).description, 'Replace("old", "new")')
 
     def test_clear_false_and_omission_are_distinct_and_roundtrip(self):
         creator = self.creator()
@@ -162,7 +245,7 @@ class ModifyFieldCreatorTests(unittest.TestCase):
             'fieldCode="x", fieldType="date", fieldVariant="text"',
             'fieldCode="x", fieldType="reference", fieldVariant="user", referencedForm="other"',
             'fieldCode="x", fieldType="quantity", required=0',
-            'fieldCode="x", fieldType="quantity", newCode="bad code"',
+            'fieldCode="x", fieldType="quantity", newCode=123',
             'fieldCode="x", fieldType="enumerated", fieldVariant="single", optionList={"values": [{"code": "x", "label": "X"}]}',
             'fieldCode="x", fieldType="reference", fieldVariant="reference", lookupFields=[{"label": "Name"}]',
             'fieldCode="x", fieldType="quantity", label=__import__("os")',

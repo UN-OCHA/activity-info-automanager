@@ -8,8 +8,8 @@ from activity_manager.commands import AddFieldCommand
 from activity_manager.schema_identity import prepare_schema_for_put, prepare_schema_for_write
 from activity_manager.schema_names import schema_with_ids, substitute_record_label
 from activity_manager.schema_change import apply_form_schema_change
-from test_add_field import schema
-from test_field_parameters import OPTIONS
+from test.test_add_field import schema
+from test.test_field_parameters import OPTIONS
 
 
 class FormulaWriteTests(unittest.TestCase):

@@ -10,13 +10,13 @@ from activity_manager.command_creator import CommandCreatorRenderer
 from activity_manager.command_execution import Diagnostic, ExecutionResult, apply_command
 from activity_manager.commands import ADD_FIELD, AddFieldCommand, MoveFieldCommand, DeleteFieldCommand
 from activity_manager.schema_resolution import resolve_command_schema
-from test_add_field import schema
+from test.test_add_field import schema
 
 
 class ExecutionContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_and_resolver_diagnostics_stack_in_order(self):
         source = schema()
-        command = SimpleNamespace(execute=lambda data: ExecutionResult(
+        command = SimpleNamespace(execute=lambda data, **kwargs: ExecutionResult(
             deepcopy(data), (Diagnostic('warning', 'X'),)))
         resolver = AsyncMock(return_value=ExecutionResult(source, (
             Diagnostic('warning', 'Y'), Diagnostic('error', 'Z'))))
@@ -27,7 +27,7 @@ class ExecutionContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_command_error_stops_before_resolver_without_losing_earlier_warnings(self):
         source = schema()
-        command = SimpleNamespace(execute=lambda data: ExecutionResult(data, (
+        command = SimpleNamespace(execute=lambda data, **kwargs: ExecutionResult(data, (
             Diagnostic('warning', 'Earlier'), Diagnostic('error', 'Stop'))))
         resolver = AsyncMock()
         result = await apply_command(command, source, resolver)

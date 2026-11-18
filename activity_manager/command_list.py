@@ -6,7 +6,7 @@ from typing import Any, Protocol
 from nicegui import ui
 
 from .command_execution import (
-    Diagnostic, ExecutionResult, ExecutionStatus, EXECUTABLE_STATUSES, apply_command, apply_command_locally,
+    CommandContext, Diagnostic, ExecutionResult, ExecutionStatus, EXECUTABLE_STATUSES, apply_command, apply_command_locally,
 )
 from .command_parser import CommandTextError, parse_command_text
 
@@ -14,7 +14,7 @@ from .command_parser import CommandTextError, parse_command_text
 class Command(Protocol):
     def to_syntax(self) -> str: ...
 
-    def execute(self, schema: dict[str, Any]) -> ExecutionResult: ...
+    def execute(self, schema: dict[str, Any], *, context: CommandContext | None = None) -> ExecutionResult: ...
 
 
 @dataclass(frozen=True)
@@ -247,7 +247,8 @@ class CommandListManager:
                 return
             self.executions[index] = CommandExecution('resolving', None, 'Resolving names…')
             self._publish_evaluation()
-            result = await apply_command(command, current, self.resolve_schema)
+            result = await apply_command(command, current, self.resolve_schema,
+                related_schemas=self.related_schemas, database_names=self.database_names)
             if version != self._evaluation_version:
                 return
             current = result.schema

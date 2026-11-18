@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock
 
 from activity_manager.schema_change import apply_form_schema_change
 from activity_manager.schema_identity import prepare_schema_for_write
-from test_add_field import schema
-from test_default_comparison import with_default
+from test.test_add_field import schema
+from test.test_default_comparison import with_default
 
 
 class StrictResolutionTests(unittest.IsolatedAsyncioTestCase):

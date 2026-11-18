@@ -1,10 +1,12 @@
 """ModifyField uses shared controls without AddField creation defaults."""
 
 from dataclasses import replace
+from functools import partial
 
 from ..command_creator import ParameterDefinition as P
+from ..command_parser import parse_function_input
 from ..field_parameters import (
-    FIELD_PARAMETERS, applies, for_types, parameter_applies, variant_required,
+    FIELD_ARGUMENTS, FIELD_PARAMETERS, applies, for_types, parameter_applies, variant_required,
 )
 
 
@@ -46,6 +48,17 @@ MODIFY_FIELD_PARAMETERS = (
     P('field_code', 'Existing field code or label', 'combobox', required=True, option_source='field_codes'),
     *(configure(parameter) for parameter in FIELD_PARAMETERS[:2]),
     P('new_code', 'New field code', 'text', blank_action='unset',
-      visible_when=applies('field_code'), validate=next(parameter.validate for parameter in FIELD_PARAMETERS if parameter.key == 'field_code')),
+      visible_when=applies('field_code')),
     *(configure(parameter) for parameter in FIELD_PARAMETERS[3:] if parameter.key not in _EXCLUDED),
+)
+
+# Only top-level editable text inputs interpret helper calls. Target selectors,
+# nested children, and the shared AddField definitions keep their literal behavior.
+MODIFY_FIELD_PARAMETERS = tuple(
+    replace(parameter, parse_text=partial(parse_function_input, command_name='ModifyField',
+        parameter='newCode' if parameter.key == 'new_code' else FIELD_ARGUMENTS[parameter.key]))
+    if parameter.key not in ('field_code', 'field_type', 'field_variant')
+    and parameter.control in ('text', 'combobox') and parameter.value_type == 'string'
+    else parameter
+    for parameter in MODIFY_FIELD_PARAMETERS
 )

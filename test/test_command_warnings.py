@@ -10,7 +10,7 @@ from activity_manager.command_list import CommandListManager
 from activity_manager.schema_names import unresolved_formula_references
 from activity_manager.schema_resolution import resolve_command_schema
 from activity_manager.schema_change import apply_form_schema_change
-from test_add_field import schema
+from test.test_add_field import schema
 
 
 class FormulaWarningTests(unittest.TestCase):

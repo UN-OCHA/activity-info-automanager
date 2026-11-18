@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 from activity_info_api_client.models.form_schema import FormSchema
 
 from activity_manager.schema_change import compare_schemas, apply_form_schema_change
-from test_add_field import schema
+from test.test_add_field import schema
 
 
 def with_default(value, field_type='reference', form_id='people'):

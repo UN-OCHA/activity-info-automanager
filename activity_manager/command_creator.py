@@ -36,6 +36,7 @@ class ParameterDefinition:
     option_labels: Mapping[str, str] | None = None
     inline_rows: bool = False
     fixed_when: Callable[[Mapping[str, Any]], Any] | None = None
+    parse_text: Callable[[str], Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -314,6 +315,8 @@ class _ParameterEditor:
             raise ValueError(f'{definition.label} requires at least one row.')
         if definition.blank_action == 'unset' and not value and definition.control in ('repeat', 'group', 'multi_select'):
             value = None
+        if definition.parse_text and isinstance(value, str):
+            value = definition.parse_text(value)
         if definition.validate and value is not None:
             error = definition.validate(value)
             if error:

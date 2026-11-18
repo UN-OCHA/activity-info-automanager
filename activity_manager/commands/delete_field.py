@@ -7,6 +7,7 @@ from typing import Any
 
 from ..command_creator import CommandCreatorDefinition, ParameterDefinition
 from ..command_parser import parse_string_parameters
+from .models import CommandDefinition
 from ..command_execution import ExecutionResult
 
 
@@ -17,7 +18,7 @@ class DeleteFieldCommand:
     def to_syntax(self) -> str:
         return f'DeleteField(fieldCode={json.dumps(self.field_code, ensure_ascii=False)})'
 
-    def execute(self, schema: dict[str, Any]) -> ExecutionResult:
+    def execute(self, schema: dict[str, Any], *, context=None) -> ExecutionResult:
         if not isinstance(schema, dict):
             return ExecutionResult.error(None, 'DeleteField requires a form schema object.', 'invalid_schema')
         elements = schema.get('elements')
@@ -70,3 +71,6 @@ DELETE_FIELD = CommandCreatorDefinition(
         ),
     ),
 )
+
+
+COMMAND = CommandDefinition('DeleteField', parse_delete_field, DELETE_FIELD)

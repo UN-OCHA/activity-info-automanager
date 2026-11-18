@@ -7,7 +7,7 @@ from activity_manager.commands import AddFieldCommand
 from activity_manager.schema_names import resolve_form_names
 from activity_manager.schema_identity import prepare_schema_for_write
 from activity_manager.schema_change import apply_form_schema_change
-from test_add_field import schema
+from test.test_add_field import schema
 
 
 class FormNameTests(unittest.IsolatedAsyncioTestCase):

@@ -97,6 +97,8 @@ class ModifyFieldExecutionTests(unittest.TestCase):
         self.assertEqual(result.schema['elements'][0]['code'], 'renamed')
         cleared = self.execute(result.schema, {'new_code': None}, target='renamed')
         self.assertNotIn('code', cleared.schema['elements'][0])
+        unrestricted = self.execute(source, {'new_code': 'code with spaces'})
+        self.assertEqual(unrestricted.schema['elements'][0]['code'], 'code with spaces')
         self.execute(source, {'new_code': 'other'}, success=False)
 
     def test_option_collection_replacement_order_ids_and_unknown_values(self):

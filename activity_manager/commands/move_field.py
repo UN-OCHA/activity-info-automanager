@@ -7,6 +7,7 @@ from typing import Any
 
 from ..command_creator import CommandCreatorDefinition, ParameterDefinition
 from ..command_parser import command_error, parse_string_parameters
+from .models import CommandDefinition
 from ..command_execution import ExecutionResult
 
 
@@ -27,7 +28,7 @@ class MoveFieldCommand:
             )
         return f'MoveField({", ".join(arguments)})'
 
-    def execute(self, schema: dict[str, Any]) -> ExecutionResult:
+    def execute(self, schema: dict[str, Any], *, context=None) -> ExecutionResult:
         if not isinstance(schema, dict):
             return ExecutionResult.error(None, 'MoveField requires a form schema object.', 'invalid_schema')
         elements = schema.get('elements')
@@ -162,3 +163,6 @@ MOVE_FIELD = CommandCreatorDefinition(
         ),
     ),
 )
+
+
+COMMAND = CommandDefinition('MoveField', parse_move_field, MOVE_FIELD)

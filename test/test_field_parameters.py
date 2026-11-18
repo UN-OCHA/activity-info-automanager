@@ -18,7 +18,7 @@ from activity_manager.api import ActivityInfoService
 from activity_manager.listbox import DatabaseListbox
 from activity_manager.schema_change import apply_form_schema_change
 from activity_manager.schema_identity import prepare_schema_for_put, prepare_schema_for_write
-from test_add_field import schema
+from test.test_add_field import schema
 
 
 OPTIONS = {'cardinality': 'multiple', 'presentation': 'dropdown', 'values': [

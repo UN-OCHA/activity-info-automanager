@@ -4,6 +4,7 @@ import ast
 import io
 import tokenize
 import math
+import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -51,6 +52,7 @@ def parse_literal_parameters(
     types: Mapping[str, type | tuple[type, ...]],
     required: Collection[str],
     allow_empty: Collection[str] = (),
+    function_parameters: Collection[str] = (),
 ) -> dict[str, Any]:
     """Accept only explicitly typed constants, without evaluating expressions."""
     canonical_names = {name.casefold(): name for name in types}
@@ -76,6 +78,9 @@ def parse_literal_parameters(
                 f'{command_name} parameter {canonical_name!r} is specified more than once.',
             )
         expected_type = types[canonical_name]
+        if isinstance(keyword.value, ast.Call) and canonical_name in function_parameters:
+            values[canonical_name] = _function_value(text, keyword.value, canonical_name, command_name)
+            continue
         value = _literal_value(text, keyword.value)
         accepted_types = expected_type if isinstance(expected_type, tuple) else (expected_type,)
         if type(value) not in accepted_types:
@@ -101,6 +106,52 @@ def parse_literal_parameters(
                 f'{command_name} requires parameter {name!r}.',
             )
     return values
+
+
+def parse_function_input(value: str, *, parameter: str, command_name: str):
+    """Recognize registered calls in creator text, preserving ordinary formulas."""
+    from .functions import catalog
+
+    def starts_with_function(text):
+        match = re.match(r'\s*([^\W\d]\w*)\s*\(', text)
+        return match is not None and match.group(1).casefold() in catalog.FUNCTIONS_BY_NAME
+
+    text = value.strip()
+    # Quoting a whole call explicitly requests call-shaped literal text.
+    if text.startswith(('"', "'")):
+        try:
+            node = ast.parse(text, mode='eval').body
+        except SyntaxError:
+            return value
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and starts_with_function(node.value):
+            return node.value
+        return value
+    if not starts_with_function(text):
+        return value
+    try:
+        node = ast.parse(text, mode='eval').body
+    except SyntaxError as exc:
+        raise CommandTextError(exc.msg, exc.lineno or 1, exc.offset or 1,
+                               _source_line(text, exc.lineno or 1)) from None
+    if not isinstance(node, ast.Call):
+        raise command_error(text, node, 'Expected a function call with positional literal arguments only.')
+    return _function_value(text, node, parameter, command_name)
+
+
+def _function_value(text, node, parameter, command_name):
+    from .functions import FunctionCall, validate_function
+
+    if not isinstance(node.func, ast.Name):
+        raise command_error(text, node.func, 'Expected a simple registered function name.')
+    if node.keywords:
+        raise command_error(text, node.keywords[0], 'Functions accept positional literal arguments only.')
+    arguments = [_literal_value(text, argument) for argument in node.args]
+    try:
+        call = FunctionCall(node.func.id, arguments)
+        definition = validate_function(call, parameter, command_name=command_name)
+        return FunctionCall(definition.name, arguments)
+    except ValueError as exc:
+        raise command_error(text, node, str(exc)) from None
 
 
 def _literal_value(text: str, node: ast.AST):
@@ -148,17 +199,8 @@ def parse_command_text(text: str) -> list[Any]:
 
     # Imported lazily so command modules can use the shared validation helpers
     # above without creating an import cycle during module initialization.
-    from .commands.add_field import parse_add_field
-    from .commands.delete_field import parse_delete_field
-    from .commands.move_field import parse_move_field
-    from .commands.modify_field import parse_modify_field
+    from .commands import COMMANDS_BY_NAME
 
-    parsers = {
-        'addfield': parse_add_field,
-        'modifyfield': parse_modify_field,
-        'deletefield': parse_delete_field,
-        'movefield': parse_move_field,
-    }
     commands = []
     previous_line = 0
     for statement in tree.body:
@@ -178,8 +220,8 @@ def parse_command_text(text: str) -> list[Any]:
         call = statement.value
         if not isinstance(call.func, ast.Name):
             raise command_error(text, call.func, 'Expected a simple command name.')
-        parser = parsers.get(call.func.id.casefold())
-        if parser is None:
+        definition = COMMANDS_BY_NAME.get(call.func.id.casefold())
+        if definition is None:
             raise command_error(text, call.func, f'Unknown command {call.func.id!r}.')
         if call.args:
             raise command_error(
@@ -187,7 +229,7 @@ def parse_command_text(text: str) -> list[Any]:
                 call.args[0],
                 f'{call.func.id} accepts named parameters only.',
             )
-        commands.append(parser(text, call))
+        commands.append(definition.parser(text, call))
     return commands
 
 

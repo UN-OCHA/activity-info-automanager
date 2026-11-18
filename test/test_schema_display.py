@@ -20,7 +20,7 @@ class SchemaDisplayTests(unittest.TestCase):
         plain = json.dumps(schema, indent=2)
         highlighted = prepare_content('```json\n' + plain + '\n```', extras='fenced-code-blocks')
         markup = underline_substitutions(highlighted, schema, [('bad',)])
-        page_source = (Path(__file__).parent / 'activity_manager/page.py').read_text(encoding='utf-8')
+        page_source = (Path(__file__).resolve().parent.parent / 'activity_manager/page.py').read_text(encoding='utf-8')
         mark_css = re.search(r'\.result-code mark\s*\{[^}]+\}', page_source).group()
         with tempfile.TemporaryDirectory(prefix='cuid-underline-test-') as directory:
             page = Path(directory) / 'test.html'

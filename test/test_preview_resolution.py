@@ -16,7 +16,7 @@ from activity_manager.command_execution import ExecutionResult
 from activity_manager.schema_display import underline_substitutions
 from activity_manager.schema_change import apply_form_schema_change
 from activity_manager.schema_identity import prepare_schema_for_put
-from test_add_field import schema
+from test.test_add_field import schema
 
 
 class PreviewResolutionTests(unittest.IsolatedAsyncioTestCase):

@@ -24,6 +24,14 @@ class Diagnostic:
 
 
 @dataclass(frozen=True)
+class CommandContext:
+    """Cached schema context for transformations; commands perform no API reads."""
+
+    related_schemas: dict | None = None
+    database_names: dict | None = None
+
+
+@dataclass(frozen=True)
 class ExecutionResult:
     schema: dict | None
     diagnostics: tuple[Diagnostic, ...] = ()
@@ -54,10 +62,10 @@ class ExecutionResult:
         return cls(deepcopy(schema), (Diagnostic('warning', message, code=code),))
 
 
-def transform_command(command, schema):
+def transform_command(command, schema, context=None):
     """Catch unexpected failures at the application boundary, never in the UI."""
     try:
-        result = command.execute(schema)
+        result = command.execute(schema, context=context)
         if not isinstance(result, ExecutionResult):
             raise TypeError('Command.execute must return ExecutionResult.')
         return result
@@ -67,7 +75,7 @@ def transform_command(command, schema):
 
 def apply_command_locally(command, schema, related_schemas=None, database_names=None):
     """Application without a connected resolver still uses the same contract."""
-    result = transform_command(command, schema)
+    result = transform_command(command, schema, CommandContext(related_schemas, database_names))
     if result.has_errors:
         return result
     diagnostics = tuple(Diagnostic('warning', f'Unresolved formula reference {token!r}.', path)
@@ -76,9 +84,9 @@ def apply_command_locally(command, schema, related_schemas=None, database_names=
         readable_schema(result.schema, related_schemas, database_names))
 
 
-async def apply_command(command, schema, resolver):
+async def apply_command(command, schema, resolver, *, related_schemas=None, database_names=None):
     """Run transformation then resolution, preserving diagnostics in order."""
-    result = transform_command(command, schema)
+    result = transform_command(command, schema, CommandContext(related_schemas, database_names))
     if result.has_errors:
         return result
     try:
