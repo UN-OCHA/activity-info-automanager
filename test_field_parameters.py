@@ -122,10 +122,10 @@ class StandardFieldTests(unittest.TestCase):
         command = AddFieldCommand('files', 'Files', field_type='attachment',
                                   upload_type=['FILE', 'AUDIO', 'FILE'], allowed_file_types=['PDF', 'AUDIO'])
         field = self.roundtrip(command)
-        self.assertEqual(field['typeParameters'], {'captureMethods': ['FILE', 'AUDIO'], 'fileTypes': ['PDF', 'AUDIO']})
+        self.assertEqual(field['typeParameters'], {'captureMethods': ['FILE', 'AUDIO'], 'fileTypes': ['PDF', 'AUDIO'], 'cardinality': 'multiple'})
         empty = self.roundtrip(AddFieldCommand('files', 'Files', field_type='attachment',
                                                upload_type=[], allowed_file_types=[]))
-        self.assertEqual(empty['typeParameters'], {'captureMethods': [], 'fileTypes': []})
+        self.assertEqual(empty['typeParameters'], {'captureMethods': [], 'fileTypes': [], 'cardinality': 'multiple'})
         for cardinality in ('single', 'multiple'):
             with self.subTest(cardinality=cardinality):
                 command = AddFieldCommand('files', 'Files', field_type='attachment',
@@ -298,10 +298,10 @@ class ExpandedEditorTests(unittest.TestCase):
 
     def test_barcode_is_required_only_for_free_text(self):
         creator = self.creator()
-        self.assertTrue(creator.parameter_containers['barcode'].visible)
-        self.assertFalse(creator.activations['barcode'].visible)
-        self.assertIs(creator.values()['barcode'], False)
-        creator.controls['barcode'].set_value(True)
+        self.assertFalse(creator.parameter_containers['barcode'].visible)
+        self.assertFalse(creator.activations['field_variant'].visible)
+        self.assertEqual(creator.values()['field_variant'], 'text')
+        creator.controls['field_variant'].set_value('barcode')
         creator._parameter_changed(None)
         command = ADD_FIELD.create_command(creator.values())
         self.assertTrue(command.execute(schema()).schema['elements'][-1]['typeParameters']['barcode'])
@@ -353,7 +353,8 @@ class ExpandedEditorTests(unittest.TestCase):
                 lookups._change_rows(None, 0)
                 lookups.rows[0][0].control.set_value('Name')
                 lookups.rows[0][1].control.set_value('Name')
-                creator.activations['metadata'].set_value(True)
+                creator.controls['field_variant'].set_value('metadata')
+                creator._parameter_changed(None)
                 creator.controls['metadata'].set_value(metadata)
                 creator._parameter_changed(None)
                 for key in ('referenced_form', 'lookup_fields', 'default_value', 'default_formula'):
@@ -368,9 +369,9 @@ class ExpandedEditorTests(unittest.TestCase):
                 self.assertTrue(field['readOnly'])
                 self.assertNotIn('defaultValue', field)
                 self.assertNotIn('defaultValueFormula', field)
-                creator.activations['metadata'].set_value(False)
+                creator.controls['field_variant'].set_value('reference')
                 creator._parameter_changed(None)
-                for key in ('referenced_form', 'lookup_fields', 'default_value', 'default_formula'):
+                for key in ('referenced_form', 'lookup_fields', 'default_value'):
                     self.assertTrue(creator.parameter_containers[key].visible)
 
     def test_type_visibility_disabled_reviewer_and_multiselect_activation(self):
@@ -383,17 +384,10 @@ class ExpandedEditorTests(unittest.TestCase):
         creator._parameter_changed(None)
         self.assertEqual(set(creator.controls['upload_type'].options), {'FILE', 'SIGNATURE', 'CAMERA', 'AUDIO'})
         self.assertEqual(len(creator.controls['allowed_file_types'].options), 5)
-        self.assertTrue(creator.parameter_containers['attachment_cardinality'].visible)
-        self.assertEqual(creator.controls['attachment_cardinality'].options,
-                         {'single': 'Single', 'multiple': 'Multiple'})
+        self.assertFalse(creator.parameter_containers['attachment_cardinality'].visible)
         self.assertNotIn('attachment_cardinality', creator.values())
-        creator.activations['attachment_cardinality'].set_value(True)
-        creator._parameter_changed(None)
-        self.assertTrue(creator.add_button.props['disable'])
-        creator.controls['attachment_cardinality'].set_value('single')
-        creator._parameter_changed(None)
-        self.assertFalse(creator.add_button.props['disable'])
-        self.assertEqual(creator.values()['attachment_cardinality'], 'single')
+        command = ADD_FIELD.create_command(creator.values())
+        self.assertEqual(command.execute(schema()).schema['elements'][-1]['typeParameters']['cardinality'], 'multiple')
         self.assertNotIn('upload_type', creator.values())
         creator.activations['upload_type'].set_value(True)
         creator._parameter_changed(None)
@@ -412,13 +406,14 @@ class ExpandedEditorTests(unittest.TestCase):
         creator = self.creator()
         creator.controls['field_type'].set_value('enumerated')
         creator._parameter_changed(None)
+        creator.controls['field_variant'].set_value('single')
+        creator._parameter_changed(None)
         options = next(editor for editor in creator.editors if editor.definition.key == 'option_list')
         self.assertFalse(options.activation.visible)
         self.assertTrue(creator.add_button.props['disable'])
         rows = options.children[2]
         rows._change_rows(None, 0)
-        rows.rows[0][0].control.set_value('yes')
-        rows.rows[0][1].control.set_value('Yes')
+        rows.rows[0][0].control.set_value('Yes')
         creator._parameter_changed(None)
         self.assertFalse(creator.add_button.props['disable'])
         creator.controls['field_type'].set_value('calculated')

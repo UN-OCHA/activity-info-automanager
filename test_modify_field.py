@@ -1,0 +1,205 @@
+from copy import deepcopy
+import unittest
+from unittest.mock import patch
+
+from nicegui import ui
+from nicegui.client import Client
+
+from activity_manager.command_creator import CommandCreatorRenderer
+from activity_manager.command_list import CommandListManager
+from activity_manager.command_parser import CommandTextError, parse_command_text
+from activity_manager.commands import ADD_FIELD, MODIFY_FIELD, ModifyFieldCommand
+
+
+class ModifyFieldCreatorTests(unittest.TestCase):
+    def creator(self, kind='quantity', variant=None, definition=MODIFY_FIELD):
+        with Client(ui.page('/')), ui.column():
+            creator = CommandCreatorRenderer((definition,))
+        creator.controls['field_type'].set_value(kind)
+        creator._parameter_changed(None)
+        if variant:
+            creator.controls['field_variant'].set_value(variant)
+        creator.controls['field_code'].set_value('Target label or code')
+        if definition is ADD_FIELD:
+            creator.controls['field_code'].set_value('new')
+            creator.controls['label'].set_value('New')
+        creator._parameter_changed(None)
+        return creator
+
+    def command(self, creator):
+        return creator.definitions[creator.command_select.value].create_command(creator.values())
+
+    def test_target_only_and_schema_independence(self):
+        creator = self.creator()
+        expected = {'field_code': 'Target label or code', 'field_type': 'quantity'}
+        self.assertEqual(creator.values(), expected)
+        creator.set_schema({'elements': [{'code': 'Target label or code', 'label': 'Existing', 'type': 'date', 'units': 'kg'}]})
+        self.assertEqual(creator.values(), expected)
+        creator.activations['units'].set_value(True)
+        creator._parameter_changed(None)
+        self.assertIsNone(self.command(creator).changes['units'])
+
+    def test_clear_false_and_omission_are_distinct_and_roundtrip(self):
+        creator = self.creator()
+        for key in ('label', 'description', 'new_code', 'geo_accuracy', 'required'):
+            creator.activations[key].set_value(True)
+        creator.activations['units'].set_value(True)
+        creator.controls['units'].set_value('people')
+        creator._parameter_changed(None)
+        command = self.command(creator)
+        self.assertEqual(command.changes, {'new_code': None, 'label': None, 'description': None,
+                                           'required': False, 'units': 'people'})
+        self.assertEqual(parse_command_text(command.to_syntax()), [command])
+        self.assertNotIn('key', command.changes)
+        self.assertIn('newCode=None', command.to_syntax())
+
+    def test_required_condition_and_translation_children_are_independent(self):
+        creator = self.creator('FREE_TEXT', 'text')
+        for key in ('required_condition', 'translation_field', 'translation_language'):
+            self.assertTrue(creator.parameter_containers[key].visible)
+            creator.activations[key].set_value(True)
+        creator._parameter_changed(None)
+        self.assertEqual(self.command(creator).changes,
+                         {'required_condition': None, 'translation_field': None, 'translation_language': None})
+        creator.controls['field_variant'].set_value('barcode')
+        creator._parameter_changed(None)
+        self.assertEqual(self.command(creator).changes, {'required_condition': None})
+
+    def test_variants_required_and_reset_when_type_changes(self):
+        creator = self.creator('enumerated')
+        self.assertTrue(creator.add_button.props['disable'])
+        creator.controls['field_variant'].set_value('multiple')
+        creator._parameter_changed(None)
+        self.assertFalse(creator.add_button.props['disable'])
+        self.assertNotIn('key', creator.values())
+        creator.controls['field_type'].set_value('reference')
+        creator._parameter_changed(None)
+        self.assertIsNone(creator.controls['field_variant'].value)
+        self.assertEqual(creator.controls['field_variant'].options, ['reference', 'user', 'metadata'])
+        self.assertTrue(creator.add_button.props['disable'])
+
+    def test_immutable_properties_absent_and_metadata_has_only_allowed_edits(self):
+        creator = self.creator('reference', 'metadata')
+        for key in ('barcode', 'metadata', 'referenced_form', 'reverse_reference_field', 'attachment_cardinality'):
+            self.assertNotIn(key, creator.controls)
+        visible = {key for key, container in creator.parameter_containers.items() if container.visible}
+        self.assertEqual(visible, {'field_code', 'field_type', 'field_variant', 'new_code', 'label',
+                                   'hide_from_entry', 'hide_in_table'})
+        serial = self.creator('serial')
+        self.assertNotIn('key', self.command(serial).changes)
+        self.assertFalse(serial.parameter_containers['key'].visible)
+
+    def test_note_target_is_fieldcode_and_label_is_only_an_edit(self):
+        creator = self.creator('note')
+        self.assertFalse(creator.parameter_containers['new_code'].visible)
+        creator.activations['label'].set_value(True)
+        creator.controls['label'].set_value('Replacement label')
+        creator._parameter_changed(None)
+        command = self.command(creator)
+        self.assertEqual(command.field_code, 'Target label or code')
+        self.assertEqual(command.changes, {'label': 'Replacement label'})
+
+    def test_partial_option_edits_and_empty_collection_clear(self):
+        creator = self.creator('enumerated', 'multiple')
+        group = next(editor for editor in creator.editors if editor.definition.key == 'option_list')
+        group.activation.set_value(True)
+        presentation, options = group.children
+        presentation.activation.set_value(True)
+        presentation.control.set_value(True)
+        creator._parameter_changed(None)
+        self.assertEqual(self.command(creator).changes, {'option_list': {'presentation': 'dropdown'}})
+        options.activation.set_value(True)
+        creator._parameter_changed(None)
+        self.assertEqual(self.command(creator).changes['option_list']['values'], None)
+        options._change_rows(None, 0)
+        self.assertTrue(creator.add_button.props['disable'])
+        self.assertEqual(len(options.rows[0]), 1)
+        options.rows[0][0].control.set_value('Yes')
+        creator._parameter_changed(None)
+        command = self.command(creator)
+        self.assertEqual(command.changes['option_list']['values'], [{'label': 'Yes'}])
+        self.assertEqual(parse_command_text(command.to_syntax()), [command])
+
+    def test_lookup_rows_require_both_and_user_has_no_lookups(self):
+        creator = self.creator('reference', 'reference')
+        lookups = next(editor for editor in creator.editors if editor.definition.key == 'lookup_fields')
+        lookups.activation.set_value(True)
+        creator._parameter_changed(None)
+        self.assertEqual(self.command(creator).changes, {'lookup_fields': None})
+        lookups._change_rows(None, 0)
+        lookups.rows[0][0].control.set_value('Name')
+        creator._parameter_changed(None)
+        self.assertTrue(creator.add_button.props['disable'])
+        lookups.rows[0][1].control.set_value('name')
+        creator._parameter_changed(None)
+        self.assertEqual(self.command(creator).changes['lookup_fields'], [{'label': 'Name', 'formula': 'name'}])
+        creator.controls['field_variant'].set_value('user')
+        creator._parameter_changed(None)
+        self.assertNotIn('lookup_fields', creator.values())
+
+    def test_add_field_uses_same_variants_and_label_only_options(self):
+        creator = self.creator('enumerated', 'single', ADD_FIELD)
+        group = next(editor for editor in creator.editors if editor.definition.key == 'option_list')
+        rows = next(child for child in group.children if child.definition.key == 'values')
+        rows._change_rows(None, 0)
+        rows.rows[0][0].control.set_value('Yes')
+        creator._parameter_changed(None)
+        command = self.command(creator)
+        self.assertEqual(command.option_list, {'cardinality': 'single', 'presentation': 'automatic', 'values': [{'label': 'Yes'}]})
+        result = command.execute({'elements': []})
+        self.assertFalse(result.has_errors, result.message)
+        self.assertEqual(result.schema['elements'][0]['typeParameters']['values'],
+                         [{'id': 'pending-option:new:0', 'label': 'Yes'}])
+        self.assertEqual(parse_command_text(command.to_syntax()), [command])
+        user = self.command(self.creator('reference', 'user', ADD_FIELD))
+        result = user.execute({'elements': [], 'databaseId': 'db'})
+        self.assertFalse(result.has_errors, result.message)
+        self.assertEqual(result.schema['elements'][0]['typeParameters']['range'], [{'formId': 'db@users'}])
+
+    def test_rejects_bad_literal_shapes_without_applying_schema(self):
+        for arguments in (
+            'fieldCode="x", fieldType="FREE_TEXT"',
+            'fieldCode="x", fieldType="date", fieldVariant="text"',
+            'fieldCode="x", fieldType="reference", fieldVariant="user", referencedForm="other"',
+            'fieldCode="x", fieldType="quantity", required=0',
+            'fieldCode="x", fieldType="quantity", newCode="bad code"',
+            'fieldCode="x", fieldType="enumerated", fieldVariant="single", optionList={"values": [{"code": "x", "label": "X"}]}',
+            'fieldCode="x", fieldType="reference", fieldVariant="reference", lookupFields=[{"label": "Name"}]',
+            'fieldCode="x", fieldType="quantity", label=__import__("os")',
+            'fieldCode="x", fieldType="geopoint", defaultValue=' + repr('{"latitude": NaN, "longitude": 0}'),
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(CommandTextError):
+                parse_command_text('ModifyField(' + arguments + ')')
+
+    def test_nonfinite_json_defaults_report_value_error(self):
+        arguments = 'fieldCode="x", fieldType="geopoint", defaultValue=' + repr('{"latitude": NaN, "longitude": 0}')
+        with self.assertRaisesRegex(CommandTextError, 'finite'):
+            parse_command_text('ModifyField(' + arguments + ')')
+
+    def test_nested_empty_collection_text_means_remove(self):
+        command = parse_command_text('ModifyField(fieldCode="x", fieldType="enumerated", '
+                                     'fieldVariant="multiple", optionList={"values": []})')[0]
+        self.assertEqual(command.changes, {'option_list': {'values': None}})
+        self.assertEqual(parse_command_text(command.to_syntax()), [command])
+
+    def test_command_list_roundtrip_applies_without_mutating_source(self):
+        creator = self.creator()
+        creator.activations['description'].set_value(True)
+        creator.controls['description'].set_value('Changed')
+        creator._parameter_changed(None)
+        command = self.command(creator)
+        with Client(ui.page('/')), ui.column():
+            manager = CommandListManager(on_execute=lambda: None)
+        source = {'elements': [{'id': 'q', 'code': 'quantity', 'label': 'Target label or code', 'type': 'quantity'}]}
+        before = deepcopy(source)
+        manager.set_schema(source)
+        manager.add_command(command)
+        self.assertEqual(manager.executions[0].status, 'applied')
+        self.assertFalse(manager.execute_button.props['disable'])
+        self.assertEqual(source, before)
+        with patch.object(ModifyFieldCommand, 'execute', side_effect=AssertionError('must not execute')):
+            self.assertEqual(parse_command_text(command.to_syntax()), [command])
+
+
+if __name__ == '__main__':
+    unittest.main()

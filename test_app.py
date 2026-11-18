@@ -12,6 +12,7 @@ from activity_manager.api import DEFAULT_BASE_URL, ActivityInfoService
 from activity_manager.combobox import FreeTextCombobox
 from activity_manager.command_creator import CommandCreatorRenderer, field_codes_from_schema
 from activity_manager.command_list import CommandListManager
+from activity_manager.command_execution import ExecutionResult
 from activity_manager.command_parser import CommandTextError, parse_command_text
 from activity_manager.commands import (
     DELETE_FIELD,
@@ -482,6 +483,46 @@ DeleteField(
 
 
 class UITests(unittest.IsolatedAsyncioTestCase):
+    async def test_unselected_reevaluation_preserves_console_and_saves_command_messages(self):
+        managers = []
+
+        def make_manager(**kwargs):
+            manager = CommandListManager(**kwargs)
+            managers.append(manager)
+            return manager
+
+        async def resolve(candidate):
+            await asyncio.sleep(0)
+            return ExecutionResult(candidate)
+
+        with patch('activity_manager.page.CommandListManager', side_effect=make_manager):
+            with Client(ui.page('/')), ui.column() as page:
+                connection_page()
+        manager = managers[0]
+        manager.resolve_schema = resolve
+        console = next(element for element in page.descendants()
+                       if isinstance(element, ui.label) and element.text == 'No messages.')
+        manager.set_schema({'elements': []})
+        manager.add_command(DeleteFieldCommand('missing'))
+        await manager._evaluation_task
+
+        # Match the write-completion order: refresh source, clear selection,
+        # display the run report, then let background evaluation complete.
+        manager.set_schema({'elements': []})
+        manager.clear_selection()
+        report = 'Schema successfully updated and verified.'
+        console.set_text(report)
+        await manager._evaluation_task
+        self.assertEqual(console.text, report)
+        self.assertEqual(manager.executions[0].status, 'warning')
+        self.assertIn('missing', manager.executions[0].message)
+
+        manager.select_command(0)
+        self.assertEqual(console.text, manager.executions[0].message)
+        manager.set_schema({'elements': []})
+        await manager._evaluation_task
+        self.assertEqual(console.text, manager.executions[0].message)
+
     async def test_form_list_errors_are_reported_in_console(self):
         service = AsyncMock(spec=ActivityInfoService)
         service.get_form_tree.return_value = {}

@@ -151,9 +151,11 @@ def parse_command_text(text: str) -> list[Any]:
     from .commands.add_field import parse_add_field
     from .commands.delete_field import parse_delete_field
     from .commands.move_field import parse_move_field
+    from .commands.modify_field import parse_modify_field
 
     parsers = {
         'addfield': parse_add_field,
+        'modifyfield': parse_modify_field,
         'deletefield': parse_delete_field,
         'movefield': parse_move_field,
     }

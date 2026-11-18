@@ -9,7 +9,7 @@ from .combobox import FreeTextCombobox
 
 
 Condition = tuple[str, tuple[Any, ...]] | Callable[[Mapping[str, Any]], bool]
-ControlType = Literal['text', 'combobox', 'single_select', 'multi_select', 'boolean', 'group', 'repeat']
+ControlType = Literal['text', 'select', 'combobox', 'single_select', 'multi_select', 'boolean', 'toggle', 'group', 'repeat']
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class ParameterDefinition:
     required: bool = False
     options: tuple[str, ...] = ()
     option_source: str | None = None
+    options_when: Callable[[Mapping[str, Any]], tuple[str, ...]] | None = None
     visible_when: Condition | None = None
     required_when: Condition | None = None
     path: str | None = None
@@ -34,6 +35,7 @@ class ParameterDefinition:
     help: str | None = None
     option_labels: Mapping[str, str] | None = None
     inline_rows: bool = False
+    fixed_when: Callable[[Mapping[str, Any]], Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -69,13 +71,17 @@ class _ParameterEditor:
         self.rows: list[list[_ParameterEditor]] = []
         self.buttons = []
         self.control = None
+        self.current_options = definition.options
         self.relevant = True
         self.required = definition.required
+        self._fixed_value = None
         state = state or {}
         self.add_row_button = None
         with ui.column().classes('creator-parameter gap-1 rounded bg-slate-100 px-2 py-1') as self.container:
-            if definition.inline_rows:
+            if definition.control in ('group', 'repeat'):
                 self.container.classes('creator-expanding-parameter')
+            if definition.inline_rows:
+                self.container.classes('creator-inline-rows')
             with ui.row().classes('items-center gap-2 flex-nowrap'):
                 self.activation = ui.checkbox(
                     value=state.get('active', definition.required or definition.initially_active),
@@ -115,6 +121,10 @@ class _ParameterEditor:
             )
             if definition.multiline:
                 self.control.props('type=textarea autogrow')
+        elif definition.control == 'select':
+            self.control = ui.select(
+                list(definition.options), label=definition.label, value=value, on_change=on_change,
+            ).classes('min-w-28')
         elif definition.control == 'single_select':
             ui.label(definition.label).classes('text-sm text-slate-600')
             self.control = ui.radio(
@@ -125,6 +135,8 @@ class _ParameterEditor:
                 list(definition.options), label=definition.label, multiple=True,
                 value=list(value or []), on_change=on_change,
             ).props('dense use-chips').classes('min-w-56')
+        elif definition.control == 'toggle':
+            self.control = ui.switch(definition.label, value=value == definition.options[1], on_change=on_change)
         elif definition.control == 'boolean':
             with ui.row().classes('items-center gap-2 flex-nowrap'):
                 ui.label(f'{definition.label}:').classes('text-sm text-slate-700 whitespace-nowrap')
@@ -211,11 +223,23 @@ class _ParameterEditor:
         self.required = definition.required or (
             definition.required_when is not None and self._matches(definition.required_when, siblings)
         )
+        if definition.options_when:
+            options = definition.options_when(siblings)
+            if options != self.current_options:
+                self.current_options = options
+                self.control.set_options(list(options), value=self.control.value if self.control.value in options else None)
         self.container.set_visibility(self.relevant)
-        if self.required:
+        fixed = definition.fixed_when(siblings) if definition.fixed_when else None
+        if self._fixed_value is not None and fixed is None:
+            self.control.set_value(definition.default if definition.default is not None else False)
+            self.activation.set_value(definition.required or definition.initially_active)
+        self._fixed_value = fixed
+        if fixed is not None and self.relevant:
+            self.control.set_value(fixed)
+        if self.required or fixed is not None:
             self.activation.set_value(True)
-        self.activation.set_visibility(not self.required)
-        self.activation.set_enabled(enabled and self.relevant and not self.required)
+        self.activation.set_visibility(not self.required and fixed is None)
+        self.activation.set_enabled(enabled and self.relevant and not self.required and fixed is None)
         active = enabled and self.relevant and self.activation.value
         self.container.classes(
             add='bg-blue-100' if self.activation.value else 'bg-slate-100',
@@ -225,9 +249,9 @@ class _ParameterEditor:
             if was_relevant and not self.relevant:
                 self.control.set_value(
                     [] if definition.control == 'multi_select'
-                    else False if definition.control == 'boolean' else None
+                    else False if definition.control in ('boolean', 'toggle') else None
                 )
-            getattr(self.control, 'enable' if active else 'disable')()
+            getattr(self.control, 'enable' if active and fixed is None else 'disable')()
             if isinstance(self.control, FreeTextCombobox):
                 options = list(self._options())
                 if self.control.options != options:
@@ -235,7 +259,7 @@ class _ParameterEditor:
         for button in self.buttons:
             button.set_enabled(active and not button.props.get('data-boundary', False))
         for children in [self.children, *self.rows]:
-            self.owner._refresh_editors(children, active)
+            self.owner._refresh_editors(children, active, siblings)
 
     @staticmethod
     def _matches(condition, values):
@@ -244,6 +268,10 @@ class _ParameterEditor:
         return condition is None or values.get(condition[0]) in condition[1]
 
     def raw_value(self):
+        if self.definition.control == 'toggle' and self.activation.value and self.relevant:
+            return self.definition.options[bool(self.control.value)]
+        if self.definition.control == 'group' and self.activation.value and self.relevant:
+            return {child.definition.key: child.raw_value() for child in self.children}
         return (
             self.control.value
             if self.control is not None and self.activation.value and self.relevant
@@ -266,7 +294,7 @@ class _ParameterEditor:
                     raise ValueError(f'{definition.label} requires at least one choice.')
             if self.required and blank:
                 raise ValueError(f'{definition.label} is required.')
-            if definition.control == 'single_select' and blank and definition.blank_action != 'unset':
+            if definition.control in ('single_select', 'select') and blank and definition.blank_action != 'unset':
                 raise ValueError(f'{definition.label} requires a choice.')
             if blank:
                 value = None if definition.blank_action == 'unset' else ''
@@ -280,11 +308,13 @@ class _ParameterEditor:
                         raise ValueError
                 except (ValueError, TypeError, OverflowError):
                     raise ValueError(f'{definition.label} must be a finite {definition.value_type}.') from None
-            if definition.control == 'single_select' and value not in definition.options and not blank:
+            if definition.control in ('single_select', 'select') and value not in self.current_options and not blank:
                 raise ValueError(f'{definition.label} must be one of the listed choices.')
         if self.required and definition.control == 'repeat' and not value:
             raise ValueError(f'{definition.label} requires at least one row.')
-        if definition.validate:
+        if definition.blank_action == 'unset' and not value and definition.control in ('repeat', 'group', 'multi_select'):
+            value = None
+        if definition.validate and value is not None:
             error = definition.validate(value)
             if error:
                 raise ValueError(error)
@@ -327,7 +357,7 @@ class CommandCreatorRenderer:
             }
             .creator-parameter .q-radio { min-height: 28px; }
             .creator-expanding-parameter { height: auto; min-height: 64px; }
-            .creator-expanding-parameter .creator-parameter {
+            .creator-inline-rows .creator-parameter {
                 background: transparent;
                 padding: 0;
             }
@@ -383,13 +413,13 @@ class CommandCreatorRenderer:
             self._updating = False
 
     @staticmethod
-    def _refresh_editors(editors, enabled):
+    def _refresh_editors(editors, enabled, context=None):
         # Settle chained sibling conditions in the same event, including when
         # a hidden dependency has just had its value cleared.
         for _ in range(len(editors) + 1):
             values = {editor.definition.key: editor.raw_value() for editor in editors}
             for editor in editors:
-                editor.refresh(values, enabled)
+                editor.refresh({**(context or {}), **values}, enabled)
             if values == {editor.definition.key: editor.raw_value() for editor in editors}:
                 break
 

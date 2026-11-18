@@ -13,7 +13,7 @@ from .schema_names import readable_schema, load_default_record_labels
 from .schema_display import underline_substitutions
 from .schema_resolution import resolve_command_schema
 from .command_list import CommandExecution, CommandListManager
-from .commands import ADD_FIELD, DELETE_FIELD, MOVE_FIELD
+from .commands import ADD_FIELD, DELETE_FIELD, MOVE_FIELD, MODIFY_FIELD
 from .listbox import DatabaseListbox
 from .schema_change import apply_form_schema_change
 
@@ -247,7 +247,8 @@ def connection_page():
         execution: CommandExecution | None,
     ) -> None:
         if selected_index is None:
-            console_message.set_text('No messages.')
+            # Background evaluation still refreshes the source display, but its
+            # per-command messages belong to executions until a command is selected.
             show_result(
                 source_schema,
                 'Select a form to load its schema.',
@@ -495,7 +496,7 @@ def connection_page():
         with ui.card().classes('workbench-panel command-creator-panel w-full no-shadow'):
             ui.label('Command Creator').classes('text-lg font-medium')
             command_creator = CommandCreatorRenderer(
-                (MOVE_FIELD, DELETE_FIELD, ADD_FIELD), on_add=add_command,
+                (MOVE_FIELD, DELETE_FIELD, ADD_FIELD, MODIFY_FIELD), on_add=add_command,
                 on_parameter_change=refresh_reference_suggestions,
             )
 

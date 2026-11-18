@@ -4,7 +4,7 @@ from copy import deepcopy
 import re
 import secrets
 
-from .schema_names import FORMULA_KEYS, readable_schema, schema_with_ids, resolve_reference_defaults, resolve_form_names
+from .schema_names import FORMULA_KEYS, TOKENS, readable_schema, schema_with_ids, resolve_reference_defaults, resolve_form_names
 
 
 PENDING_FIELD_PREFIX = 'pending-field:'
@@ -20,6 +20,60 @@ def pending_field_id(code: str) -> str:
     return f'{PENDING_FIELD_PREFIX}{code}'
 
 
+def allocate_pending_field_id(code: str | None, used: set, *, field_type: str | None = None) -> str:
+    """Allocate and reserve a field ID; renames must retain their existing ID."""
+    if code is None:
+        if field_type not in ('section', 'note'):
+            raise ValueError('Only Note and Section fields can be created without a code.')
+        index = 0
+        candidate = pending_field_id(f'{field_type}:{index}')
+        while candidate in used:
+            index += 1
+            candidate = pending_field_id(f'{field_type}:{index}')
+    else:
+        error = field_code_error(code)
+        if error:
+            raise ValueError(error)
+        candidate = pending_field_id(code)
+        index = 0
+        while candidate in used:
+            index += 1
+            candidate = pending_field_id(f'{code}_{index}')
+    used.add(candidate)
+    return candidate
+
+
+def pending_row_owner(field_identity: str) -> str:
+    """Use one stable namespace for rows of pending and persisted fields."""
+    return field_identity.removeprefix(PENDING_FIELD_PREFIX)
+
+
+def schema_identities(schema: dict) -> set:
+    identities = set()
+    for element in schema.get('elements', []):
+        if not isinstance(element, dict):
+            continue
+        identities.add(element.get('id'))
+        params = element.get('typeParameters') or {}
+        for collection in ('values', 'lookupConfigs'):
+            identities.update(row.get('id') for row in params.get(collection) or [] if isinstance(row, dict))
+    return identities
+
+
+def pending_row_id(prefix: str, field_identity: str, preferred, used: set) -> str:
+    """Allocate and reserve a canonical row token, including removed-row slots."""
+    if prefix not in ('pending-option:', 'pending-lookup:'):
+        raise ValueError('Unknown pending row identity prefix.')
+    owner = pending_row_owner(field_identity)
+    candidate = f'{prefix}{owner}:{preferred}'
+    index = 0
+    while candidate in used:
+        candidate = f'{prefix}{owner}:{index}'
+        index += 1
+    used.add(candidate)
+    return candidate
+
+
 def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None) -> dict:
     """Materialize pending field IDs on a copy, once per actual write attempt.
 
@@ -32,14 +86,7 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
     elements = result.get('elements')
     if not isinstance(elements, list):
         raise ValueError('The target schema must contain an elements list.')
-    used = set()
-    for element in elements:
-        if isinstance(element, dict):
-            used.add(element.get('id'))
-            parameters = element.get('typeParameters', {})
-            for collection in ('values', 'lookupConfigs'):
-                for item in parameters.get(collection, []):
-                    used.add(item.get('id'))
+    used = schema_identities(result)
     replacements = {}
 
     def allocate():
@@ -55,8 +102,13 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
         identity = element.get('id')
         code = element.get('code')
         if isinstance(identity, str) and identity.startswith(PENDING_FIELD_PREFIX):
-            if field_code_error(code) or identity != pending_field_id(code):
-                raise ValueError('A pending field identity must match its field code.')
+            structural = code is None and element.get('type') in ('section', 'note') and re.fullmatch(
+                rf'pending-field:{element["type"]}:[0-9]+', identity,
+            ) is not None
+            # Pending IDs survive code edits/removal just like persisted IDs.
+            coded = field_code_error(identity.removeprefix(PENDING_FIELD_PREFIX)) is None
+            if identity in replacements or not (structural or coded):
+                raise ValueError('Invalid or duplicate pending field identity.')
             metadata = element.get('metadata')
             if metadata:
                 reserved = {'ADDED_BY': '_addedBy', 'LAST_EDITED_BY': '_lastEditedBy'}.get(metadata)
@@ -74,7 +126,10 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
             for item in parameters.get(collection, []):
                 token = item.get('id')
                 if isinstance(token, str) and token.startswith(prefix):
-                    if not token.startswith(f'{prefix}{code}:') or token in replacements:
+                    owners = {str(code), str(identity)}
+                    if isinstance(identity, str) and identity.startswith(PENDING_FIELD_PREFIX):
+                        owners.add(pending_row_owner(identity))
+                    if not any(token.startswith(f'{prefix}{owner}:') for owner in owners) or token in replacements:
                         raise ValueError('Invalid or duplicate pending option/lookup identity.')
                     item['id'] = allocate()
                     replacements[token] = item['id']
@@ -123,6 +178,24 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
                 element['defaultValue'] = [replacements.get(item, item) for item in value]
             elif isinstance(value, str):
                 element['defaultValue'] = replacements.get(value, value)
+    def remap_formulas(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in FORMULA_KEYS and isinstance(value, str):
+                    node[key] = ''.join(
+                        f'[{replacements[token[1:-1]]}]' if token.startswith('[') and token[1:-1] in replacements
+                        else replacements.get(token, token)
+                        for token in TOKENS.findall(value)
+                    )
+                else:
+                    remap_formulas(value)
+        elif isinstance(node, list):
+            for value in node:
+                remap_formulas(value)
+
+    # Code-less pending fields cannot be converted to a code before allocation.
+    # Consume quoted literals as whole tokens so their contents remain untouched.
+    remap_formulas(result)
     result = schema_with_ids(result, referenced_schemas)
     for field in result['elements']:
         if field.get('type') != 'enumerated' or field.get('defaultValue') is None:

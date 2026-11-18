@@ -9,9 +9,9 @@ from typing import Any
 from ..command_execution import ExecutionResult
 from ..command_creator import CommandCreatorDefinition
 from ..command_parser import command_error, parse_literal_parameters
-from ..schema_identity import field_code_error, pending_field_id
+from ..schema_identity import field_code_error, allocate_pending_field_id, pending_row_id, schema_identities
 from ..field_parameters import (
-    FIELD_ARGUMENTS, FIELD_TYPES_BY_CASE, FILE_TYPES, UPLOAD_TYPES, field_type_error,
+    FIELD_ARGUMENTS, FIELD_VARIANTS, FIELD_TYPES_BY_CASE, FILE_TYPES, UPLOAD_TYPES, field_type_error,
 )
 from .add_field_parameters import ADD_FIELD_PARAMETERS
 
@@ -56,8 +56,8 @@ def literal_syntax(value):
 
 @dataclass(frozen=True)
 class AddFieldCommand:
-    field_code: str
-    label: str
+    field_code: str | None = None
+    label: str = ''
     field_type: str = 'FREE_TEXT'
     key: bool | None = None
     unique: bool | None = None
@@ -93,6 +93,7 @@ class AddFieldCommand:
     default_formula: str | None = None
     position: str | None = None
     before_after_field: str | None = None
+    field_variant: str | None = None
 
     def __post_init__(self):
         # Creation parses values only. Cross-parameter and schema checks belong
@@ -104,6 +105,17 @@ class AddFieldCommand:
             object.__setattr__(self, 'position', positions.get(self.position.casefold(), self.position))
         if isinstance(self.translation_language, str):
             object.__setattr__(self, 'translation_language', [value.strip() for value in self.translation_language.split(',')])
+        if self.field_variant is not None:
+            if self.field_type == 'FREE_TEXT':
+                object.__setattr__(self, 'barcode', self.field_variant == 'barcode')
+            elif self.field_type == 'enumerated':
+                options = deepcopy(self.option_list or {})
+                options['cardinality'] = self.field_variant
+                if self.field_variant == 'single':
+                    options['presentation'] = 'automatic'
+                else:
+                    options.setdefault('presentation', 'automatic')
+                object.__setattr__(self, 'option_list', options)
         value = self.default_value
         if isinstance(value, str):
             try:
@@ -137,11 +149,14 @@ class AddFieldCommand:
                 fail('before_after_field', 'AddField cannot position a field relative to itself.')
         elif self.before_after_field is not None:
             fail('before_after_field', 'AddField does not use beforeAfterField for this position.')
+        if self.field_variant is not None and self.field_variant not in FIELD_VARIANTS.get(str(self.field_type).casefold(), ()):
+            fail('field_variant', 'Invalid field variant for this field type.')
         error = field_type_error(self.field_type)
         if error:
             fail('field_type', error)
         object.__setattr__(self, 'field_type', FIELD_TYPES_BY_CASE[self.field_type.casefold()])
-        error = field_code_error(self.field_code)
+        error = (None if self.field_code is None and self.field_type in ('section', 'note')
+                 else field_code_error(self.field_code))
         if error:
             fail('field_code', error)
         if not isinstance(self.label, str) or not self.label.strip():
@@ -217,7 +232,7 @@ class AddFieldCommand:
             if self.default_value is not None or self.default_formula is not None:
                 fail('default_value', 'Server-maintained metadata fields cannot have client defaults.')
         if self.field_type in ('reference', 'multiselectreference', 'subform', 'reversereference'):
-            if not self.metadata and not (self.referenced_form or '').strip():
+            if not self.metadata and self.field_variant != 'user' and not (self.referenced_form or '').strip():
                 fail('referenced_form', 'This field type requires a referenced form ID or name.')
             if self.field_type == 'reversereference' and field_code_error(self.reverse_reference_field):
                 fail('reverse_reference_field', 'Reverse references require a reference-field code.')
@@ -248,13 +263,14 @@ class AddFieldCommand:
             fail('option_list', 'Option list requires at least one option.')
         codes = set()
         for option in values:
-            if not isinstance(option, dict) or set(option) != {'code', 'label'}:
-                fail('option_list', 'Each option requires code and label.')
-            if field_code_error(option['code']) or not isinstance(option['label'], str) or not option['label'].strip():
-                fail('option_list', 'Options require a valid code and non-blank label.')
-            if option['code'] in codes:
-                fail('option_list', f'Duplicate option code {option["code"]!r}.')
-            codes.add(option['code'])
+            if not isinstance(option, dict) or set(option) not in ({'label'}, {'code', 'label'}):
+                fail('option_list', 'Each option requires a label.')
+            if ('code' in option and field_code_error(option['code'])) or not isinstance(option['label'], str) or not option['label'].strip():
+                fail('option_list', 'Options require a non-blank label and, if supplied, a valid legacy code.')
+            if 'code' in option:
+                if option['code'] in codes:
+                    fail('option_list', f'Duplicate option code {option["code"]!r}.')
+                codes.add(option['code'])
         object.__setattr__(self, 'option_list', deepcopy(options))
 
     def _default_value(self, value):
@@ -300,6 +316,7 @@ class AddFieldCommand:
         return 'AddField(' + ', '.join(
             f'{argument}={literal_syntax(getattr(self, key))}'
             for key, argument in ARGUMENTS.items() if getattr(self, key) is not None
+            and not (key == 'barcode' and self.field_variant is not None)
         ) + ')'
 
     def execute(self, schema: dict[str, Any]) -> ExecutionResult:
@@ -313,13 +330,17 @@ class AddFieldCommand:
     def _apply(self, schema: dict[str, Any]) -> ExecutionResult:
         if not isinstance(schema, dict) or not isinstance(schema.get('elements'), list):
             return ExecutionResult.error(None, 'AddField requires a form schema with an elements list.', 'invalid_schema')
-        if any(isinstance(element, dict) and element.get('code') == self.field_code
+        if self.field_code is not None and any(isinstance(element, dict) and element.get('code') == self.field_code
                for element in schema['elements']):
             return ExecutionResult.error(schema, f'AddField field code {self.field_code!r} already exists.', 'duplicate_field')
         result = deepcopy(schema)
-        field = {'id': pending_field_id(self.field_code), 'code': self.field_code,
+        used = schema_identities(schema)
+        identity = allocate_pending_field_id(self.field_code, used, field_type=self.field_type)
+        field = {'id': identity,
                  'label': self.label, 'type': self.field_type,
                  'required': self.required if self.required is not None else False}
+        if self.field_code is not None:
+            field['code'] = self.field_code
         direct = {'key': 'key', 'description': 'description', 'unique': 'unique', 'read_only': 'readOnly',
                   'default_value': 'defaultValue', 'default_formula': 'defaultValueFormula',
                   'relevance_condition': 'relevanceCondition', 'required_condition': 'requiredCondition',
@@ -328,6 +349,8 @@ class AddFieldCommand:
             value = getattr(self, name)
             if value is not None:
                 field[wire_key] = deepcopy(value)
+        if self.field_type == 'serial':
+            field.update(key=True, unique=True)
         for name, wire_key in (('hide_from_entry', 'dataEntryVisible'), ('hide_in_table', 'tableVisible')):
             if getattr(self, name) is not None:
                 field[wire_key] = not getattr(self, name)
@@ -341,6 +364,8 @@ class AddFieldCommand:
             value = getattr(self, name)
             if value is not None:
                 parameters[wire_key] = deepcopy(value)
+        if self.field_type == 'attachment' and self.attachment_cardinality is None:
+            parameters['cardinality'] = 'multiple'
         if self.translation:
             parameters['translationConfig'] = {
                 'fieldId': 'field-code:' + self.translation_field,
@@ -348,16 +373,22 @@ class AddFieldCommand:
             }
         if self.option_list:
             parameters.update({key: value for key, value in self.option_list.items() if key != 'values'})
-            parameters['values'] = [
-                {'id': f'pending-option:{self.field_code}:{option["code"]}', 'label': option['label']}
-                for option in self.option_list['values']
-            ]
+            parameters['values'] = []
+            option_tokens = {}
+            for index, option in enumerate(self.option_list['values']):
+                token = pending_row_id('pending-option:', identity, option.get('code', index), used)
+                parameters['values'].append({'id': token, 'label': option['label']})
+                if 'code' in option:
+                    option_tokens[option['code']] = token
             if self.default_value is not None:
-                codes = {option['code'] for option in self.option_list['values']}
-                token = lambda code: f'pending-option:{self.field_code}:{code}' if code in codes else code
+                token = lambda code: option_tokens.get(code, code)
                 field['defaultValue'] = [token(code) for code in self.default_value] if isinstance(
                     self.default_value, list
                 ) else token(self.default_value)
+        if self.field_variant == 'user':
+            if not schema.get('databaseId'):
+                return ExecutionResult.error(schema, 'User fields require a database ID.', 'missing_database')
+            parameters['range'] = [{'formId': f"{schema['databaseId']}@users"}]
         if self.referenced_form:
             if self.field_type in ('reference', 'multiselectreference'):
                 parameters['range'] = [{'formId': self.referenced_form}]
@@ -365,7 +396,7 @@ class AddFieldCommand:
                 parameters['formId'] = self.referenced_form
         if self.lookup_fields is not None:
             parameters['lookupConfigs'] = [
-                {'id': f'pending-lookup:{self.field_code}:{index}',
+                {'id': pending_row_id('pending-lookup:', identity, index, used),
                  'formula': lookup['formula'], 'lookupLabel': lookup['label']}
                 for index, lookup in enumerate(self.lookup_fields)
             ]
@@ -402,7 +433,15 @@ class AddFieldCommand:
 
 
 def create_add_field(values: Mapping[str, Any]) -> AddFieldCommand:
-    return AddFieldCommand(**{key: value for key, value in values.items() if key in ARGUMENTS})
+    arguments = {key: value for key, value in values.items() if key in ARGUMENTS}
+    if arguments.get('field_type') == 'enumerated' and isinstance(arguments.get('option_list'), dict):
+        options = deepcopy(arguments['option_list'])
+        if options.get('cardinality') == 'single':
+            options['presentation'] = 'automatic'
+        else:
+            options.setdefault('presentation', 'automatic')
+        arguments['option_list'] = options
+    return AddFieldCommand(**arguments)
 
 
 def parse_add_field(text: str, call: ast.Call) -> AddFieldCommand:
@@ -414,11 +453,12 @@ def parse_add_field(text: str, call: ast.Call) -> AddFieldCommand:
                   'translationLanguage': (str, list), 'uploadType': list, 'allowedFileTypes': list,
                   'optionList': dict, 'lookupFields': list, 'defaultValue': (str, int, float, list, dict)})
     values = parse_literal_parameters(
-        text, call, 'AddField', types=types, required={'fieldCode', 'label'},
+        text, call, 'AddField', types=types, required={'label'},
         allow_empty=set(types) - {'fieldType', 'fieldCode', 'label'},
     )
     for argument, error in (
-        ('fieldCode', field_code_error(values['fieldCode'])),
+        ('fieldCode', None if values.get('fieldType', '').casefold() in ('section', 'note')
+         and 'fieldCode' not in values else field_code_error(values.get('fieldCode'))),
         ('fieldType', field_type_error(values.get('fieldType', 'FREE_TEXT'))),
         ('label', None if values['label'].strip() else 'Field label is required.'),
     ):
@@ -427,7 +467,7 @@ def parse_add_field(text: str, call: ast.Call) -> AddFieldCommand:
                          if keyword.arg and keyword.arg.casefold() == argument.casefold()), call)
             raise command_error(text, node, error)
     by_argument = {argument: key for key, argument in ARGUMENTS.items()}
-    return create_add_field({by_argument[key]: value for key, value in values.items()})
+    return AddFieldCommand(**{by_argument[key]: value for key, value in values.items()})
 
 
 ADD_FIELD = CommandCreatorDefinition(
