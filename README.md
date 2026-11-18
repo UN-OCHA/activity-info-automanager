@@ -123,6 +123,79 @@ references cause an error and leave all edits in that command unapplied. As with
 `Replace`, missing current text is an error and an empty result follows the normal
 parameter-removal rules.
 
+### AppendFormula(Operator, Formula)
+
+Adds a condition to the parameter's existing formula, unless that condition is
+already included. It is available only in `ModifyField` formula inputs:
+relevance/required/validation conditions, default formulas, serial prefix formulas,
+and calculated formulas. It works in the creator and Text mode.
+
+| Argument | Type | Meaning |
+| --- | --- | --- |
+| `Operator` | String | `AND` or `OR`, case-insensitive. Produces `&&` or `||`. |
+| `Formula` | String | Non-empty formula to add, using readable field codes. |
+
+For example, in **Validation condition**:
+
+```python
+AppendFormula("AND", "population > 0")
+```
+
+If the current formula is missing, empty, or whitespace-only, `Formula` is written
+directly. Otherwise, when it is not already included, the result is
+`(current formula) && (Formula)` for AND, or `(current formula) || (Formula)` for OR.
+Current formula references are converted to Names before comparison; the result
+is resolved back to IDs through the existing pipeline.
+
+Presence detection ignores whitespace outside quoted text and redundant grouping,
+and recognizes reordered/regrouped terms within the same logical operator.
+For example, adding `A` with AND to `B && A`, or adding `B && A` with AND to
+`A && B && C`, leaves the existing formula unchanged. It does not skip `A` when
+adding it with AND to `A || B`: the surrounding operator changes its meaning.
+Whole-formula equality also skips the append, regardless of the chosen operator.
+
+This is structural comparison, not a proof of arbitrary logical equivalence.
+Arithmetic/comparison order and function argument order remain significant; quoted
+text remains exact. Unsupported or malformed formulas and invalid operators cause
+an error and leave the command unapplied. The standalone
+[formula parser reference](formula_parser/README.md) describes its supported grammar
+and reuse API. Normalization is only used for comparison; existing text is retained.
+
+### Append(Position, Separator, AddText)
+
+Adds regular text at the start or end of a parameter's existing value, avoiding a
+duplicate at that boundary. Available in `ModifyField`'s top-level non-formula text
+inputs, through the creator or Text mode.
+
+| Argument | Type | Meaning |
+| --- | --- | --- |
+| `Position` | String | `Start` or `End`, case-insensitive. |
+| `Separator` | String | Exact text between the existing value and `AddText`. May be empty. |
+| `AddText` | String | Text to add. May be empty. |
+
+For example, in **Description**:
+
+```python
+Append("End", " - ", "Reviewed")
+```
+
+If the current value is missing or empty, the result is `AddText`, without the
+separator. Otherwise:
+
+- `Start` checks for `AddText + Separator` at the beginning and prepends it if absent.
+- `End` checks for `Separator + AddText` at the end and appends it if absent.
+
+The boundary check is case-insensitive, including the separator. A match leaves
+the existing text and capitalization unchanged. Text elsewhere in the value does
+not count as a match. Spacing is exact and is not trimmed; whitespace-only current
+text counts as non-empty.
+
+For example, `"Notes - REVIEWED"` remains unchanged with the call above, while
+`"Notes Reviewed"` becomes `"Notes Reviewed - Reviewed"` because the separator
+does not match. Invalid positions cause an error without applying the command.
+Formula inputs use `AppendFormula` instead. Normal text-value validation and
+parameter-removal rules still apply.
+
 ## Running locally
 
 ```powershell

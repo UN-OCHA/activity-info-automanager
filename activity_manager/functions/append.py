@@ -1,0 +1,28 @@
+"""Add text at one end unless that exact boundary text is already present."""
+
+from .append_formula import APPEND_FORMULA
+from .models import FunctionArgument, FunctionContext, FunctionDefinition
+from .replace import REPLACE
+
+
+def append(context: FunctionContext, position: str, separator: str, add_text: str) -> str:
+    position = position.casefold()
+    if position not in ('start', 'end'):
+        raise ValueError('Position must be Start or End.')
+    current = context.current_value
+    if current is None or current == '':
+        return add_text
+    if position == 'start':
+        prefix = add_text + separator
+        return current if current.casefold().startswith(prefix.casefold()) else prefix + current
+    suffix = separator + add_text
+    return current if current.casefold().endswith(suffix.casefold()) else current + suffix
+
+
+APPEND = FunctionDefinition(
+    name='Append',
+    commands=REPLACE.commands,
+    arguments=(FunctionArgument('Position'), FunctionArgument('Separator'), FunctionArgument('AddText')),
+    parameters=REPLACE.parameters - APPEND_FORMULA.parameters,
+    implementation=append,
+)

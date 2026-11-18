@@ -8,7 +8,7 @@ nested rows/groups, booleans, numeric inputs, and selection controls do not acce
 calls. AddField remains literal-only. A function definition must also explicitly
 permit the command and parameter; both parsing and application enforce permissions.
 
-The production catalog contains Replace and RegexReplace. A call to an unregistered name is an
+The production catalog contains Replace, RegexReplace, AppendFormula, and Append. A call to an unregistered name is an
 error. Each function belongs in its own module under
 `activity_manager/functions/`, with an explicit definition registered in
 `functions/catalog.py`. No dynamic imports or filesystem discovery are used.
@@ -73,7 +73,7 @@ incoming schema with an Error. Function errors identify the function and paramet
 The stored command keeps the original call for subsequent previews/serialization.
 Existing ActivityInfo formula resolution runs after command transformation.
 
-Tests use temporary catalogs for synthetic functions; production exposes Replace and RegexReplace.
+Tests use temporary catalogs for synthetic functions; production exposes Replace, RegexReplace, AppendFormula, and Append.
 
 ## Replace
 
@@ -120,6 +120,32 @@ Empty FindPattern and missing current text are Errors, matching Replace's contra
 Pattern and replacement errors propagate through the shared function error handler,
 so no edits are applied. Raw string literals work in both the creator and Text mode;
 serialization preserves their values with ordinary escaped string literals.
+
+## AppendFormula
+
+`AppendFormula(Operator, Formula)` is limited to ModifyField's six top-level formula
+inputs. Operator accepts case-insensitive AND/OR only. It parses Formula even if
+the current value is absent/blank, then returns Formula directly for those empty
+values. Otherwise, the standalone `formula_parser` package checks normalized
+whole-expression equality or top-level inclusion under the requested operator.
+If absent, the result is `(current) && (Formula)` or `(current) || (Formula)`.
+Skipped appends preserve the readable current text exactly. Malformed/unsupported
+formula syntax raises an atomic function error. Names conversion and subsequent
+ID resolution are supplied by the existing shared framework. Formula arguments
+use readable field codes. See `formula_parser/README.md` for the dependency-free
+parse/normalize/includes API and supported grammar.
+
+## Append
+
+`Append(Position, Separator, AddText)` permits ModifyField's top-level non-formula
+text inputs (Replace's permission set minus AppendFormula's). All three arguments
+are positional strings. Position accepts case-insensitive Start/End. None or an
+empty current string produces AddText directly. For a non-empty current string,
+Start checks for AddText+Separator at the beginning, while End checks for
+Separator+AddText at the end. Casefolded comparisons preserve original text on a
+match; otherwise the exact boundary string is prepended/appended. No whitespace
+is trimmed, and whitespace-only current text is non-empty. Separator/AddText may
+be empty. Shared context, validation, serialization, and atomic errors apply.
 
 ## Alignment with commands
 
