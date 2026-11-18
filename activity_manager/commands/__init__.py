@@ -6,8 +6,11 @@ from .delete_field import DELETE_FIELD, DeleteFieldCommand
 from .move_field import MOVE_FIELD, MoveFieldCommand
 
 from .set_variable import SET_VARIABLE, SetVariableCommand
+from .with_form import WITH_FORM, WithFormCommand
 
 __all__ = [
+    'WITH_FORM',
+    'WithFormCommand',
     'SET_VARIABLE',
     'SetVariableCommand',
     'CommandDefinition',

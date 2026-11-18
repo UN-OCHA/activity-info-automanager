@@ -74,11 +74,12 @@ def pending_row_id(prefix: str, field_identity: str, preferred, used: set) -> st
     return candidate
 
 
-def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None) -> dict:
+def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None, *, identity_map=None) -> dict:
     """Materialize pending field IDs on a copy, once per actual write attempt.
 
     Commands and previews never allocate CUIDs. Existing IDs are preserved.
-    The caller retains this exact target for post-write verification.
+    The caller retains this exact target for post-write verification. An optional
+    shared identity_map preserves allocations across visits, scoped by form ID.
     """
     # Pending references in preview formulas must be mapped back through codes
     # before the pending field IDs themselves are materialized.
@@ -88,12 +89,18 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
         raise ValueError('The target schema must contain an elements list.')
     used = schema_identities(result)
     replacements = {}
+    identity_map = identity_map if identity_map is not None else {}
+    used.update(identity_map.values())
 
-    def allocate():
+    def allocate(token):
+        key = (schema.get("id"), token)
+        if key in identity_map:
+            return identity_map[key]
         while True:
             identity = 'c' + secrets.token_hex(12)
             if identity not in used:
                 used.add(identity)
+                identity_map[key] = identity
                 return identity
 
     for element in elements:
@@ -119,7 +126,7 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
                 used.add(reserved)
                 element['id'] = reserved
             else:
-                element['id'] = allocate()
+                element['id'] = allocate(identity)
             replacements[identity] = element['id']
         parameters = element.get('typeParameters', {})
         for collection, prefix in (('values', 'pending-option:'), ('lookupConfigs', 'pending-lookup:')):
@@ -131,7 +138,7 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None)
                         owners.add(pending_row_owner(identity))
                     if not any(token.startswith(f'{prefix}{owner}:') for owner in owners) or token in replacements:
                         raise ValueError('Invalid or duplicate pending option/lookup identity.')
-                    item['id'] = allocate()
+                    item['id'] = allocate(token)
                     replacements[token] = item['id']
 
     by_code = {}

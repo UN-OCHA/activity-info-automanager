@@ -13,6 +13,47 @@ Use the command creator to see the available parameters for each command.
 | `ModifyField` | Updates selected settings on an existing field while preserving its identity and unrelated settings. Omitted settings remain unchanged; explicit empty values clear settings where permitted. The field's type and variant cannot be changed. |
 | `MoveField` | Moves an existing field to the beginning or end of the form, or before or after another field. |
 | `DeleteField` | Removes an existing field from the form. It does not check for references to that field elsewhere. |
+| `WithForm` | Selects the active form and database for subsequent commands. |
+
+### Multiple forms
+
+The initial database and form selectors establish the starting context.
+`WithForm` takes one required `form` parameter, using the same selection rules as
+referenced forms and variable lookups:
+
+```python
+AddField(fieldCode="new", label="New field")
+WithForm(form="Other database/Second form")
+ModifyField(fieldCode="total", fieldType="calculated",
+            calculationFormula="SOURCE.new")
+WithForm(form="Original database/First form")
+DeleteField(fieldCode="old")
+```
+
+Unqualified form names resolve in the active form's database. Names are exact and
+case-sensitive and must resolve uniquely; form IDs are also accepted using the
+existing shared resolver. `form` supports `${vars.name}` substitutions. Variables
+remain available across switches. WithForm currently selects a single form and
+does not support iteration.
+
+Each successful switch to a different form appends a schema snapshot, loading a
+new form only when the switch is reached. Revisiting a form copies its latest
+local version. Selecting the active form again is a no-op. Cross-form schema
+references use the latest local versions, ahead of cached online schemas. Variable
+lookups still query online record data.
+
+Result tabs run vertically down the left, with one tab per distinct form. Selecting
+a command shows the forms and latest snapshots reached at that point, and selects
+that command's active form. Revisits reuse the existing tab.
+
+Execute checks every participating form for external changes before writing, then
+checks again before each update. It writes snapshots in visit order, skips
+unchanged snapshots, and verifies every write. A failed step stops execution and
+offers **Leave**, **Roll back last update**, or **Roll back all updates**. Rollback
+restores saved pre-update schemas in reverse order, verifying each restoration;
+the first rollback failure stops recovery. Rollback submits original field IDs
+through the normal schema endpoint. Restoration of deleted field data through
+this mechanism has not yet been established against the live API.
 
 ### SetVariable
 

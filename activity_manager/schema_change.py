@@ -224,3 +224,109 @@ async def apply_form_schema_change(
     else:
         messages.append('Rollback schema was restored, but the rollback request reported an error.')
     return SchemaChangeOutcome('rollback_failed', after_rollback, tuple(messages))
+
+
+@dataclass(frozen=True)
+class MultiFormChangeOutcome:
+    status: str
+    actual_schemas: dict
+    messages: tuple[str, ...]
+
+
+async def apply_schema_sequence(service, originals, opschema, choose_recovery, *, related_schemas=None):
+    """Write ordered visits and recover using a reverse journal of actual preimages."""
+    from copy import deepcopy
+    from .multi_form import prepare_operations
+
+    actual = {}
+    expected = deepcopy(originals)
+    messages = []
+    journal = []
+    related = {**(related_schemas or {}), **originals}
+    write = getattr(service, 'put_resolved_form_schema', service.put_form_schema)
+
+    def compare(wanted, found, context):
+        return compare_schemas(_as_form_schema(wanted, 'expected'),
+                               _as_form_schema(found, 'actual'), context)
+
+    async def recover(reason):
+        messages.append(reason)
+        if not journal:
+            return MultiFormChangeOutcome('stopped', actual, tuple(messages))
+        choice = await choose_recovery(reason)
+        if choice == 'leave':
+            messages.append('Execution stopped; existing changes were left in place.')
+            return MultiFormChangeOutcome('partial_left', actual, tuple(messages))
+        entries = journal[-1:] if choice == 'rollback_last' else journal
+        for identity, before, after, context in reversed(entries):
+            try:
+                current = await service.get_form_schema(identity)
+                actual[identity] = current
+                if after is not None and not compare(after, current, context).matches:
+                    raise ValueError('The form changed since verification; rollback stopped to preserve concurrent changes.')
+                if not compare(before, current, context).matches:
+                    await write(identity, deepcopy(before))
+                    restored = await service.get_form_schema(identity)
+                    actual[identity] = restored
+                    verification = compare(before, restored, context)
+                    if not verification.matches:
+                        raise ValueError(verification.summary)
+                messages.append(f'Rolled back and verified form {identity}.')
+            except Exception as exc:
+                messages.append(f'Rollback failed for form {identity}; no further rollback attempted: {exc}')
+                return MultiFormChangeOutcome('rollback_failed', actual, tuple(messages))
+        messages.append('Execution stopped after rollback.')
+        return MultiFormChangeOutcome('rolled_back_last' if choice == 'rollback_last' else 'rolled_back',
+                                      actual, tuple(messages))
+
+    # Preflight every form before making any changes.
+    try:
+        for identity, baseline in originals.items():
+            latest = await service.get_form_schema(identity)
+            actual[identity] = latest
+            if not compare(baseline, latest, related).matches:
+                return MultiFormChangeOutcome('stale', actual, (
+                    f'Execution stopped: form {identity} changed after it was loaded.',))
+        operations = prepare_operations(opschema, originals, related)
+    except Exception as exc:
+        return MultiFormChangeOutcome('read_error', actual, (f'Could not prepare execution: {exc}',))
+
+    for index, (target, context) in enumerate(operations):
+        identity = target['id']
+        label = target.get('label') or identity
+        try:
+            before = await service.get_form_schema(identity)
+            actual[identity] = before
+            if not compare(expected[identity], before, context).matches:
+                return await recover(f'Execution stopped before step {index + 1}: form {label} changed unexpectedly.')
+            if compare(target, before, context).matches:
+                messages.append(f'Step {index + 1}, {label}: no schema changes required.')
+                continue
+        except Exception as exc:
+            return await recover(f'Could not read or compare form {label}: {exc}')
+
+        journal.append((identity, deepcopy(before), None, context))
+        write_error = None
+        try:
+            await write(identity, deepcopy(target))
+        except Exception as exc:
+            write_error = str(exc)
+        try:
+            after = await service.get_form_schema(identity)
+            actual[identity] = after
+            journal[-1] = (identity, deepcopy(before), deepcopy(after), context)
+            verification = compare(target, after, context)
+        except Exception as exc:
+            actual.pop(identity, None)
+            return await recover(f'Could not verify step {index + 1}, {label}: {exc}'
+                                 + (f' Write error: {write_error}' if write_error else ''))
+        if not verification.matches:
+            return await recover(f'Step {index + 1}, {label} failed verification.\n'
+                                 + (f'Write error: {write_error}\n' if write_error else '')
+                                 + verification.summary)
+        expected[identity] = deepcopy(after)
+        messages.append(f'Step {index + 1}, {label}: schema successfully changed and verified.')
+        if write_error:
+            return await recover(f'The write for {label} reported an error despite matching verification: {write_error}')
+
+    return MultiFormChangeOutcome('success', actual, tuple(messages))

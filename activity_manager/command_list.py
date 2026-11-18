@@ -1,11 +1,13 @@
 from copy import deepcopy
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from nicegui import ui
 
 from .command_card import render_command_card
+from .multi_form import FormWorkspace
+from .schema_names import readable_schema
 from .command_execution import (
     Diagnostic, ExecutionResult, ExecutionStatus, EXECUTABLE_STATUSES, apply_command, apply_command_locally,
 )
@@ -30,6 +32,8 @@ class CommandExecution:
     concrete_command: Any = None
     snapshot_issues: tuple[Diagnostic, ...] | None = None
     target: IterationTarget | None = None
+    opschema: tuple[dict, ...] = ()
+    form_issues: dict | None = None
 
     @property
     def issues(self):
@@ -39,7 +43,8 @@ class CommandExecution:
 
     @classmethod
     def from_result(cls, result):
-        return cls(result.status, result.schema, result.message, result.names_schema, result.diagnostics)
+        return cls(result.status, result.schema, result.message, result.names_schema, result.diagnostics,
+                   opschema=result.opschema, snapshot_issues=result.snapshot_issues, form_issues=result.form_issues)
 
 
 class CommandListManager:
@@ -53,7 +58,11 @@ class CommandListManager:
         on_text_mode_change=None,
         resolve_schema=None,
         lookup_variable=None,
+        form_service=None,
     ) -> None:
+        self.form_service = form_service
+        self.workspace = FormWorkspace(None)
+        self._base_related = {}
         self.related_schemas = {}
         self.database_names = {}
         self.resolve_schema = resolve_schema
@@ -224,6 +233,7 @@ class CommandListManager:
         self._update_count()
 
     def set_schema(self, schema: dict[str, Any] | None) -> None:
+        self._base_related = deepcopy(self.related_schemas)
         self.source_schema = deepcopy(schema)
         self._evaluate_commands()
 
@@ -295,7 +305,8 @@ class CommandListManager:
             children[iteration] = CommandExecution(
                 execution.status, execution.schema, execution.message, execution.names_schema,
                 execution.diagnostics, field_code=target.original_code,
-                concrete_command=concrete.command if concrete else None, target=target)
+                concrete_command=concrete.command if concrete else None, target=target, opschema=execution.opschema,
+                snapshot_issues=execution.issues, form_issues=execution.form_issues)
             current = execution.schema
             if execution.status == 'error':
                 for later in range(iteration + 1, len(children)):
@@ -321,7 +332,8 @@ class CommandListManager:
         reached = [child for child in children if child.schema is not None]
         final = reached[-1] if reached else None
         return CommandExecution(status, current, message, final.names_schema if final else None,
-            diagnostics, tuple(children), snapshot_issues=final.issues if final else ())
+            diagnostics, tuple(children), snapshot_issues=final.issues if final else (), opschema=final.opschema if final else (),
+            form_issues=final.form_issues if final else None)
 
     def target_schema(self) -> dict[str, Any] | None:
         if not self.executions or not all(
@@ -329,6 +341,58 @@ class CommandListManager:
         ):
             return None
         return deepcopy(self.executions[-1].schema)
+
+    def target_opschema(self):
+        return deepcopy(self.executions[-1].opschema) if self.target_schema() is not None else None
+
+    def _save_result(self, result):
+        if result.schema is not None:
+            identity = result.schema.get('id')
+            if result.has_errors and not result.issues and result.schema == self.workspace.latest.get(identity):
+                # An atomic failure leaves the displayed schema and its existing
+                # unresolved-reference annotations unchanged.
+                result = replace(result, snapshot_issues=self.workspace.issues.get(identity, ()))
+            self.workspace.update(result.schema)
+            self.workspace.issues[identity] = result.issues
+            self.related_schemas.update(self.workspace.latest)
+        return replace(result, opschema=tuple(deepcopy(self.workspace.opschema)),
+                       form_issues=deepcopy(self.workspace.issues))
+
+    def _snapshot_execution(self, execution):
+        issues = self.workspace.issues.get((execution.schema or {}).get('id'), execution.issues)
+        return replace(execution, opschema=tuple(deepcopy(self.workspace.opschema)),
+                       snapshot_issues=issues, form_issues=deepcopy(self.workspace.issues))
+
+    async def _apply_connected(self, application, current, variables):
+        from .commands.with_form import WithFormCommand
+        from .commands.set_variable import SetVariableCommand
+        from .command_templates import command_parameters
+        from .command_iteration import PreparedCommand
+        try:
+            prepared = application.command if isinstance(application, PreparedCommand) else command_parameters(application, variables)
+            if isinstance(prepared, WithFormCommand):
+                if self.form_service is None:
+                    return prepared.execute(current)
+                schema = await self.workspace.switch(prepared.form, self.form_service, current, self.related_schemas)
+                self.related_schemas.update(self.workspace.latest)
+                return ExecutionResult(schema, names_schema=readable_schema(
+                        schema, self.related_schemas, self.database_names),
+                    snapshot_issues=self.workspace.issues.get(schema.get('id'), ()),
+                    success_message=f'Active form: {schema.get("label") or schema["id"]}')
+        except Exception as exc:
+            return ExecutionResult.error(current, str(exc), 'form_switch_failed')
+        async def resolve(schema):
+            self.related_schemas.update(self.workspace.latest)
+            self.related_schemas[schema.get('id')] = schema
+            return await self.resolve_schema(schema)
+        result = await apply_command(PreparedCommand(prepared), current, resolve,
+            related_schemas=self.related_schemas, database_names=self.database_names,
+            variables=variables, lookup_variable=self.lookup_variable,
+            reserved_identities=self.workspace.reserved.get(current.get("id")))
+        if isinstance(prepared, SetVariableCommand):
+            # Variables do not run the schema resolver or change the schema.
+            result = replace(result, snapshot_issues=self.workspace.issues.get(current.get('id'), ()))
+        return result
 
     def set_busy(self, busy: bool) -> None:
         self.busy = busy
@@ -339,6 +403,9 @@ class CommandListManager:
         self._update_text_action_buttons()
 
     def _evaluate_commands(self) -> None:
+        self.workspace = FormWorkspace(self.source_schema)
+        self.related_schemas = deepcopy(self._base_related)
+        self.related_schemas.update(self.workspace.latest)
         self._evaluation_version += 1
         if self._evaluation_task is not None:
             self._evaluation_task.cancel()
@@ -370,11 +437,13 @@ class CommandListManager:
             try:
                 application = next(steps)
                 while True:
-                    result = apply_command_locally(application, current_schema, self.related_schemas, self.database_names, variables=variables)
+                    result = apply_command_locally(application, current_schema, self.related_schemas, self.database_names, variables=variables,
+                        reserved_identities=self.workspace.reserved.get(current_schema.get("id")))
+                    result = self._save_result(result)
                     current_schema = result.schema
                     application = steps.send(result)
             except StopIteration as finished:
-                execution = finished.value
+                execution = self._snapshot_execution(finished.value)
             self.executions[index] = execution
             current_schema = execution.schema
             stopped = execution.status == 'error'
@@ -400,15 +469,14 @@ class CommandListManager:
                 application = next(steps)
                 while True:
                     self._publish_evaluation()
-                    result = await apply_command(application, current, self.resolve_schema,
-                        related_schemas=self.related_schemas, database_names=self.database_names,
-                        variables=variables, lookup_variable=self.lookup_variable)
+                    result = await self._apply_connected(application, current, variables)
                     if version != self._evaluation_version:
                         return
+                    result = self._save_result(result)
                     current = result.schema
                     application = steps.send(result)
             except StopIteration as finished:
-                execution = finished.value
+                execution = self._snapshot_execution(finished.value)
             current = execution.schema
             self.executions[index] = execution
             if execution.status == 'error':

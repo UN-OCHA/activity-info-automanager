@@ -326,16 +326,16 @@ class AddFieldCommand:
             candidate._validate()
         except FieldParameterError as exc:
             return ExecutionResult.error(schema, str(exc), f'invalid_{exc.parameter}')
-        return candidate._apply(schema)
+        return candidate._apply(schema, context=context)
 
-    def _apply(self, schema: dict[str, Any]) -> ExecutionResult:
+    def _apply(self, schema: dict[str, Any], *, context=None) -> ExecutionResult:
         if not isinstance(schema, dict) or not isinstance(schema.get('elements'), list):
             return ExecutionResult.error(None, 'AddField requires a form schema with an elements list.', 'invalid_schema')
         if self.field_code is not None and any(isinstance(element, dict) and element.get('code') == self.field_code
                for element in schema['elements']):
             return ExecutionResult.error(schema, f'AddField field code {self.field_code!r} already exists.', 'duplicate_field')
         result = deepcopy(schema)
-        used = schema_identities(schema)
+        used = schema_identities(schema) | ((context.reserved_identities or set()) if context else set())
         identity = allocate_pending_field_id(self.field_code, used, field_type=self.field_type)
         field = {'id': identity,
                  'label': self.label, 'type': self.field_type,

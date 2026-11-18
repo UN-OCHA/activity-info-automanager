@@ -79,7 +79,9 @@ async def _resolve_command_schema(service, result, related, database_names, refe
                 container[key] = identity
                 if identity not in related and identity != result.get('id'):
                     try:
-                        related.update(await service.get_form_tree(identity))
+                        tree = await service.get_form_tree(identity)
+                        for form_id, schema in tree.items():
+                            related.setdefault(form_id, schema)
                     except ValueError as exc:
                         issues.append(Diagnostic('warning',
                             f'Form ID {identity!r}: related schema/name unavailable; keeping the ID. {exc}',

@@ -75,7 +75,7 @@ class ModifyFieldCommand:
             command = resolve_function_edits(command, schema, index, context)
             result = deepcopy(schema)
             target = result['elements'][index]
-            apply_edits(command, target, result)
+            apply_edits(command, target, result, context.reserved_identities if context else None)
             validate_result(command, target, result, index)
             return ExecutionResult(result)
         except ValueError as exc:
@@ -191,7 +191,7 @@ def set_or_remove(container, key, value):
         container[key] = deepcopy(value)
 
 
-def replace_rows(existing, requested, label_key, prefix, owner, schema):
+def replace_rows(existing, requested, label_key, prefix, owner, schema, reserved=None):
     if requested is None:
         return None
     if not isinstance(existing, list) or any(not isinstance(row, dict) for row in existing):
@@ -200,7 +200,7 @@ def replace_rows(existing, requested, label_key, prefix, owner, schema):
     for row in existing:
         by_label.setdefault(row.get(label_key), []).append(row)
     labels = set()
-    used = schema_identities(schema)
+    used = schema_identities(schema) | (reserved or set())
     result = []
     for row in requested:
         label = row['label']
@@ -238,7 +238,7 @@ def check_applicability(command, target):
             raise ValueError('Presentation can only be modified for multiple selection.')
 
 
-def apply_edits(command, target, schema):
+def apply_edits(command, target, schema, reserved=None):
     check_applicability(command, target)
     if not isinstance(target.get('id'), str) or not target['id']:
         raise ValueError('The target field must have an ID.')
@@ -266,11 +266,11 @@ def apply_edits(command, target, schema):
             set_or_remove(params, 'presentation', options['presentation'])
         if 'values' in options:
             rows = replace_rows(params.get('values') or [], options['values'], 'label',
-                                'pending-option:', target['id'], schema)
+                                'pending-option:', target['id'], schema, reserved)
             set_or_remove(params, 'values', rows)
     if 'lookup_fields' in command.changes:
         rows = replace_rows(params.get('lookupConfigs') or [], command.changes['lookup_fields'],
-                            'lookupLabel', 'pending-lookup:', target['id'], schema)
+                            'lookupLabel', 'pending-lookup:', target['id'], schema, reserved)
         set_or_remove(params, 'lookupConfigs', rows)
     translation_keys = {'translation', 'translation_field', 'translation_language'}
     if translation_keys & command.changes.keys():

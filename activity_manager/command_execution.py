@@ -30,6 +30,7 @@ class CommandContext:
     related_schemas: dict | None = None
     database_names: dict | None = None
     variables: dict | None = None
+    reserved_identities: set | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,9 @@ class ExecutionResult:
     diagnostics: tuple[Diagnostic, ...] = ()
     names_schema: dict | None = None
     success_message: str | None = None
+    opschema: tuple[dict, ...] = ()
+    snapshot_issues: tuple[Diagnostic, ...] | None = None
+    form_issues: dict | None = None
 
     @property
     def has_errors(self):
@@ -55,6 +59,8 @@ class ExecutionResult:
 
     @property
     def issues(self):
+        if self.snapshot_issues is not None:
+            return self.snapshot_issues
         return tuple(item for item in self.diagnostics if item.path is not None)
 
     @classmethod
@@ -84,9 +90,9 @@ def transform_command(command, schema, context=None):
         return ExecutionResult.error(schema, f'{type(exc).__name__}: {exc}', 'unexpected_command_error')
 
 
-def apply_command_locally(command, schema, related_schemas=None, database_names=None, *, variables=None):
+def apply_command_locally(command, schema, related_schemas=None, database_names=None, *, variables=None, reserved_identities=None):
     """Application without a connected resolver still uses the same contract."""
-    result = transform_command(command, schema, CommandContext(related_schemas, database_names, variables if variables is not None else {}))
+    result = transform_command(command, schema, CommandContext(related_schemas, database_names, variables if variables is not None else {}, reserved_identities))
     if result.has_errors:
         return result
     diagnostics = tuple(Diagnostic('warning', f'Unresolved formula reference {token!r}.', path)
@@ -95,12 +101,12 @@ def apply_command_locally(command, schema, related_schemas=None, database_names=
         readable_schema(result.schema, related_schemas, database_names), result.success_message)
 
 
-async def apply_command(command, schema, resolver, *, related_schemas=None, database_names=None, variables=None, lookup_variable=None):
+async def apply_command(command, schema, resolver, *, related_schemas=None, database_names=None, variables=None, lookup_variable=None, reserved_identities=None):
     """Run transformation then resolution, preserving diagnostics in order."""
     from .commands.set_variable import SetVariableCommand
     from .command_iteration import PreparedCommand
     from .command_templates import command_parameters
-    context = CommandContext(related_schemas, database_names, variables if variables is not None else {})
+    context = CommandContext(related_schemas, database_names, variables if variables is not None else {}, reserved_identities)
     try:
         prepared = command.command if isinstance(command, PreparedCommand) else command_parameters(command, context.variables)
     except ValueError as exc:

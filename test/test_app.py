@@ -999,6 +999,13 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             service.aclose.assert_awaited_once()
 
     async def test_form_selection_loads_and_clears_pretty_schema(self):
+        managers = []
+
+        def make_manager(**kwargs):
+            manager = CommandListManager(**kwargs)
+            managers.append(manager)
+            return manager
+
         service = AsyncMock(spec=ActivityInfoService)
         service.get_form_tree.return_value = {}
         service.get_database_names.return_value = {}
@@ -1006,7 +1013,8 @@ class UITests(unittest.IsolatedAsyncioTestCase):
         service.get_forms.return_value = {}
         payload = {'id': 'form-1', 'elements': [{'id': 'field-1'}]}
         service.get_form_tree.return_value = {'form-1': payload}
-        with patch('activity_manager.page.ActivityInfoService', return_value=service):
+        with (patch('activity_manager.page.ActivityInfoService', return_value=service),
+              patch('activity_manager.page.CommandListManager', side_effect=make_manager)):
             with Client(ui.page('/')), ui.column() as page:
                 connection_page()
             token = next(e for e in page.descendants() if isinstance(e, ui.input) and e.label == 'API token')
@@ -1064,6 +1072,33 @@ class UITests(unittest.IsolatedAsyncioTestCase):
                 'filter': '_id == \"record1\"',
             })
             self.assertEqual(payload['elements'][0]['defaultValue'], 'people:record1')
+            # Loading alone must annotate a dotted reference to a deleted field.
+            payload['elements'][0]['validationCondition'] = 'field_1.deleted_field > 0'
+            await form_change(SimpleNamespace(args='form-1'))
+            self.assertIn('<mark>', schema.markdown._props['innerHTML'])
+            toggle.set_value('names')
+            self.assertIn('NAME.deleted_field', schema.content)
+            self.assertIn('<mark>', schema.markdown._props['innerHTML'])
+            unresolved = next(e for e in page.descendants()
+                              if isinstance(e, ui.badge) and e.props.get('aria-label') == 'Unresolved names')
+            self.assertEqual(unresolved.text, 'Unresolved: 1')
+            self.assertTrue(unresolved.visible)
+            payload['elements'][0].pop('validationCondition')
+            await form_change(SimpleNamespace(args='form-1'))
+            self.assertNotIn('<mark>', schema.markdown._props['innerHTML'])
+            self.assertFalse(unresolved.visible)
+            manager = managers[0]
+            manager.add_command(DeleteFieldCommand('missing'))
+            await manager._evaluation_task
+            manager.select_command(0)
+            self.assertEqual(manager.selected_index, 0)
+            service.get_form_tree.return_value = {'form-2': {'id': 'form-2', 'elements': []}}
+            await form_change(SimpleNamespace(args='form-2'))
+            self.assertIsNone(manager.selected_index)
+            self.assertIsNone(manager.selected_iteration)
+            self.assertEqual(json.loads(schema.content)['id'], 'form-2')
+            await manager._evaluation_task
+            self.assertIsNone(manager.selected_index)
             await database_change(SimpleNamespace(args='db-2'))
             self.assertFalse(schema.visible)
             self.assertEqual(schema.content, '')

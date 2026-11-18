@@ -22,11 +22,12 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(COMMAND_CREATORS, tuple(definition.creator for definition in COMMANDS))
         self.assertEqual(tuple(COMMANDS_BY_NAME.values()), COMMANDS)
         self.assertEqual([creator.key for creator in COMMAND_CREATORS],
-                         ['move_field', 'delete_field', 'add_field', 'modify_field', 'set_variable'])
+                         ['move_field', 'delete_field', 'add_field', 'modify_field', 'set_variable', 'with_form'])
         for definition in COMMANDS:
             self.assertIs(COMMANDS_BY_NAME[definition.name.casefold()], definition)
         # Exercise dispatch for every catalog entry, including mixed-case names.
         examples = (
+            'WithForm(form="People")',
             'SetVariable(name="x", method="literal", value="X")',
             'MoveField(fieldCode="x", position="Before field", beforeAfterField="y")',
             'DeleteField(fieldCode="x")',
