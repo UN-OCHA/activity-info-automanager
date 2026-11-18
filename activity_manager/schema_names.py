@@ -322,14 +322,32 @@ async def resolve_reference_defaults(service, schema, related_schemas, cache=Non
     return result
 
 
-async def resolve_form_names(service, schema, related_schemas=None):
+def referenced_form_ids(schema):
+    """Trust form IDs from a loaded canonical schema, never from authored values."""
+    identities = set()
+    for field in (schema or {}).get('elements', []):
+        params = field.get('typeParameters') or {}
+        for entry in params.get('range') or []:
+            value = entry.get('formId')
+            if isinstance(value, str) and value:
+                identities.add(value)
+        if field.get('type') in ('subform', 'reversereference'):
+            value = params.get('formId')
+            if isinstance(value, str) and value:
+                identities.add(value)
+    return identities
+
+
+async def resolve_form_names(service, schema, related_schemas=None, *, known_form_ids=(), load_related=True):
     """Resolve local Form and remote Database/Form names, rejecting ambiguity.
 
-    Existing known IDs, system CUIDs and reserved user-form IDs are preserved.
+    Known source IDs and reserved user-form IDs are preserved. Unknown ID-shaped
+    tokens must still resolve, so misspelled names cannot silently become IDs.
     Directory reads use the service's generated-client endpoints only.
     """
     result = deepcopy(schema)
     forms = dict(related_schemas or {})
+    known_form_ids = frozenset(known_form_ids)
     forms[result.get('id')] = result
     directories = {}
     databases = None
@@ -338,7 +356,7 @@ async def resolve_form_names(service, schema, related_schemas=None):
         nonlocal databases
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f'Invalid referenced form {value!r}.')
-        if value in forms or value.endswith('@users'):
+        if value in forms or value in known_form_ids or value.endswith('@users'):
             return value
         # Older service implementations can still write canonical schemas.
         if not hasattr(service, 'get_form_names'):
@@ -371,10 +389,17 @@ async def resolve_form_names(service, schema, related_schemas=None):
         if len(matches) != 1:
             raise ValueError(f'Form name {value!r} must resolve to exactly one form; use an ID instead.')
         identity = matches[0]
-        if related_schemas is not None and identity not in forms and hasattr(service, 'get_form_tree'):
-            tree = await service.get_form_tree(identity)
-            forms.update(tree)
-            related_schemas.update(tree)
+        if load_related and related_schemas is not None and identity not in forms and hasattr(service, 'get_form_tree'):
+            try:
+                tree = await service.get_form_tree(identity)
+            except ValueError:
+                # The name has already resolved to an ID. Related schema reads
+                # only enrich formulas/display; strict default/field resolution
+                # will independently reject any required missing information.
+                pass
+            else:
+                forms.update(tree)
+                related_schemas.update(tree)
         return identity
 
     for field in result.get('elements', []):

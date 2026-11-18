@@ -9,7 +9,7 @@ from .command_execution import Diagnostic, ExecutionResult
 from .schema_names import (
     resolve_form_names, schema_with_ids, resolve_reference_defaults,
     readable_schema, load_default_record_labels,
-    unresolved_formula_references,
+    unresolved_formula_references, referenced_form_ids,
 )
 
 
@@ -42,11 +42,12 @@ class CachedResolutionService:
         return await self._read('query_rows', query)
 
 
-async def resolve_command_schema(service, schema, related, database_names, reference_defaults, cache):
+async def resolve_command_schema(service, schema, related, database_names, reference_defaults, cache, *, source_schema=None):
     diagnostics = []
     result = deepcopy(schema)
     try:
-        return await _resolve_command_schema(service, result, related, database_names, reference_defaults, cache, diagnostics)
+        return await _resolve_command_schema(service, result, related, database_names, reference_defaults,
+                                             cache, diagnostics, referenced_form_ids(source_schema))
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -54,7 +55,7 @@ async def resolve_command_schema(service, schema, related, database_names, refer
         return ExecutionResult(result, tuple(diagnostics))
 
 
-async def _resolve_command_schema(service, result, related, database_names, reference_defaults, cache, issues):
+async def _resolve_command_schema(service, result, related, database_names, reference_defaults, cache, issues, known_form_ids):
     """Resolve without generating identities and accumulate ordered diagnostics."""
     service = CachedResolutionService(service, cache)
 
@@ -72,16 +73,17 @@ async def _resolve_command_schema(service, result, related, database_names, refe
             raw = container[key]
             one = {**result, 'elements': [{'type': 'reference', 'typeParameters': {'range': [{'formId': raw}]}}]}
             try:
-                resolved = await resolve_form_names(service, one, related)
+                resolved = await resolve_form_names(service, one, related,
+                    known_form_ids=known_form_ids, load_related=False)
                 identity = resolved['elements'][0]['typeParameters']['range'][0]['formId']
                 container[key] = identity
                 if identity not in related and identity != result.get('id'):
                     try:
                         related.update(await service.get_form_tree(identity))
-                    except ValueError:
-                        # Optional formula context may be unavailable. Defaults
-                        # and reverse references still fail if they need it.
-                        pass
+                    except ValueError as exc:
+                        issues.append(Diagnostic('warning',
+                            f'Form ID {identity!r}: related schema/name unavailable; keeping the ID. {exc}',
+                            tuple(path), code='unavailable_form_context'))
             except ValueError as exc:
                 issue(path, f'Form {raw!r}: {exc}')
 

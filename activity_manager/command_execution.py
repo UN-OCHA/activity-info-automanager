@@ -65,6 +65,13 @@ class ExecutionResult:
 def transform_command(command, schema, context=None):
     """Catch unexpected failures at the application boundary, never in the UI."""
     try:
+        from .command_iteration import PreparedCommand
+        from .command_templates import command_parameters
+        if not isinstance(command, PreparedCommand):
+            try:
+                command = command_parameters(command, {})
+            except ValueError as exc:
+                return ExecutionResult.error(schema, str(exc), 'invalid_parameter')
         result = command.execute(schema, context=context)
         if not isinstance(result, ExecutionResult):
             raise TypeError('Command.execute must return ExecutionResult.')

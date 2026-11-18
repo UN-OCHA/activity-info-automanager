@@ -229,7 +229,8 @@ def parse_command_text(text: str) -> list[Any]:
                 call.args[0],
                 f'{call.func.id} accepts named parameters only.',
             )
-        commands.append(definition.parser(text, call))
+        from .command_iteration import parse_authored_command
+        commands.append(parse_authored_command(text, call, definition))
     return commands
 
 

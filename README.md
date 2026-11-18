@@ -18,6 +18,78 @@ Use the command creator to see the available parameters for each command.
 label with the specified type and variant. `MoveField` and `DeleteField` identify
 fields by code. Missing targets produce a warning and leave the schema unchanged.
 
+### Multiple fields and variables
+
+MoveField, DeleteField, and ModifyField have a **Target** selector below the
+command selector: **Single field** or **Multiple fields**. Multiple mode accepts
+a Python regex matching the whole field code. It does not match labels. In Text
+mode, supply `fieldPattern` instead of `fieldCode`:
+
+```python
+ModifyField(
+    fieldPattern=r"cost_(?P<year>\d{4})",
+    fieldType="quantity",
+    newCode="budget_${match.year}",
+    label="Budget for ${match.year}",
+)
+MoveField(fieldPattern=r"budget_\d{4}", position="Beginning")
+```
+
+Matches are collected once from the incoming schema and applied in their original
+schema order. Renames and moves do not change that selection. ModifyField still
+checks the specified type/variant for each target; an incompatible field produces
+a warning and is skipped. Its single-field type/variant autofill and manual overrides remain
+available. In multiple mode, choose type/variant explicitly.
+
+MoveField places the first match at the authored destination, then places each
+subsequent match immediately after the previous one, preserving match order.
+The later applications use that previous field as their destination.
+
+Text values accept direct `${...}` substitution, including nested option/lookup
+values and parameter-function string arguments:
+
+| Reference | Value |
+| --- | --- |
+| `${match.code}` | Original matched code |
+| `${match.year}` | Named capture group `year` |
+| `${match.1}` | Numbered capture group, starting at 1 |
+| `${iteration.index}` | Iteration number, starting at 1 |
+| `${vars.prefix}` | Reserved explicit-variable namespace; currently undefined |
+
+The capture name `code` is reserved. Write `$${match.year}` to insert the literal
+`${match.year}`. Ordinary dollar signs and braces are unchanged. Undefined
+references, unmatched optional capture groups, and malformed placeholders are
+errors. Substitution runs once, before parameter functions and schema resolution;
+inserted values and function outputs are never substituted again. It inserts
+text without evaluating expressions, quoting formula literals, or converting
+text to numeric/boolean values. Existing parameter types and selection choices
+still apply. Target selectors (`fieldCode` and `fieldPattern`) stay literal.
+There is no SetVariable command yet; iteration variables are local to their
+application, so using `${match.year}` in a single-field command is an error.
+
+The List view keeps one parent command with an iteration count and an expansion
+button. Expand it to see smaller iteration boxes above the parent, each with its
+own status. Select a child for its interim schema and console; select the parent
+for the final reached schema and combined, iteration-prefixed console messages.
+Collapsing a selected child selects the parent and updates the result accordingly.
+Reorder/delete controls operate on the entire authored command. Text mode stores
+the original pattern and placeholders, not the expanded applications.
+
+Zero matches produces a warning and leaves the schema unchanged. Warnings allow
+later iterations to continue. An error stops the remaining iterations and later
+commands and disables Execute. Earlier successful changes remain visible for
+inspection; the failed iteration's result follows the normal execution pipeline.
+No preview changes are written to ActivityInfo until Execute is confirmed.
+
+Name resolution is optional for display: an existing form ID whose schema cannot
+be read stays unchanged, with a warning and highlighting on the reference. Failed
+record-label reads likewise retain the record ID. Unresolved formula references
+remain in the formula with warnings and may be submitted to the API. Other
+name-to-ID conversions (referenced forms, record defaults, translation/reverse
+targets, and option defaults) must resolve before execution can proceed. Existing
+form IDs are recognized from the loaded source schema; a new, unresolved name is
+not accepted merely because it resembles an ID.
+
 ## Functions
 
 Functions transform a parameter's existing value. Type a call directly into a

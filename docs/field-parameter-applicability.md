@@ -85,6 +85,14 @@ the designer differs.
 
 ## Shared type/variant selectors and ModifyField creation
 
+MoveField, DeleteField, and ModifyField also expose Single field / Multiple fields
+target mode. Multiple mode uses `fieldPattern` (whole-code regex) instead of
+`fieldCode`; type/variant autofill applies only in single mode. Multiple mode
+retains explicit type/variant selectors and validates each matched field against
+them; incompatible matches warn and are skipped. Editable text
+values, including nested option/lookup values, support `${match.name}` capture
+substitution. Parameter types and applicability remain as documented below.
+
 - Both creators use `fieldType` and conditional `fieldVariant` selectors:
   FREE_TEXT: `text` / `barcode`; enumerated: `single` / `multiple`;
   reference: `reference` / `user` / `metadata`. Other types have no variant.
@@ -92,7 +100,7 @@ the designer differs.
   variant where applicable. These identify the expected target, not changes.
   `newCode` and `label` are optional edits; `label` never identifies the target.
 - Future matching: exact code first; a code match with a different type/variant
-  is an error. Only when no code matches, try the supplied `fieldCode` as an exact
+  warns and skips. Only when no code matches, try the supplied `fieldCode` as an exact
   label. Reject ambiguous matches. Note/Section use this same targeting argument.
 - Selecting an existing ModifyField target populates its type and variant from
   the cached schema (exact code first, then an unambiguous exact label). Both
@@ -109,7 +117,7 @@ the designer differs.
 - Required condition and translation components can be edited independently of
   their parent setting, since the target's existing settings are unknown.
 - ModifyField applies atomically to a copy of the schema. A missing target is a
-  warning no-op; mismatched/ambiguous targets and invalid edits are Errors.
+  warning no-op; type/variant mismatches also warn and skip. Ambiguous targets and invalid edits are Errors.
 - AddField still accepts legacy text commands with option codes and implicit
   variants. New creator rows expose labels only, and option IDs are internal.
 
@@ -122,7 +130,7 @@ ModifyField(fieldCode="population", fieldType="quantity", newCode="total", descr
 ## ModifyField execution
 
 - Code matching has priority. An exact code match with a different type/variant
-  is an Error, with no label fallback. Only absent code matches permit exact
+  warns and skips, with no label fallback. Only absent code matches permit exact
   label matching filtered by type/variant. Ambiguous matches are Errors; no match
   is a warning no-op. Code and label matching is case-sensitive.
 - Variant detection uses Barcode=true, enumerated cardinality (legacy omission

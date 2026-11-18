@@ -67,6 +67,10 @@ class ModifyFieldCommand:
             index = find_target(command, schema['elements'])
             if index is None:
                 return ExecutionResult.warning(schema, f'ModifyField could not find field {self.field_code!r}.', 'missing_target')
+            if not matches_target(command, schema['elements'][index]):
+                return ExecutionResult.warning(schema,
+                    f'Field code {self.field_code!r} has a different type or variant. '
+                    'Command skipped; schema unchanged.', 'target_type_mismatch')
             check_applicability(command, schema['elements'][index])
             command = resolve_function_edits(command, schema, index, context)
             result = deepcopy(schema)
@@ -171,8 +175,6 @@ def find_target(command, elements):
     if len(coded) > 1:
         raise ValueError(f'Ambiguous field code {command.field_code!r}.')
     if coded:
-        if not matches_target(command, elements[coded[0]]):
-            raise ValueError(f'Field code {command.field_code!r} has a different type or variant.')
         return coded[0]
     labelled = [index for index, element in enumerate(elements)
                 if isinstance(element, dict) and element.get('label') == command.field_code

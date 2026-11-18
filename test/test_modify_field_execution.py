@@ -53,7 +53,9 @@ class ModifyFieldExecutionTests(unittest.TestCase):
 
     def test_code_precedence_type_and_variant_mismatches_do_not_fallback(self):
         source = form(element('FREE_TEXT'), element('quantity', code='other', label='target', identity='other'))
-        result = self.execute(source, {'label': 'New'}, success=False)
+        result = self.execute(source, {'label': 'New'})
+        self.assertEqual(result.status, 'warning')
+        self.assertEqual(result.schema, source)
         self.assertIn('different type or variant', result.message)
         for kind, actual, expected in (
             ('FREE_TEXT', {'barcode': True}, 'text'),
@@ -61,7 +63,22 @@ class ModifyFieldExecutionTests(unittest.TestCase):
             ('reference', {'range': [{'formId': 'db@users'}]}, 'reference'),
         ):
             with self.subTest(kind=kind):
-                self.execute(form(element(kind, params=actual)), {'label': 'New'}, kind, expected, success=False)
+                source = form(element(kind, params=actual))
+                result = self.execute(source, {'label': 'New'}, kind, expected)
+                self.assertEqual(result.status, 'warning')
+                self.assertEqual(result.schema, source)
+
+    def test_mismatch_warning_allows_following_command(self):
+        with Client(ui.page('/')), ui.column():
+            manager = CommandListManager(on_execute=AsyncMock())
+            source = form(element('date'))
+            manager.set_schema(source)
+            manager.add_command(ModifyFieldCommand('target', 'quantity', changes={'label': 'Skipped'}))
+            manager.add_command(ModifyFieldCommand('target', 'date', changes={'label': 'Applied'}))
+            self.assertEqual([item.status for item in manager.executions], ['warning', 'applied'])
+            self.assertEqual(manager.executions[0].schema, source)
+            self.assertEqual(manager.target_schema()['elements'][0]['label'], 'Applied')
+            self.assertTrue(manager.execute_button.enabled)
 
     def test_exact_label_fallback_includes_type_and_variant(self):
         source = form(element('quantity', code='q', label='Section'),

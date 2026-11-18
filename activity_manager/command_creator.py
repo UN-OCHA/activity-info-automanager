@@ -367,11 +367,20 @@ class CommandCreatorRenderer:
             }
         ''')
         with ui.row().classes('w-full items-start gap-3 flex-nowrap'):
-            self.command_select = ui.select(
-                {key: definition.label for key, definition in self.definitions.items()},
-                value=next(iter(self.definitions), None), label='Command',
-                on_change=self._command_changed,
-            ).classes('w-48 shrink-0 bg-white')
+            with ui.column().classes('w-48 shrink-0 gap-2'):
+                self.command_select = ui.select(
+                    {key: definition.label for key, definition in self.definitions.items()},
+                    value=next(iter(self.definitions), None), label='Command',
+                    on_change=self._command_changed,
+                ).classes('w-full bg-white')
+                self.target_mode = ui.select(
+                    ['Single field', 'Multiple fields'], value='Single field', label='Target',
+                    on_change=self._target_mode_changed,
+                ).classes('w-full bg-white')
+                self.target_help = ui.label(
+                    'Whole-code regex; captures: (?P<year>...). '
+                    'Values: ${match.year}. Literal escape: $${'
+                ).classes('text-xs text-slate-500')
             with ui.column().classes('min-w-0 flex-1 gap-3'):
                 self.parameters = ui.row().classes('w-full items-start gap-3 flex-wrap')
                 self.add_button = ui.button('Add command', icon='add', on_click=self._add_command)
@@ -380,6 +389,14 @@ class CommandCreatorRenderer:
 
     def _command_changed(self, event):
         self._render_selected_command()
+
+    def _target_mode_changed(self, event):
+        self._last_target = None
+        self._parameter_changed(None)
+
+    def _multiple_fields(self):
+        from .command_iteration import ITERABLE_CREATORS
+        return self.command_select.value in ITERABLE_CREATORS and self.target_mode.value == 'Multiple fields'
 
     def _render_selected_command(self):
         self._updating = True
@@ -390,6 +407,8 @@ class CommandCreatorRenderer:
             self.activations.clear()
             self.parameter_containers.clear()
             definition = self.definitions.get(self.command_select.value)
+            from .command_iteration import ITERABLE_CREATORS
+            self.target_mode.set_visibility(self.command_select.value in ITERABLE_CREATORS)
             with self.parameters:
                 self.editors = [
                     _ParameterEditor(self, parameter) for parameter in definition.parameters
@@ -408,12 +427,19 @@ class CommandCreatorRenderer:
             return
         self._populate_target_defaults()
         self._update_conditional_visibility()
+        self.target_help.set_visibility(self._multiple_fields())
+        target = self.controls.get('field_code')
+        if target is not None:
+            label = next(editor.definition.label for editor in self.editors if editor.definition.key == 'field_code')
+            target.set_label('Field code pattern' if self._multiple_fields() else label)
+            if self._multiple_fields():
+                target.set_options([])
         self._update_add_button()
         events.handle_event(self.on_parameter_change, self)
 
     def _populate_target_defaults(self):
         definition = self.definitions.get(self.command_select.value)
-        if definition is None or definition.target_defaults is None:
+        if definition is None or definition.target_defaults is None or self._multiple_fields():
             return
         target = self.controls['field_code'].value
         if target == self._last_target:
@@ -462,7 +488,13 @@ class CommandCreatorRenderer:
         return values
 
     def values(self):
-        return self._collect(self.editors)
+        values = self._collect(self.editors)
+        if self._multiple_fields():
+            from .command_iteration import compile_pattern
+            compile_pattern(values.get('field_code'))
+        from .command_templates import substitute_value
+        substitute_value({key: value for key, value in values.items() if key != 'field_code'})
+        return values
 
     def _update_add_button(self):
         try:
@@ -481,6 +513,11 @@ class CommandCreatorRenderer:
         if definition:
             try:
                 command = definition.create_command(self.values())
+                if self._multiple_fields():
+                    from dataclasses import replace
+                    from .command_iteration import IterativeCommand
+                    command = IterativeCommand(replace(command, field_code='__iteration_target__'),
+                                               self.values()['field_code'])
             except ValueError as exc:
                 self.error.set_text(str(exc))
                 return
@@ -494,6 +531,7 @@ class CommandCreatorRenderer:
     def set_enabled(self, enabled):
         self.enabled = enabled
         self.command_select.set_enabled(enabled)
+        self.target_mode.set_enabled(enabled)
         self._parameter_changed(None)
 
     def set_suggestions(self, source: str, values):

@@ -187,7 +187,8 @@ def connection_page():
         if service is None:
             raise ValueError('Connect before resolving command names.')
         return await resolve_command_schema(service, data, command_list.related_schemas,
-            command_list.database_names, command_list.reference_defaults, command_list.resolution_cache)
+            command_list.database_names, command_list.reference_defaults, command_list.resolution_cache,
+            source_schema=source_schema)
 
     def show_result(data: dict | None, empty_message='No result', names=None, issues=()):
         nonlocal displayed_result, displayed_names, result_request, displayed_issues
@@ -218,6 +219,11 @@ def connection_page():
         for index, execution in enumerate(command_list.executions):
             if execution.schema is data:
                 command_list.executions[index] = replace(execution, names_schema=displayed_names)
+                execution = command_list.executions[index]
+            children = tuple(replace(child, names_schema=displayed_names) if child.schema is data else child
+                             for child in execution.iterations)
+            if children != execution.iterations:
+                command_list.executions[index] = replace(execution, iterations=children)
         render_result()
 
     def render_result(empty_message='No result'):

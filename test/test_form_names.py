@@ -11,6 +11,13 @@ from test.test_add_field import schema
 
 
 class FormNameTests(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_tree_read_does_not_undo_resolved_form_id(self):
+        service = self.service()
+        service.get_form_tree.side_effect = ValueError('HTTP 404')
+        source = AddFieldCommand('ref', 'Reference', field_type='reference', referenced_form='Visits').execute(schema()).schema
+        result = await resolve_form_names(service, source, {})
+        self.assertEqual(result['elements'][-1]['typeParameters']['range'][0]['formId'], 'childid')
+
     def service(self):
         async def names(database_id):
             return {'localid': 'beneficiaries', 'childid': 'Visits'} if database_id == 'db1' else {'remoteid': 'People'}

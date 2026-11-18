@@ -20,6 +20,99 @@ from test.test_add_field import schema
 
 
 class PreviewResolutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deleted_source_form_id_warns_highlights_and_allows_later_commands(self):
+        source = schema()
+        source['elements'].append({'id': 'ref', 'code': 'REF', 'label': 'Reference', 'type': 'reference',
+            'defaultValue': 'deletedform:record', 'typeParameters': {'range': [{'formId': 'deletedform'}]}})
+        service = self.service()
+        service.get_form_names.side_effect = ValueError('Directory unavailable')
+        service.get_form_schema = AsyncMock(side_effect=ValueError('HTTP 404'))
+        service.get_form_tree.side_effect = ValueError('HTTP 404: form deleted')
+        async def resolve(data):
+            return await resolve_command_schema(service, data, {}, {}, {}, {}, source_schema=source)
+        with Client(ui.page('/')), ui.column():
+            manager = CommandListManager(resolve_schema=resolve, on_execute=AsyncMock())
+            manager.set_schema(source)
+            manager.add_command(AddFieldCommand('one', 'One', validation_condition='REF.UNKNOWN == 1'))
+            manager.add_command(AddFieldCommand('two', 'Two'))
+            await manager._evaluation_task
+            self.assertEqual([item.status for item in manager.executions], ['warning', 'warning'])
+            self.assertTrue(manager.execute_button.enabled)
+            self.assertEqual(manager.target_schema()['elements'][-1]['code'], 'two')
+            first = manager.executions[0]
+            path = ('elements', 1, 'typeParameters', 'range', 0, 'formId')
+            self.assertIn(path, [issue.path for issue in first.issues])
+            self.assertIn('keeping the ID', first.message)
+            self.assertIn('UNKNOWN', first.message)
+            self.assertEqual(first.schema['elements'][1]['defaultValue'], 'deletedform:record')
+            for data in (first.schema, first.names_schema):
+                self.assertEqual(data['elements'][1]['typeParameters']['range'][0]['formId'], 'deletedform')
+                html = prepare_content('```json\n' + json.dumps(data, indent=2) + '\n```', extras='fenced-code-blocks')
+                self.assertIn('<mark>', underline_substitutions(html, data, [path]))
+        service.get_form_schema.assert_not_awaited()
+        service.get_form_names.assert_not_awaited()
+
+    async def test_source_ids_are_preserved_for_all_form_reference_locations(self):
+        for kind in ('reference', 'multiselectreference', 'subform', 'reversereference'):
+            with self.subTest(kind=kind):
+                source = schema()
+                params = {'range': [{'formId': 'old'}]} if kind in ('reference', 'multiselectreference') else {'formId': 'old'}
+                source['elements'].append({'id': 'ref', 'type': kind, 'typeParameters': params})
+                service = self.service()
+                service.get_form_tree.side_effect = ValueError('Not accessible')
+                result = await resolve_command_schema(service, source, {}, {}, {}, {}, source_schema=source)
+                self.assertEqual(result.status, 'warning')
+                self.assertEqual(result.schema, source)
+                self.assertIsNotNone(result.names_schema)
+
+    async def test_new_id_shaped_name_is_still_mandatory(self):
+        source = schema()
+        service = self.service()
+        service.get_form_names.return_value = {}
+        service.get_form_schema = AsyncMock(side_effect=ValueError('HTTP 404'))
+        preview = AddFieldCommand('ref', 'Reference', field_type='reference',
+                                  referenced_form='missingformname').execute(source).schema
+        result = await resolve_command_schema(service, preview, {}, {}, {}, {}, source_schema=source)
+        self.assertEqual(result.status, 'error')
+        self.assertIn('missingformname', result.message)
+        service.get_form_schema.assert_awaited_once_with('missingformname')
+
+    async def test_resolved_name_does_not_require_readable_related_schema(self):
+        service = self.service()
+        service.get_form_tree.side_effect = ValueError('Permission denied')
+        source = schema()
+        preview = AddFieldCommand('ref', 'Reference', field_type='reference',
+                                  referenced_form='People').execute(source).schema
+        result = await resolve_command_schema(service, preview, {}, {}, {}, {}, source_schema=source)
+        self.assertEqual(result.status, 'warning')
+        self.assertEqual(result.schema['elements'][-1]['typeParameters']['range'][0]['formId'], 'peopleid')
+        service.get_form_tree.assert_awaited_once_with('peopleid')
+
+    async def test_missing_context_still_blocks_required_record_label_conversion(self):
+        source = schema()
+        source['elements'].append({'id': 'ref', 'code': 'REF', 'type': 'reference',
+            'typeParameters': {'range': [{'formId': 'deletedform'}]}})
+        preview = deepcopy(source)
+        preview['elements'][-1]['defaultValue'] = 'Alice'
+        service = self.service()
+        service.get_form_tree.side_effect = ValueError('Deleted')
+        result = await resolve_command_schema(service, preview, {}, {}, {}, {}, source_schema=source)
+        self.assertEqual(result.status, 'error')
+        self.assertEqual([item.severity for item in result.diagnostics], ['warning', 'error'])
+        self.assertEqual(result.schema['elements'][-1]['defaultValue'], 'Alice')
+
+    async def test_record_id_to_label_api_failure_does_not_block(self):
+        source = schema()
+        source['elements'].append({'id': 'ref', 'code': 'REF', 'type': 'reference',
+            'defaultValue': 'peopleid:record', 'typeParameters': {'range': [{'formId': 'peopleid'}]}})
+        related = {'peopleid': {'id': 'peopleid', 'recordLabelFieldId': 'name', 'elements': []}}
+        service = self.service()
+        service.query_rows.side_effect = ValueError('HTTP 403')
+        result = await resolve_command_schema(service, source, related, {}, {}, {}, source_schema=source)
+        self.assertEqual(result.status, 'applied')
+        self.assertEqual(result.schema['elements'][-1]['defaultValue'], 'peopleid:record')
+        self.assertIn('record', result.names_schema['elements'][-1]['defaultValue'])
+
     def service(self):
         return SimpleNamespace(get_form_names=AsyncMock(return_value={'peopleid': 'People'}),
             get_database_names=AsyncMock(return_value={'db2': 'Remote'}),
