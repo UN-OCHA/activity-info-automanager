@@ -85,7 +85,7 @@ the designer differs.
 
 ## Shared type/variant selectors and ModifyField creation
 
-MoveField, DeleteField, and ModifyField also expose Single field / Multiple fields
+MoveField, DeleteField, and ModifyField also expose Single / Multiple
 target mode. Multiple mode uses `fieldPattern` (whole-code regex) instead of
 `fieldCode`; type/variant autofill applies only in single mode. Multiple mode
 retains explicit type/variant selectors and validates each matched field against

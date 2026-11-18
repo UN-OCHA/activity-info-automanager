@@ -43,7 +43,7 @@ class TemplateTests(unittest.TestCase):
                 parse_command_text('ModifyField(fieldCode="anchor", fieldType="quantity", label="${' + reference + '}")')
 
     def test_future_namespaces_validate_but_have_no_execution_context(self):
-        for namespace in ('form', 'database'):
+        for namespace in ('database',):
             for member in ('code', 'index', 'region', '1'):
                 text = '${' + namespace + '.' + member + '}'
                 with self.subTest(text=text):
@@ -126,11 +126,11 @@ DeleteField(fieldPattern="${{vars.pattern}}")''')
 
     def test_selectors_reject_iteration_context(self):
         for selector in ('fieldCode', 'fieldPattern'):
-            for reference in ('field.code', 'field.year', 'field.1', 'field.index', 'form.code', 'database.index'):
+            for reference in ('field.code', 'field.year', 'field.1', 'field.index', 'database.index'):
                 text = f'DeleteField({selector}="${{{reference}}}")'
                 with self.subTest(text=text), self.assertRaises(CommandTextError) as error:
                     parse_command_text(text)
-                self.assertIn('only vars references', str(error.exception))
+                self.assertIn('references are allowed', str(error.exception))
 
 
 class IterationTests(unittest.TestCase):
@@ -332,7 +332,7 @@ class CreatorIterationTests(unittest.TestCase):
             creator.controls['field_type'].set_value('date')
             creator._parameter_changed(None)
             self.assertEqual(creator.controls['field_type'].value, 'date')
-            creator.target_mode.set_value('Multiple fields')
+            creator.target_mode.set_value('Multiple')
             creator._target_mode_changed(None)
             creator.controls['field_code'].set_value('cost_.*')
             creator._parameter_changed(None)
@@ -345,7 +345,7 @@ class CreatorIterationTests(unittest.TestCase):
             creator._parameter_changed(None)
             self.assertFalse(creator.add_button.enabled)
             creator.controls['field_code'].set_value('anchor')
-            creator.target_mode.set_value('Single field')
+            creator.target_mode.set_value('Single')
             creator._target_mode_changed(None)
             self.assertEqual(creator.controls['field_type'].value, 'quantity')
             self.assertIn('anchor', creator.controls['field_code'].options)

@@ -44,7 +44,7 @@ def render_command_card(
                     f'w-full cursor-pointer items-center gap-2 rounded border px-2 py-1 {shade}'
                 ).on('click', lambda _, i=index, n=iteration: on_select_iteration(i, n)):
                     _status_icon(child.status)
-                    ui.label(f'Iteration {iteration + 1} ({child.field_code})').classes('text-xs font-mono break-all')
+                    ui.label(f'Iteration {iteration + 1} ({child.application_label})').classes('text-xs font-mono break-all')
     selected = index == selected_index and selected_iteration is None
     included = selected_index is not None and index < selected_index
     background = (
@@ -59,7 +59,7 @@ def render_command_card(
     ).on('click', lambda _, i=index: on_select(i)):
         with ui.row().classes('w-full items-center justify-between gap-2 flex-nowrap'):
             with ui.row().classes('items-center gap-2 flex-wrap'):
-                if isinstance(command, IterativeCommand):
+                if isinstance(command, IterativeCommand) or execution.form_iterations:
                     count = len(execution.iterations)
                     ui.badge(f'{count}x', color='grey').classes('rounded-full text-xs')
                     counts = Counter(
@@ -71,9 +71,11 @@ def render_command_card(
                             with ui.row().classes('items-center gap-1 flex-nowrap'):
                                 _status_icon(status)
                                 ui.label(str(counts[status])).classes('text-xs')
+                    if execution.status in ('warning', 'error') and not counts[execution.status]:
+                        _status_icon(execution.status)
                 else:
                     _status_icon(execution.status)
-            if isinstance(command, IterativeCommand):
+            if isinstance(command, IterativeCommand) or execution.form_iterations:
                 with ui.row().classes('items-center shrink-0 gap-0') as iteration_action:
                     _stop_click(iteration_action)
                     toggle = ui.button(

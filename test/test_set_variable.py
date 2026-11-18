@@ -74,7 +74,7 @@ ModifyField(fieldPattern="${vars.pattern}", fieldType="quantity", label="Changed
             creator._parameter_changed(None)
             creator._add_command()
             self.assertEqual(added[-1].field_code, '${vars.target}')
-            creator.target_mode.set_value('Multiple fields')
+            creator.target_mode.set_value('Multiple')
             creator._target_mode_changed(None)
             creator.controls['field_code'].set_value('(?${vars.group})')
             creator._parameter_changed(None)
@@ -83,7 +83,7 @@ ModifyField(fieldPattern="${vars.pattern}", fieldType="quantity", label="Changed
             creator.controls['field_code'].set_value('${field.code}')
             creator._parameter_changed(None)
             self.assertFalse(creator.add_button.enabled)
-            self.assertIn('only vars references', creator.error.text)
+            self.assertIn('references are allowed', creator.error.text)
 
     def test_literal_validation_and_roundtrip(self):
         for value in (' text ', 0, False, 2.5):

@@ -373,8 +373,9 @@ class CommandCreatorRenderer:
                     value=next(iter(self.definitions), None), label='Command',
                     on_change=self._command_changed,
                 ).classes('w-full bg-white')
-                self.target_mode = ui.select(
-                    ['Single field', 'Multiple fields'], value='Single field', label='Target',
+                self.target_label = ui.label('Target')
+                self.target_mode = ui.radio(
+                    ['Single', 'Multiple'], value='Single',
                     on_change=self._target_mode_changed,
                 ).classes('w-full bg-white')
                 self.target_help = ui.label(
@@ -396,7 +397,10 @@ class CommandCreatorRenderer:
 
     def _multiple_fields(self):
         from .command_iteration import ITERABLE_CREATORS
-        return self.command_select.value in ITERABLE_CREATORS and self.target_mode.value == 'Multiple fields'
+        return self.command_select.value in ITERABLE_CREATORS and self.target_mode.value == 'Multiple'
+
+    def _multiple_forms(self):
+        return self.command_select.value == 'with_form' and self.target_mode.value == 'Multiple'
 
     def _render_selected_command(self):
         self._updating = True
@@ -408,7 +412,9 @@ class CommandCreatorRenderer:
             self.parameter_containers.clear()
             definition = self.definitions.get(self.command_select.value)
             from .command_iteration import ITERABLE_CREATORS
-            self.target_mode.set_visibility(self.command_select.value in ITERABLE_CREATORS)
+            supports_multiple = self.command_select.value in ITERABLE_CREATORS or self.command_select.value == 'with_form'
+            self.target_mode.set_visibility(supports_multiple)
+            self.target_label.set_visibility(supports_multiple)
             with self.parameters:
                 self.editors = [
                     _ParameterEditor(self, parameter) for parameter in definition.parameters
@@ -427,15 +433,27 @@ class CommandCreatorRenderer:
             return
         self._populate_target_defaults()
         self._update_conditional_visibility()
-        self.target_help.set_visibility(self._multiple_fields())
+        self._update_target_controls()
+        self._update_add_button()
+        events.handle_event(self.on_parameter_change, self)
+
+    def _update_target_controls(self):
+        self.target_help.set_visibility(self._multiple_fields() or self._multiple_forms())
+        self.target_help.set_text(
+            'Whole-name regex; captures: (?P<year>...). Values: ${form.year}. Literal escape: $${'
+            if self._multiple_forms() else
+            'Whole-code regex; captures: (?P<year>...). Values: ${field.year}. Literal escape: $${')
+        form_target = self.controls.get('form')
+        if form_target is not None:
+            form_target.set_label('Form Name Pattern' if self._multiple_forms() else 'Form Name')
+            if self._multiple_forms():
+                form_target.set_options([])
         target = self.controls.get('field_code')
         if target is not None:
             label = next(editor.definition.label for editor in self.editors if editor.definition.key == 'field_code')
             target.set_label('Field code pattern' if self._multiple_fields() else label)
             if self._multiple_fields():
                 target.set_options([])
-        self._update_add_button()
-        events.handle_event(self.on_parameter_change, self)
 
     def _populate_target_defaults(self):
         definition = self.definitions.get(self.command_select.value)
@@ -492,6 +510,9 @@ class CommandCreatorRenderer:
         if self._multiple_fields():
             from .command_iteration import validate_pattern
             validate_pattern(values.get('field_code'))
+        if self._multiple_forms():
+            from .command_iteration import validate_pattern
+            validate_pattern(values.get('form'), kind='form')
         from .command_templates import substitute_selector, substitute_value
         if isinstance(values.get('field_code'), str):
             substitute_selector(values['field_code'])
@@ -514,7 +535,10 @@ class CommandCreatorRenderer:
         definition = self.definitions.get(self.command_select.value)
         if definition:
             try:
-                command = definition.create_command(self.values())
+                values = self.values()
+                if self._multiple_forms():
+                    values['form_pattern'] = values.pop('form')
+                command = definition.create_command(values)
                 if self._multiple_fields():
                     from dataclasses import replace
                     from .command_iteration import IterativeCommand
@@ -539,4 +563,5 @@ class CommandCreatorRenderer:
     def set_suggestions(self, source: str, values):
         self.option_sources[source] = list(values)
         self._update_conditional_visibility()
+        self._update_target_controls()
         self._update_add_button()

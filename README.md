@@ -18,7 +18,7 @@ Use the command creator to see the available parameters for each command.
 ### Multiple forms
 
 The initial database and form selectors establish the starting context.
-`WithForm` takes one required `form` parameter, using the same selection rules as
+Single-target `WithForm` takes a required `form` parameter, using the same selection rules as
 referenced forms and variable lookups:
 
 ```python
@@ -32,9 +32,28 @@ DeleteField(fieldCode="old")
 
 Unqualified form names resolve in the active form's database. Names are exact and
 case-sensitive and must resolve uniquely; form IDs are also accepted using the
-existing shared resolver. `form` supports `${vars.name}` substitutions. Variables
-remain available across switches. WithForm currently selects a single form and
-does not support iteration.
+existing shared resolver. `form` supports `${vars.name}` substitutions. Variables assigned outside a multiple-form scope remain available across switches.
+For multiple forms, use `WithForm(formPattern=r"Site (?P<region>.*)")`.
+The pattern matches whole form names in the active database only, in name order
+(case-insensitive sort, then ID). Matches, captures and one-based indices are frozen
+when WithForm is reached. Duplicate names select separate form IDs. A new
+WithForm replaces the scope; zero matches warn and skip its following applications.
+
+Following commands apply sequentially to each matched form: A1, B1, A2, B2.
+An error stops remaining forms and later commands. Each authored command keeps
+one card, with a count of concrete applications and combined console messages.
+Expand upward to inspect each application, labeled with its form and field context.
+For two fields in A and three in B, the count is 5x, ordered A/i, A/ii,
+B/i, B/ii, B/iii. WithForm and single commands inside its scope also expand,
+with one child per form. Selecting a child shows all form tabs at that exact
+application snapshot and selects the affected form. Fixed schema slots accumulate edits within
+the scope, and execution writes those final schemas in slot order. Earlier visits
+and command previews remain frozen.
+
+Variables set before the scope are inherited independently by each form.
+SetVariable inside the scope changes only that form's values. On leaving the scope,
+any variable name assigned inside it becomes unavailable, including an inherited
+name that was reassigned. Other inherited names remain available.
 
 Each successful switch to a different form appends a schema snapshot, loading a
 new form only when the switch is reached. Revisiting a form copies its latest
@@ -92,7 +111,7 @@ fields by code. Missing targets produce a warning and leave the schema unchanged
 ### Multiple fields and variables
 
 MoveField, DeleteField, and ModifyField have a **Target** selector below the
-command selector: **Single field** or **Multiple fields**. Multiple mode accepts
+command selector: **Single** or **Multiple** (vertical radio buttons). Multiple mode accepts
 a Python regex matching the whole field code. It does not match labels. In Text
 mode, supply `fieldPattern` instead of `fieldCode`:
 
@@ -126,12 +145,14 @@ values and parameter-function string arguments:
 | `${field.1}` | Numbered capture group, starting at 1 |
 | `${field.index}` | Iteration number, starting at 1 |
 | `${vars.prefix}` | Text assigned by an earlier SetVariable command |
-| `${form.*}` | Reserved for future form iteration; unavailable currently |
+| `${form.name}` | Original matched form name |
+| `${form.region}` / `${form.1}` | Named / numbered form capture |
+| `${form.index}` | Form iteration number, starting at 1 |
 | `${database.*}` | Reserved for future database iteration; unavailable currently |
 
 `field` provides the current field iteration context; `vars` contains only values
-assigned by SetVariable. The `form` and `database` namespaces are recognized but
-have no execution context yet. The former `match.*` and `iteration.index`
+assigned by SetVariable. The `form` namespace is available inside multiple-form scopes; `database`
+remains reserved. The former `match.*` and `iteration.index`
 references are no longer supported.
 
 The capture names `code` and `index` are reserved. Write `$${field.year}` to insert the literal
@@ -141,8 +162,8 @@ errors. Substitution runs once, before parameter functions and schema resolution
 inserted values and function outputs are never substituted again. It inserts
 text without evaluating expressions, quoting formula literals, or converting
 text to numeric/boolean values. Existing parameter types and selection choices
-still apply. Target selectors (`fieldCode` and `fieldPattern`) support only
-`${vars.name}` substitutions, resolved before selecting fields. `field` references in selectors are errors because that context does not yet
+still apply. Target selectors (`fieldCode` and `fieldPattern`) support
+`${vars.name}` and enclosing `${form.name}` / capture substitutions, resolved before selecting fields. `field` references in selectors are errors because that context does not yet
 exist. Pattern variables are inserted as regex text without automatic escaping;
 the resolved pattern is then compiled and matched. Use `$${...}` for literal
 placeholder text. Selectors and inserted values are never substituted twice.
@@ -156,7 +177,10 @@ Collapsing a selected child selects the parent and updates the result accordingl
 Reorder/delete controls operate on the entire authored command. Text mode stores
 the original pattern and placeholders, not the expanded applications.
 
-Zero matches produces a warning and leaves the schema unchanged. Warnings allow
+Field targets are planned across all selected forms before application. The
+count includes unexecuted applications after an error. A form with zero field
+matches contributes no child, while its warning remains on the parent and in
+the combined console. Zero matches produces a warning and leaves the schema unchanged. Warnings allow
 later iterations to continue. An error stops the remaining iterations and later
 commands and disables Execute. Earlier successful changes remain visible for
 inspection; the failed iteration's result follows the normal execution pipeline.

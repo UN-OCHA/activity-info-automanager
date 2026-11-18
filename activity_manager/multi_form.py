@@ -12,13 +12,18 @@ class FormWorkspace:
         self.issues = {}
         self.opschema = [deepcopy(initial)] if initial is not None else []
         self.originals = {initial.get('id'): deepcopy(initial)} if initial is not None else {}
+        self.active_slot = 0
+
+    @property
+    def active_schema(self):
+        return self.opschema[self.active_slot] if self.opschema else None
 
     @property
     def latest(self):
         return {schema.get('id'): schema for schema in self.opschema}
 
     def update(self, schema):
-        self.opschema[-1] = deepcopy(schema)
+        self.opschema[self.active_slot] = deepcopy(schema)
         self.reserved.setdefault(schema.get("id"), set()).update(schema_identities(schema))
 
     async def switch(self, form, service, current, related):
@@ -36,6 +41,19 @@ class FormWorkspace:
                 raise ValueError('The selected form has an invalid schema or no database ID.')
             self.originals[identity] = deepcopy(schema)
         self.opschema.append(deepcopy(schema))
+        self.active_slot = len(self.opschema) - 1
+        return deepcopy(schema)
+
+    async def visit(self, identity, service):
+        """Start a fixed slot for one member of a form iteration scope."""
+        schema = self.latest.get(identity)
+        if schema is None:
+            schema = await service.get_form_schema(identity)
+            if schema.get('id') != identity or not isinstance(schema.get('elements'), list) or not schema.get('databaseId'):
+                raise ValueError('The selected form has an invalid schema or no database ID.')
+            self.originals[identity] = deepcopy(schema)
+        self.opschema.append(deepcopy(schema))
+        self.active_slot = len(self.opschema) - 1
         return deepcopy(schema)
 
 

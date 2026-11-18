@@ -34,6 +34,13 @@ class CommandExecution:
     target: IterationTarget | None = None
     opschema: tuple[dict, ...] = ()
     form_issues: dict | None = None
+    form_iterations: bool = False
+    field_iterations: bool = False
+    application_context: tuple[str, ...] = ()
+
+    @property
+    def application_label(self):
+        return ' / '.join(self.application_context) or self.field_code or ''
 
     @property
     def issues(self):
@@ -271,7 +278,7 @@ class CommandListManager:
         self._render_simple_view()
         self._notify_selection()
 
-    def _application_steps(self, index, current, variables=None):
+    def _application_steps(self, index, current, variables=None, targets=None, *, record_progress=True):
         """One orchestration path shared by synchronous and connected evaluation.
 
         Yield concrete applications; callers send back their normal results.
@@ -281,19 +288,22 @@ class CommandListManager:
             result = yield command
             return CommandExecution.from_result(result)
         try:
-            targets = command.targets(current, variables)
+            if targets is None:
+                targets = command.targets(current, variables)
         except ValueError as exc:
             return CommandExecution.from_result(ExecutionResult.error(current, str(exc), 'invalid_selector'))
         if not targets:
-            return CommandExecution.from_result(ExecutionResult.warning(
-                current, f'No field codes matched pattern {command.field_pattern!r}. Schema unchanged.', 'no_matches'))
+            return replace(CommandExecution.from_result(ExecutionResult.warning(
+                current, f'No field codes matched pattern {command.field_pattern!r}. Schema unchanged.', 'no_matches')),
+                field_iterations=True)
         children = [CommandExecution('not_executed', None, 'Waiting for the previous iteration.',
                                      field_code=target.original_code, target=target) for target in targets]
         previous = None
         for iteration, target in enumerate(targets):
             children[iteration] = CommandExecution('resolving', None, 'Applying iteration…',
                                                     field_code=target.original_code, target=target)
-            self.executions[index] = self._summarize_iterations(children, current)
+            if record_progress:
+                self.executions[index] = self._summarize_iterations(children, current)
             try:
                 concrete = target.prepare(command, current, previous, variables)
             except ValueError as exc:
@@ -301,7 +311,7 @@ class CommandListManager:
                 result = ExecutionResult.error(current, str(exc), 'invalid_iteration')
             else:
                 result = yield concrete
-            execution = CommandExecution.from_result(result)
+            execution = self._snapshot_execution(CommandExecution.from_result(result))
             children[iteration] = CommandExecution(
                 execution.status, execution.schema, execution.message, execution.names_schema,
                 execution.diagnostics, field_code=target.original_code,
@@ -315,7 +325,7 @@ class CommandListManager:
                         target=targets[later])
                 break
             previous = concrete.command.field_code if concrete else previous
-        return self._summarize_iterations(children, current)
+        return replace(self._summarize_iterations(children, current), field_iterations=True)
 
     @staticmethod
     def _summarize_iterations(children, current):
@@ -323,9 +333,9 @@ class CommandListManager:
         status = next((value for value in ('error', 'resolving', 'warning', 'not_executed')
                        if value in statuses), 'applied')
         diagnostics = tuple(Diagnostic(item.severity,
-            f'Iteration {index + 1} ({child.field_code}): {item.message}', code=item.code)
+            f'Iteration {index + 1} ({child.application_label}): {item.message}', code=item.code)
             for index, child in enumerate(children) for item in child.diagnostics)
-        message = '\n'.join(f'Iteration {index + 1} ({child.field_code}): {child.message}'
+        message = '\n'.join(f'Iteration {index + 1} ({child.application_label}): {child.message}'
                             for index, child in enumerate(children))
         if 'error' in statuses:
             message = f'Stopped at iteration {statuses.index("error") + 1}.\n' + message
@@ -458,25 +468,33 @@ class CommandListManager:
         self._update_execute_button()
 
     async def _resolve_commands(self, version, current, commands):
+        from .commands.with_form import WithFormCommand
+        from .commands.set_variable import SetVariableCommand
         variables = {}
+        scope = None
+        assigned = set()
         for index, command in enumerate(commands):
             if version != self._evaluation_version:
                 return
             self.executions[index] = CommandExecution('resolving', None, 'Resolving names…')
             self._publish_evaluation()
-            steps = self._application_steps(index, current, variables)
-            try:
-                application = next(steps)
-                while True:
-                    self._publish_evaluation()
-                    result = await self._apply_connected(application, current, variables)
-                    if version != self._evaluation_version:
-                        return
-                    result = self._save_result(result)
-                    current = result.schema
-                    application = steps.send(result)
-            except StopIteration as finished:
-                execution = self._snapshot_execution(finished.value)
+            if isinstance(command, WithFormCommand):
+                for name in assigned:
+                    variables.pop(name, None)
+                assigned.clear()
+                scope = None
+                if command.form_pattern is not None:
+                    scope, execution = await self._start_form_scope(command, current, variables, version)
+                else:
+                    execution = await self._run_connected_command(index, current, variables, version)
+            elif scope is not None:
+                if scope and isinstance(command, SetVariableCommand):
+                    assigned.add(f'vars.{command.name}')
+                execution = await self._run_form_scope(index, scope, current, version)
+            else:
+                execution = await self._run_connected_command(index, current, variables, version)
+            if version != self._evaluation_version:
+                return
             current = execution.schema
             self.executions[index] = execution
             if execution.status == 'error':
@@ -485,6 +503,128 @@ class CommandListManager:
                 self._publish_evaluation()
                 return
             self._publish_evaluation()
+
+    async def _run_connected_command(self, index, current, variables, version, *, publish=True, targets=None):
+        steps = self._application_steps(index, current, variables, targets, record_progress=publish)
+        try:
+            application = next(steps)
+            while True:
+                if publish:
+                    self._publish_evaluation()
+                result = await self._apply_connected(application, current, variables)
+                if version != self._evaluation_version:
+                    return None
+                result = self._save_result(result)
+                current = result.schema
+                application = steps.send(result)
+        except StopIteration as finished:
+            return self._snapshot_execution(finished.value)
+
+    async def _start_form_scope(self, command, current, variables, version):
+        from .command_iteration import compile_pattern
+        from .command_templates import substitute_text
+        scope = []
+        try:
+            if self.form_service is None:
+                raise ValueError('WithForm requires a connected form loader.')
+            pattern = compile_pattern(substitute_text(command.form_pattern, variables, namespaces={'vars'}), kind='form')
+            names = dict(await self.form_service.get_form_names(current['databaseId']))
+            if version != self._evaluation_version:
+                return scope, None
+            names.update({identity: schema.get('label') or identity
+                          for identity, schema in self.workspace.latest.items()
+                          if schema.get('databaseId') == current['databaseId']})
+            for identity, name in sorted(names.items(), key=lambda item: (item[1].casefold(), item[0])):
+                match = pattern.fullmatch(name)
+                if match is None:
+                    continue
+                local = {**variables, 'form.name': name, 'form.index': len(scope) + 1}
+                local.update({f'form.{i}': value for i, value in enumerate(match.groups(), 1)})
+                local.update({f'form.{key}': value for key, value in match.groupdict().items()})
+                scope.append(dict(identity=identity, name=name, variables=local, slot=None))
+        except Exception as exc:
+            return scope, self._snapshot_execution(CommandExecution.from_result(
+                ExecutionResult.error(current, str(exc), 'form_selector_failed')))
+        children = self._pending_forms(scope)
+        for i, target in enumerate(scope):
+            try:
+                schema = await self.workspace.visit(target['identity'], self.form_service)
+                if version != self._evaluation_version:
+                    return scope, None
+                target['slot'] = self.workspace.active_slot
+                self.related_schemas.update(self.workspace.latest)
+                result = ExecutionResult(schema, snapshot_issues=self.workspace.issues.get(schema['id'], ()),
+                                         success_message=f'Active form: {target["name"]}')
+            except Exception as exc:
+                result = ExecutionResult.error(current, str(exc), 'form_switch_failed')
+            if version != self._evaluation_version:
+                return scope, None
+            result = self._save_result(result)
+            children[i] = replace(CommandExecution.from_result(result), field_code=target['name'])
+            current = result.schema
+            if result.has_errors:
+                break
+        return scope, self._form_summary(children, current)
+
+    @staticmethod
+    def _pending_forms(scope):
+        return [CommandExecution('not_executed', None, 'Did not execute: an earlier form failed.',
+                                 field_code=target['name']) for target in scope]
+
+    def _form_summary(self, children, current):
+        if not children:
+            return replace(self._snapshot_execution(CommandExecution.from_result(ExecutionResult.warning(
+                current, 'No form names matched. No applications in this scope.', 'no_matches'))), form_iterations=True)
+        summary = self._summarize_iterations(children, current)
+        def flatten(items, context=()):
+            for child in items:
+                path = context + (child.application_context or ((child.field_code,) if child.field_code else ()))
+                if child.iterations or child.field_iterations or child.form_iterations:
+                    yield from flatten(child.iterations, path)
+                else:
+                    yield replace(child, application_context=path)
+        return replace(self._snapshot_execution(summary), form_iterations=True, iterations=tuple(flatten(children)))
+
+    async def _run_form_scope(self, index, scope, current, version):
+        children = self._pending_forms(scope)
+        plans = [None] * len(scope)
+        command = self.commands[index]
+        for i, target in enumerate(scope):
+            context = (target['name'],)
+            if not isinstance(command, IterativeCommand) and isinstance(getattr(command, 'field_code', None), str):
+                from .command_templates import substitute_selector
+                try:
+                    context += (substitute_selector(command.field_code, target['variables']),)
+                except ValueError:
+                    context += (command.field_code,)
+            children[i] = replace(children[i], application_context=context)
+        if isinstance(command, IterativeCommand):
+            # Plan every form before applying any field, so an early failure still
+            # leaves the complete set of unexecuted applications visible.
+            for i, target in enumerate(scope):
+                try:
+                    plans[i] = command.targets(self.workspace.opschema[target['slot']], target['variables'])
+                except ValueError:
+                    continue  # Report selector errors when their form is reached.
+                children[i] = replace(children[i], field_iterations=True, iterations=tuple(
+                    CommandExecution('not_executed', None, 'Did not execute: an earlier application failed.',
+                                     field_code=field.original_code, target=field) for field in plans[i]))
+        self.executions[index] = self._form_summary(children, current)
+        self._publish_evaluation()
+        for i, target in enumerate(scope):
+            self.workspace.active_slot = target['slot']
+            current = deepcopy(self.workspace.active_schema)
+            execution = await self._run_connected_command(index, current, target['variables'], version,
+                                                          publish=False, targets=plans[i])
+            if version != self._evaluation_version:
+                return None
+            children[i] = replace(execution, field_code=target['name'], application_context=children[i].application_context)
+            current = execution.schema
+            self.executions[index] = self._form_summary(children, current)
+            self._publish_evaluation()
+            if execution.status == 'error':
+                break
+        return self._form_summary(children, current)
 
     def _render_simple_view(self) -> None:
         if self.selected_iteration is not None and self.selected_index is not None:

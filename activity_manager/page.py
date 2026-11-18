@@ -157,7 +157,7 @@ def connection_page():
     form_request = 0
     schema_request = 0
     async def refresh_reference_suggestions(creator):
-        active = command_list.workspace.opschema[-1] if command_list.workspace.opschema else source_schema
+        active = command_list.workspace.active_schema if command_list.workspace.opschema else source_schema
         control = creator.controls.get('referenced_form')
         reference = control.value if control is not None else None
         data = None
@@ -329,14 +329,19 @@ def connection_page():
         selected_index: int | None,
         execution: CommandExecution | None,
     ) -> None:
-        active = command_list.workspace.opschema[-1] if command_list.workspace.opschema else source_schema
+        active = command_list.workspace.active_schema if command_list.workspace.opschema else source_schema
         command_creator.set_schema(active)
         if active:
             directory = command_list.resolution_cache.get(('get_form_names', json.dumps((active.get('databaseId'),))))
-            labels = list(directory.values()) if directory is not None else [
-                data.get('label') or identity for identity, data in command_list.related_schemas.items()
-                if data.get('databaseId') == active.get('databaseId')]
-            command_creator.set_suggestions('form_names', labels)
+            if directory is None:
+                directory = {identity: label.removesuffix(f' ({identity})')
+                             for identity, label in forms.options.items()}
+                if active.get('databaseId') != databases.value:
+                    directory = {}
+            directory = {**directory, **{
+                identity: data.get('label') or identity for identity, data in command_list.related_schemas.items()
+                if data.get('databaseId') == active.get('databaseId')}}
+            command_creator.set_suggestions('form_names', list(directory.values()))
         if selected_index is None:
             # Background evaluation still refreshes the source display, but its
             # per-command messages belong to executions until a command is selected.

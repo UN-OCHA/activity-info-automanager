@@ -13,25 +13,27 @@ ITERABLE_COMMANDS = frozenset({'movefield', 'deletefield', 'modifyfield'})
 ITERABLE_CREATORS = frozenset({'move_field', 'delete_field', 'modify_field'})
 
 
-def compile_pattern(pattern):
+def compile_pattern(pattern, *, kind='field'):
+    label = 'Form name' if kind == 'form' else 'Field code'
     if not isinstance(pattern, str) or not pattern:
-        raise ValueError('Field code pattern is required.')
+        raise ValueError(f'{label} pattern is required.')
     try:
         compiled = re.compile(pattern)
     except re.error as exc:
-        raise ValueError(f'Invalid field code pattern: {exc}') from None
-    for name in sorted(FIELD_BUILTINS.intersection(compiled.groupindex)):
-        raise ValueError(f'Capture group {name!r} is reserved for built-in field context.')
+        raise ValueError(f'Invalid {label.lower()} pattern: {exc}') from None
+    builtins = {'name', 'index'} if kind == 'form' else FIELD_BUILTINS
+    for name in sorted(builtins.intersection(compiled.groupindex)):
+        raise ValueError(f'Capture group {name!r} is reserved for built-in {kind} context.')
     return compiled
 
 
-def validate_pattern(pattern):
+def validate_pattern(pattern, *, kind='field'):
     """Validate authored templates; compile after substitution at selection time."""
     if not isinstance(pattern, str) or not pattern:
-        raise ValueError('Field code pattern is required.')
+        raise ValueError(f'{"Form name" if kind == "form" else "Field code"} pattern is required.')
     substitute_selector(pattern)
     if '${' not in pattern:
-        compile_pattern(pattern)
+        compile_pattern(pattern, kind=kind)
 
 
 @dataclass(frozen=True)

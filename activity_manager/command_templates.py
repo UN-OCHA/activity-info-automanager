@@ -13,7 +13,7 @@ NAMESPACE_MEMBERS = {
     'form': ITERATION_MEMBER,
     'database': ITERATION_MEMBER,
 }
-RESERVED_NAMESPACES = frozenset({'form', 'database'})
+RESERVED_NAMESPACES = frozenset({'database'})
 FIELD_BUILTINS = frozenset({'code', 'index'})
 
 
@@ -32,7 +32,8 @@ def substitute_text(text, variables=None, *, namespaces=None):
             if not separator or member_pattern is None or not member_pattern.fullmatch(member):
                 raise ValueError(f'Invalid variable placeholder at character {index + 1}: {text[index:]!r}.')
             if namespaces is not None and namespace not in namespaces:
-                raise ValueError(f'Variable ${{{reference}}} is unavailable in field selectors; only vars references are allowed.')
+                allowed = ' or '.join(sorted(namespaces))
+                raise ValueError(f'Variable ${{{reference}}} is unavailable in selectors; only {allowed} references are allowed.')
             if variables is None:
                 result.append(text[index:end + 1])
             else:
@@ -50,7 +51,7 @@ def substitute_text(text, variables=None, *, namespaces=None):
 
 def substitute_selector(text, variables=None):
     """Field selectors resolve before matching, without field iteration context."""
-    return substitute_text(text, variables, namespaces={'vars'})
+    return substitute_text(text, variables, namespaces={'vars', 'form'})
 
 
 def substitute_value(value, variables=None):
