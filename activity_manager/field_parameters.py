@@ -189,7 +189,7 @@ FIELD_PARAMETERS = (
               P('label', 'Option label', 'text'),
           )),
       )),
-    P('referenced_form', 'Referenced form', 'combobox', option_source='form_ids',
+    P('referenced_form', 'Referenced form', 'combobox', option_source='form_names',
       visible_when=referenced_form_visible,
       help='Form ID or local form name; use Database/Form for a remote form. Names resolve when the command is applied.'),
     P('reverse_reference_field', 'Reverse-reference field', 'combobox', option_source='reference_field_codes',

@@ -9,6 +9,7 @@ from activity_manager.schema_change import compare_schemas
 from activity_manager.schema_names import (
     readable_schema, schemas_from_tree, substitute_record_id,
     load_default_record_labels,
+    schema_with_ids, unresolved_formula_references,
 )
 from activity_manager.schema_display import underline_substitutions
 import json
@@ -74,6 +75,96 @@ class SchemaNamesTests(unittest.TestCase):
     def test_tree_extraction(self):
         self.assertEqual(schemas_from_tree({'forms': {'remote': {'schema': self.remote}}}),
                          {'remote': self.remote})
+
+    def test_parent_formula_anchor_round_trip(self):
+        self.schema['parentFormId'] = 'remote'
+        # Local fields deliberately reuse IDs present in the parent form.
+        formula = '@parent.same + @parent.next.same + same.next.same + "@parent.same" + \'@parent.same\''
+        self.schema['elements'][1]['typeParameters']['formula'] = formula
+        before = deepcopy(self.schema)
+        names = readable_schema(self.schema, self.related, formulas_only=True)
+        rendered = names['elements'][1]['typeParameters']['formula']
+        self.assertEqual(rendered,
+                         '@parent.NAME + @parent.TEAM.TITLE + PERSON.TEAM.TITLE + "@parent.same" + \'@parent.same\'')
+        self.assertEqual(rendered.spans[0], (8, 12, 'same'))
+        self.assertEqual(schema_with_ids(names, self.related), self.schema)
+        self.assertEqual(unresolved_formula_references(names, self.related), [])
+        self.assertEqual(self.schema, before)
+
+    def test_parent_anchor_uses_lookup_formula_context(self):
+        self.remote['parentFormId'] = 'third'
+        self.schema['elements'][0]['typeParameters']['lookupConfigs'][0]['formula'] = '@parent.same'
+        names = readable_schema(self.schema, self.related, formulas_only=True)
+        self.assertEqual(names['elements'][0]['typeParameters']['lookupConfigs'][0]['formula'],
+                         '@parent.TITLE')
+        self.assertEqual(schema_with_ids(names, self.related), schema_with_ids(self.schema, self.related))
+
+    def test_parent_enumeration_formula_round_trip(self):
+        self.schema['parentFormId'] = 'remote'
+        self.remote['elements'].append({
+            'id': 'enumId', 'code': 'CHOICE', 'type': 'enumerated',
+            'typeParameters': {'values': [{'id': 'lookupId', 'label': 'Hello Goodbye'}]},
+        })
+        self.schema['elements'][1]['typeParameters']['formula'] = '@parent.enumId.lookupId'
+        before = deepcopy(self.schema)
+        names = readable_schema(self.schema, self.related, formulas_only=True)
+        formula = names['elements'][1]['typeParameters']['formula']
+        self.assertEqual(formula, '@parent.CHOICE.[Hello Goodbye]')
+        self.assertEqual(formula.spans, ((8, 14, 'enumId'), (15, 30, 'lookupId')))
+        self.assertEqual(schema_with_ids(names, self.related), self.schema)
+        self.assertEqual(unresolved_formula_references(self.schema, self.related), [])
+        self.assertEqual(unresolved_formula_references(names, self.related), [])
+        self.assertEqual(self.schema, before)
+
+    def test_missing_parent_context_preserves_anchor_and_reports_only_field(self):
+        self.schema['elements'][1]['typeParameters']['formula'] = '@parent.same + @parent'
+        for parent_id in (None, 'unavailable'):
+            with self.subTest(parent_id=parent_id):
+                self.schema['parentFormId'] = parent_id
+                names = readable_schema(self.schema, self.related, formulas_only=True)
+                self.assertEqual(names['elements'][1]['typeParameters']['formula'], '@parent.same + @parent')
+                self.assertEqual(schema_with_ids(names, self.related), self.schema)
+                self.assertEqual([token for _, token, _ in unresolved_formula_references(self.schema, self.related)],
+                                 ['same'])
+
+    def test_enumeration_formula_paths_round_trip(self):
+        self.remote['elements'].append({
+            'id': 'choice', 'code': 'CHOICE', 'type': 'enumerated',
+            'typeParameters': {'values': [
+                {'id': 'hello', 'label': 'Hello'},
+                {'id': 'goodbye', 'label': 'Hello Goodbye'},
+                {'id': 'truth', 'label': 'TRUE'},
+            ]}})
+        formula = 'same.choice.hello + same.choice.goodbye + same.choice.truth + options.same + "same.choice.hello"'
+        self.schema['elements'][1]['typeParameters']['formula'] = formula
+        self.schema['elements'][0]['typeParameters']['lookupConfigs'][0]['formula'] = 'choice.goodbye'
+        before = deepcopy(self.schema)
+        names = readable_schema(self.schema, self.related, formulas_only=True)
+        rendered = names['elements'][1]['typeParameters']['formula']
+        self.assertEqual(rendered,
+                         'PERSON.CHOICE.Hello + PERSON.CHOICE.[Hello Goodbye] + PERSON.CHOICE.[TRUE] + OPTIONS.Option + "same.choice.hello"')
+        self.assertIn((14, 19, 'hello'), rendered.spans)
+        self.assertEqual(names['elements'][0]['typeParameters']['lookupConfigs'][0]['formula'],
+                         'CHOICE.[Hello Goodbye]')
+        self.assertEqual(schema_with_ids(names, self.related), self.schema)
+        self.assertEqual(unresolved_formula_references(names, self.related), [])
+        self.assertEqual(self.schema, before)
+
+    def test_enumeration_paths_preserve_ambiguous_and_missing_options(self):
+        self.schema['elements'][4]['typeParameters']['values'] = [
+            {'id': 'one', 'label': 'Duplicate'}, {'id': 'two', 'label': 'Duplicate'},
+            {'id': 'Duplicate', 'label': 'Exact ID'},
+        ]
+        self.schema['elements'][1]['typeParameters']['formula'] = (
+            'OPTIONS.Duplicate + OPTIONS.missing + OPTIONS.[Exact ID]')
+        resolved = schema_with_ids(self.schema, self.related)
+        self.assertEqual(resolved['elements'][1]['typeParameters']['formula'],
+                         'options.Duplicate + options.missing + options.Duplicate')
+        self.schema['elements'][4]['typeParameters']['values'].pop()
+        self.assertEqual(schema_with_ids(self.schema, self.related)['elements'][1]['typeParameters']['formula'],
+                         'options.Duplicate + options.missing + options.[Exact ID]')
+        failures = unresolved_formula_references(self.schema, self.related)
+        self.assertEqual([token for _, token, _ in failures], ['Duplicate', 'missing', 'Exact ID'])
 
     def test_defaults_and_underlines_are_scoped_and_escaped(self):
         self.schema['elements'][4]['defaultValue'] = ['same', 'missing']

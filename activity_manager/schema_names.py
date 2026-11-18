@@ -8,7 +8,7 @@ import re
 FORMULA_KEYS = {'formula', 'prefixFormula', 'defaultValueFormula',
                 'relevanceCondition', 'requiredCondition', 'validationCondition'}
 # Strings are consumed before identifiers so their contents never get rewritten.
-TOKENS = re.compile(r'''"(?:\\.|""|[^"\\])*"|'(?:\\.|''|[^'\\])*'|\[[^\]]+\]|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z_][A-Za-z0-9_]*|\s+|.''', re.DOTALL)
+TOKENS = re.compile(r'''"(?:\\.|""|[^"\\])*"|'(?:\\.|''|[^'\\])*'|\[[^\]]+\]|@parent\b|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z_][A-Za-z0-9_]*|\s+|.''', re.DOTALL)
 
 
 class SubstitutedText(str):
@@ -107,6 +107,13 @@ def readable_schema(schema, related_schemas=None, database_names=None, *, formul
 
     def target(element):
         params = (element or {}).get('typeParameters') or {}
+        if (element or {}).get('type') == 'enumerated':
+            # Options are terminal members of an enumerated field, rather than
+            # fields in another form. Reuse ID-first, unambiguous code matching.
+            return {'elements': [
+                {'id': option.get('id'), 'code': option.get('label')}
+                for option in params.get('values') or [] if isinstance(option, dict)
+            ]}
         ranges = params.get('range') or []
         return forms.get(ranges[0].get('formId')) if ranges else forms.get(params.get('formId'))
 
@@ -117,6 +124,11 @@ def readable_schema(schema, related_schemas=None, database_names=None, *, formul
         dotted = False
         for i, token in enumerate(tokens):
             if token.isspace():
+                continue
+            if token == '@parent':
+                scope = current if dotted else context
+                previous = {'typeParameters': {'formId': (scope or {}).get('parentFormId')}}
+                dotted = False
                 continue
             if token == '.':
                 current = target(previous)

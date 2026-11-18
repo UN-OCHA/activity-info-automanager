@@ -415,7 +415,7 @@ def connection_page():
         form_request += 1
         clear_schema()
         forms.set_options({})
-        command_creator.set_suggestions('form_ids', [])
+        command_creator.set_suggestions('form_names', [])
         form_status.set_text('')
 
     async def load_forms():
@@ -428,7 +428,9 @@ def connection_page():
             options = await service.get_forms(databases.value)
             if request == form_request:
                 forms.set_options(options)
-                command_creator.set_suggestions('form_ids', options)
+                command_creator.set_suggestions('form_names', [
+                    label.removesuffix(f' ({identity})') for identity, label in options.items()
+                ])
                 form_status.set_text('' if options else 'No forms available.')
         except ValueError as exc:
             if request == form_request:

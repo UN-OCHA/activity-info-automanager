@@ -435,7 +435,8 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
         service.get_form_schema.side_effect = AssertionError('Creator must not read schemas')
         service.get_form_tree.return_value = {
             'form1': schema(),
-            'other': {'elements': [{'code': 'Name'}, {'code': 'Code'}]},
+            'other': {'label': 'Other', 'databaseId': 'db1',
+                      'elements': [{'code': 'Name'}, {'code': 'Code'}]},
         }
         captured = []
 
@@ -462,7 +463,17 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
             creator._command_changed(None)
             creator.controls['field_type'].set_value('reference')
             creator._parameter_changed(None)
-            self.assertIn('other', creator.controls['referenced_form'].options)
+            for field_type in ('reference', 'reversereference', 'multiselectreference'):
+                creator.controls['field_type'].set_value(field_type)
+                creator._parameter_changed(None)
+                control = creator.controls['referenced_form']
+                self.assertEqual(control.options, ['Survey', 'Other'])
+                control._select_option('Other')
+                self.assertEqual(control.value, 'Other')
+            creator.command_select.set_value('add_field')
+            creator._command_changed(None)
+            creator.controls['field_type'].set_value('reference')
+            creator._parameter_changed(None)
             lookup = next(editor for editor in creator.editors if editor.definition.key == 'lookup_fields')
             lookup.activation.set_value(True)
             lookup._change_rows(None, 0)
@@ -470,7 +481,7 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
             creator.controls['referenced_form'].set_value('slow')
             await creator.on_parameter_change(creator)
             self.assertEqual(lookup.rows[0][1].control.options, [])
-            creator.controls['referenced_form'].set_value('other')
+            creator.controls['referenced_form']._select_option('Other')
             await creator.on_parameter_change(creator)
             self.assertEqual(lookup.rows[0][1].control.options, ['Name', 'Code'])
             self.assertEqual(lookup.rows[0][1].control.value, 'CONCAT(Name, Code)')
