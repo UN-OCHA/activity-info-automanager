@@ -2,6 +2,13 @@ from copy import deepcopy
 import asyncio
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
+from uuid import uuid4
+
+from .immutable import FrozenMap, command_parameters_snapshot
+from .resource_state import ResourceKey
+from .application_results import (
+    AuthoredCommand, DisplayState, DisplaySnapshotBuilder, adapt_authored_result,
+)
 
 from nicegui import ui
 
@@ -10,6 +17,7 @@ from .multi_form import FormWorkspace
 from .schema_names import readable_schema
 from .command_execution import (
     Diagnostic, ExecutionResult, ExecutionStatus, EXECUTABLE_STATUSES, apply_command, apply_command_locally,
+    with_prepared_command,
 )
 from .command_parser import CommandTextError, parse_command_text
 from .command_iteration import IterativeCommand, IterationTarget
@@ -37,6 +45,11 @@ class CommandExecution:
     form_iterations: bool = False
     field_iterations: bool = False
     application_context: tuple[str, ...] = ()
+    display_state: DisplayState | None = None
+    prepared_syntax: str | None = None
+    prepared_parameters: FrozenMap | None = None
+    target_keys: tuple[ResourceKey, ...] = ()
+    target_member_ids: tuple[str, ...] = ()
 
     @property
     def application_label(self):
@@ -51,7 +64,9 @@ class CommandExecution:
     @classmethod
     def from_result(cls, result):
         return cls(result.status, result.schema, result.message, result.names_schema, result.diagnostics,
-                   opschema=result.opschema, snapshot_issues=result.snapshot_issues, form_issues=result.form_issues)
+                   opschema=result.opschema, snapshot_issues=result.snapshot_issues, form_issues=result.form_issues,
+                   display_state=result.display_state, prepared_syntax=result.prepared_syntax,
+                   prepared_parameters=result.prepared_parameters, target_member_ids=result.target_member_ids)
 
 
 class CommandListManager:
@@ -77,6 +92,9 @@ class CommandListManager:
         self.reference_defaults = {}
         self.resolution_cache = {}
         self._evaluation_version = 0
+        self._authored_bindings = []
+        self.authored_commands = ()
+        self.snapshot_builder = DisplaySnapshotBuilder(0)
         self._evaluation_task = None
         self.commands: list[Command] = []
         self.executions: list[CommandExecution] = []
@@ -297,10 +315,11 @@ class CommandListManager:
                 current, f'No field codes matched pattern {command.field_pattern!r}. Schema unchanged.', 'no_matches')),
                 field_iterations=True)
         children = [CommandExecution('not_executed', None, 'Waiting for the previous iteration.',
-                                     field_code=target.original_code, target=target) for target in targets]
+                                     field_code=target.original_code, target=target,
+                                     target_keys=(self.workspace.key_for(current),)) for target in targets]
         previous = None
         for iteration, target in enumerate(targets):
-            children[iteration] = CommandExecution('resolving', None, 'Applying iteration…',
+            children[iteration] = CommandExecution('resolving', None, 'Applying iterationÃ¢â‚¬Â¦',
                                                     field_code=target.original_code, target=target)
             if record_progress:
                 self.executions[index] = self._summarize_iterations(children, current)
@@ -316,13 +335,16 @@ class CommandListManager:
                 execution.status, execution.schema, execution.message, execution.names_schema,
                 execution.diagnostics, field_code=target.original_code,
                 concrete_command=concrete.command if concrete else None, target=target, opschema=execution.opschema,
-                snapshot_issues=execution.issues, form_issues=execution.form_issues)
+                snapshot_issues=execution.issues, form_issues=execution.form_issues,
+                display_state=execution.display_state, prepared_syntax=execution.prepared_syntax,
+                prepared_parameters=execution.prepared_parameters, target_member_ids=execution.target_member_ids,
+                target_keys=(self.workspace.key_for(current),))
             current = execution.schema
             if execution.status == 'error':
                 for later in range(iteration + 1, len(children)):
                     children[later] = CommandExecution('not_executed', None,
                         'Did not execute: an earlier iteration failed.', field_code=targets[later].original_code,
-                        target=targets[later])
+                        target=targets[later], target_keys=(self.workspace.key_for(current),))
                 break
             previous = concrete.command.field_code if concrete else previous
         return replace(self._summarize_iterations(children, current), field_iterations=True)
@@ -343,7 +365,31 @@ class CommandListManager:
         final = reached[-1] if reached else None
         return CommandExecution(status, current, message, final.names_schema if final else None,
             diagnostics, tuple(children), snapshot_issues=final.issues if final else (), opschema=final.opschema if final else (),
-            form_issues=final.form_issues if final else None)
+            form_issues=final.form_issues if final else None,
+            display_state=final.display_state if final else None)
+
+    @property
+    def results(self):
+        return tuple(adapt_authored_result(authored, execution, self._evaluation_version)
+                     for authored, execution in zip(self.authored_commands, self.executions))
+
+    def enrich_current_display(self, snapshot_id, generation, labels):
+        """Publish a new presentation revision only for the still-current result."""
+        if generation != self._evaluation_version or not self.executions:
+            return None
+        current = self.executions[-1]
+        display = current.display_state
+        if current.status not in EXECUTABLE_STATUSES or display is None or display.snapshot_id != snapshot_id:
+            return None
+        enriched = display.enrich(labels)
+        metadata = enriched.legacy_metadata()
+        identity = (current.schema or {}).get('id')
+        children = tuple(replace(child, display_state=enriched,
+                                 names_schema=metadata.get((child.schema or {}).get('id'), (None, ()))[0])
+                         if child.display_state is display else child for child in current.iterations)
+        self.executions[-1] = replace(current, display_state=enriched, iterations=children,
+                                     names_schema=metadata.get(identity, (None, ()))[0])
+        return enriched
 
     def target_schema(self) -> dict[str, Any] | None:
         if not self.executions or not all(
@@ -365,13 +411,20 @@ class CommandListManager:
             self.workspace.update(result.schema)
             self.workspace.issues[identity] = result.issues
             self.related_schemas.update(self.workspace.latest)
+        display = self.snapshot_builder.capture(self.workspace.state, self.related_schemas,
+            self.database_names, self.workspace.issues,
+            active=self.workspace.key_for(result.schema) if result.schema else None,
+            labels=result.record_labels)
         return replace(result, opschema=tuple(deepcopy(self.workspace.opschema)),
-                       form_issues=deepcopy(self.workspace.issues))
+                       form_issues=deepcopy(self.workspace.issues), display_state=display)
 
     def _snapshot_execution(self, execution):
         issues = self.workspace.issues.get((execution.schema or {}).get('id'), execution.issues)
+        display = execution.display_state or self.snapshot_builder.capture(
+            self.workspace.state, self.related_schemas, self.database_names, self.workspace.issues,
+            active=self.workspace.key_for(execution.schema) if execution.schema else None)
         return replace(execution, opschema=tuple(deepcopy(self.workspace.opschema)),
-                       snapshot_issues=issues, form_issues=deepcopy(self.workspace.issues))
+                       snapshot_issues=issues, form_issues=deepcopy(self.workspace.issues), display_state=display)
 
     async def _apply_connected(self, application, current, variables):
         from .commands.with_form import WithFormCommand
@@ -385,10 +438,10 @@ class CommandListManager:
                     return prepared.execute(current)
                 schema = await self.workspace.switch(prepared.form, self.form_service, current, self.related_schemas)
                 self.related_schemas.update(self.workspace.latest)
-                return ExecutionResult(schema, names_schema=readable_schema(
+                return with_prepared_command(ExecutionResult(schema, names_schema=readable_schema(
                         schema, self.related_schemas, self.database_names),
                     snapshot_issues=self.workspace.issues.get(schema.get('id'), ()),
-                    success_message=f'Active form: {schema.get("label") or schema["id"]}')
+                    success_message=f'Active form: {schema.get("label") or schema["id"]}'), prepared)
         except Exception as exc:
             return ExecutionResult.error(current, str(exc), 'form_switch_failed')
         async def resolve(schema):
@@ -417,12 +470,23 @@ class CommandListManager:
         self.related_schemas = deepcopy(self._base_related)
         self.related_schemas.update(self.workspace.latest)
         self._evaluation_version += 1
+        self.snapshot_builder = DisplaySnapshotBuilder(self._evaluation_version)
+        available = list(self._authored_bindings)
+        bindings, authored = [], []
+        for index, command in enumerate(self.commands):
+            match = next((i for i, (previous, _) in enumerate(available) if previous is command), None)
+            identity = available.pop(match)[1] if match is not None else uuid4().hex
+            bindings.append((command, identity))
+            authored.append(AuthoredCommand(identity, index, type(command).__name__,
+                                            command.to_syntax(), command_parameters_snapshot(command)))
+        self._authored_bindings = bindings
+        self.authored_commands = tuple(authored)
         if self._evaluation_task is not None:
             self._evaluation_task.cancel()
             self._evaluation_task = None
         if self.resolve_schema is not None and self.source_schema is not None and self.commands:
             self.executions = [CommandExecution('resolving' if index == 0 else 'not_executed', None,
-                'Resolving names…' if index == 0 else 'Waiting for the previous command.')
+                'Resolving namesÃ¢â‚¬Â¦' if index == 0 else 'Waiting for the previous command.')
                 for index in range(len(self.commands))]
             self._publish_evaluation()
             self._evaluation_task = asyncio.create_task(self._resolve_commands(
@@ -442,7 +506,7 @@ class CommandListManager:
                 )
                 self.executions.append(CommandExecution('not_executed', None, message))
                 continue
-            self.executions.append(CommandExecution('resolving', None, 'Applying command…'))
+            self.executions.append(CommandExecution('resolving', None, 'Applying commandÃ¢â‚¬Â¦'))
             steps = self._application_steps(index, current_schema, variables)
             try:
                 application = next(steps)
@@ -476,7 +540,7 @@ class CommandListManager:
         for index, command in enumerate(commands):
             if version != self._evaluation_version:
                 return
-            self.executions[index] = CommandExecution('resolving', None, 'Resolving names…')
+            self.executions[index] = CommandExecution('resolving', None, 'Resolving namesÃ¢â‚¬Â¦')
             self._publish_evaluation()
             if isinstance(command, WithFormCommand):
                 for name in assigned:
@@ -553,8 +617,10 @@ class CommandListManager:
                     return scope, None
                 target['slot'] = self.workspace.active_slot
                 self.related_schemas.update(self.workspace.latest)
-                result = ExecutionResult(schema, snapshot_issues=self.workspace.issues.get(schema['id'], ()),
-                                         success_message=f'Active form: {target["name"]}')
+                result = with_prepared_command(ExecutionResult(schema,
+                    snapshot_issues=self.workspace.issues.get(schema['id'], ()),
+                    success_message=f'Active form: {target["name"]}'),
+                    replace(command, form=target['identity'], form_pattern=None))
             except Exception as exc:
                 result = ExecutionResult.error(current, str(exc), 'form_switch_failed')
             if version != self._evaluation_version:
@@ -569,20 +635,24 @@ class CommandListManager:
     @staticmethod
     def _pending_forms(scope):
         return [CommandExecution('not_executed', None, 'Did not execute: an earlier form failed.',
-                                 field_code=target['name']) for target in scope]
+                                 field_code=target['name'],
+                                 target_keys=(ResourceKey.form(target['identity']),)) for target in scope]
 
     def _form_summary(self, children, current):
         if not children:
             return replace(self._snapshot_execution(CommandExecution.from_result(ExecutionResult.warning(
                 current, 'No form names matched. No applications in this scope.', 'no_matches'))), form_iterations=True)
         summary = self._summarize_iterations(children, current)
-        def flatten(items, context=()):
+        def flatten(items, context=(), targets=()):
             for child in items:
                 path = context + (child.application_context or ((child.field_code,) if child.field_code else ()))
+                keys = child.target_keys or targets
+                if not keys and child.schema is not None:
+                    keys = (ResourceKey.form(child.schema['id']),)
                 if child.iterations or child.field_iterations or child.form_iterations:
-                    yield from flatten(child.iterations, path)
+                    yield from flatten(child.iterations, path, keys)
                 else:
-                    yield replace(child, application_context=path)
+                    yield replace(child, application_context=path, target_keys=keys)
         return replace(self._snapshot_execution(summary), form_iterations=True, iterations=tuple(flatten(children)))
 
     async def _run_form_scope(self, index, scope, current, version):

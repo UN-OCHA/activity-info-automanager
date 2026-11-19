@@ -1,10 +1,11 @@
 # Application state and API execution refactor
 
-Status: reviewed design; stage 0 preservation and baseline completed.
-Prepared/revised: 2026-11-19. The user authorized stage 0 only. Architecture code
-changes, later stages and live API writes have not been authorized.
+Status: reviewed design; stages 0 and 1 completed.
+Prepared/revised: 2026-11-19. The user authorized stage 1; stages 2 onward and
+live API writes remain outside the current authorization.
 See [the staged implementation plan](execution-refactor-plan.md).
-See [the stage 0 record and test inventory](execution-refactor-stage0.md).
+See [the stage 0 record and test inventory](execution-refactor-stage0.md) and
+[the stage 1 implementation record](execution-refactor-stage1.md).
 
 ## 1. Objective and boundaries
 
@@ -645,7 +646,7 @@ References:
 
 ## 16. Implementation sequence and acceptance criteria
 
-Stage 0 is complete; stages 1 onward await an explicit implementation instruction. The companion
+Stages 0 and 1 are complete; stages 2 onward await an explicit implementation instruction. The companion
 [staged implementation plan](execution-refactor-plan.md) defines deliverables,
 checks, completion criteria and cutover boundaries:
 
@@ -717,9 +718,9 @@ experiments are authorized by this document.
 ## 17. Instructions for the next chat
 
 Read this document, the staged implementation plan, stage 0 record and HANDOVER.md
-first. The user authorized stage 0, which is complete. Treat this specification as
+first. The user authorized stage 1, which is complete; read its implementation record. Treat this specification as
 the reviewed target and the preserved current code as the reference, subject to the
-intentional behavior changes below. Await instruction for stage 1; use the existing
+intentional behavior changes below. Await instruction for stage 2; use the existing
 refactor worktree rather than recreating branches or resetting the original work.
 
 Preserve current uncommitted ModifyForm/MoveForm work before any branch operation.
@@ -746,5 +747,6 @@ Suggested opening message for the next chat:
 
 > Read HANDOVER.md, docs/execution-refactor-spec.md and docs/execution-refactor-plan.md.
 > The reviewed design accepts the multi-form batching limitation; do not add a general
-> cross-form dependency analyzer. Stage 0 is complete; the current work is preserved
-> and the refactor worktree is ready. Continue with stage 1 only when instructed.
+> cross-form dependency analyzer. Stages 0 and 1 are complete; the current work is
+> preserved and canonical state/immutable snapshots are integrated. Read the stage 1
+> record and continue with stage 2 only when instructed.

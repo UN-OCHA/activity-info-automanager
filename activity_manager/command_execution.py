@@ -1,10 +1,16 @@
 """Shared command/resolver results and ordered console diagnostics."""
 
+from __future__ import annotations
+
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Literal
 
+from .immutable import FrozenMap, command_parameters_snapshot
+
+if TYPE_CHECKING:
+    from .application_results import DisplayState
 from .schema_names import readable_schema, unresolved_formula_references
 
 
@@ -18,6 +24,13 @@ class Diagnostic:
     message: str
     path: tuple | None = None
     code: str | None = None
+
+    def __post_init__(self):
+        if self.path is not None:
+            path = tuple(self.path)
+            if any(type(part) not in (str, int) for part in path):
+                raise TypeError('Diagnostic paths contain only property names and indices.')
+            object.__setattr__(self, 'path', path)
 
     def console_line(self):
         return f'{self.severity.title()}: {self.message}'
@@ -42,6 +55,11 @@ class ExecutionResult:
     opschema: tuple[dict, ...] = ()
     snapshot_issues: tuple[Diagnostic, ...] | None = None
     form_issues: dict | None = None
+    display_state: DisplayState | None = None
+    record_labels: FrozenMap | None = None
+    prepared_syntax: str | None = None
+    prepared_parameters: FrozenMap | None = None
+    target_member_ids: tuple[str, ...] = ()
 
     @property
     def has_errors(self):
@@ -72,6 +90,20 @@ class ExecutionResult:
         return cls(deepcopy(schema), (Diagnostic('warning', message, code=code),))
 
 
+def with_prepared_command(result, command, source_schema=None):
+    concrete = getattr(command, 'command', command)
+    code = getattr(concrete, 'field_code', None)
+    members = ()
+    if isinstance(code, str):
+        for schema in (source_schema, result.schema):
+            members = tuple(field['id'] for field in (schema or {}).get('elements', [])
+                            if field.get('code') == code and field.get('id'))
+            if members:
+                break
+    return replace(result, prepared_syntax=concrete.to_syntax() if hasattr(concrete, 'to_syntax') else None,
+                   prepared_parameters=command_parameters_snapshot(concrete), target_member_ids=members)
+
+
 def transform_command(command, schema, context=None):
     """Catch unexpected failures at the application boundary, never in the UI."""
     try:
@@ -85,7 +117,7 @@ def transform_command(command, schema, context=None):
         result = command.execute(schema, context=context)
         if not isinstance(result, ExecutionResult):
             raise TypeError('Command.execute must return ExecutionResult.')
-        return result
+        return with_prepared_command(result, command, schema)
     except Exception as exc:
         return ExecutionResult.error(schema, f'{type(exc).__name__}: {exc}', 'unexpected_command_error')
 
@@ -97,8 +129,8 @@ def apply_command_locally(command, schema, related_schemas=None, database_names=
         return result
     diagnostics = tuple(Diagnostic('warning', f'Unresolved formula reference {token!r}.', path)
         for path, token, _ in unresolved_formula_references(result.schema, related_schemas))
-    return ExecutionResult(result.schema, result.diagnostics + diagnostics,
-        readable_schema(result.schema, related_schemas, database_names), result.success_message)
+    return replace(result, diagnostics=result.diagnostics + diagnostics,
+                   names_schema=readable_schema(result.schema, related_schemas, database_names))
 
 
 async def apply_command(command, schema, resolver, *, related_schemas=None, database_names=None, variables=None, lookup_variable=None, reserved_identities=None):
@@ -117,8 +149,8 @@ async def apply_command(command, schema, resolver, *, related_schemas=None, data
         try:
             result = (await prepared.execute_lookup(schema, context, lookup_variable)
                       if prepared.method == 'lookup' else prepared.execute(schema, context=context))
-            return ExecutionResult(result.schema, result.diagnostics,
-                readable_schema(result.schema, related_schemas, database_names), result.success_message)
+            return with_prepared_command(replace(result,
+                names_schema=readable_schema(result.schema, related_schemas, database_names)), prepared)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -130,8 +162,9 @@ async def apply_command(command, schema, resolver, *, related_schemas=None, data
         resolved = await resolver(result.schema)
         if not isinstance(resolved, ExecutionResult):
             raise TypeError('The name resolver must return ExecutionResult.')
-        return ExecutionResult(resolved.schema, result.diagnostics + resolved.diagnostics,
-                               resolved.names_schema, result.success_message)
+        return replace(resolved, diagnostics=result.diagnostics + resolved.diagnostics,
+                       success_message=result.success_message, prepared_syntax=result.prepared_syntax,
+                       prepared_parameters=result.prepared_parameters, target_member_ids=result.target_member_ids)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

@@ -2,9 +2,9 @@
 
 Prepared: 2026-11-19. Implements the contracts in
 [execution-refactor-spec.md](execution-refactor-spec.md). The user subsequently
-authorized stage 0, now completed; see the [stage 0 record](execution-refactor-stage0.md).
-Stages 1 onward, dependency installation and live API writes remain outside the
-current authorization. No architecture code has changed.
+authorized stages 0 and 1, now completed; see the [stage 0 record](execution-refactor-stage0.md)
+and [stage 1 record](execution-refactor-stage1.md). Stages 2 onward, dependency
+installation and live API writes remain outside the current authorization.
 
 ## Scope and agreed tradeoffs
 
@@ -89,6 +89,11 @@ Completion: the current implementation is recoverable, the base is reproducible,
 and the behavior-change/test inventory is recorded. No architecture code yet.
 
 ## Stage 1 - Canonical state and immutable results
+
+Completed 2026-11-19. Canonical resource state and immutable result/display contracts
+are integrated with the existing workspace and UI. Full suite: 373 passing tests
+(356 baseline + 17 new behavioral tests). See the [implementation record](execution-refactor-stage1.md).
+The Applier extraction and atomic error publication remain stage 2.
 
 Deliverables:
 

@@ -1,6 +1,8 @@
 """Asynchronous preview resolution, retaining all failures in a reviewable schema."""
 
 from copy import deepcopy
+
+from .immutable import freeze
 import json
 import asyncio
 
@@ -152,4 +154,4 @@ async def _resolve_command_schema(service, result, related, database_names, refe
                 label_cache[(form_id, identity.removeprefix(f'{form_id}:'), label_field)] = str(label)
     labels = await load_default_record_labels(service, result, related, label_cache)
     names = readable_schema(result, related, database_names, record_labels=labels)
-    return ExecutionResult(result, tuple(issues), names)
+    return ExecutionResult(result, tuple(issues), names, record_labels=freeze(labels))

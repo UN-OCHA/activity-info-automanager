@@ -11,6 +11,7 @@ from .api import DEFAULT_BASE_URL, ActivityInfoService
 from .command_creator import CommandCreatorRenderer, field_codes_from_schema
 from .schema_names import readable_schema, load_default_record_labels, unresolved_formula_references
 from .command_execution import Diagnostic
+from .immutable import thaw
 from .schema_display import underline_substitutions
 from .schema_resolution import resolve_command_schema
 from .command_list import CommandExecution, CommandListManager
@@ -187,6 +188,8 @@ def connection_page():
     result_forms = {}
     result_metadata = {}
     result_context = {}
+    result_database_names = {}
+    result_historical = False
     displayed_result = None
     displayed_names = None
     record_cache = {}
@@ -222,33 +225,43 @@ def connection_page():
             show_result(data, names=names, issues=issues)
 
     def show_results(snapshots, active=None, execution=None, empty_message='No result', related=None):
-        nonlocal result_forms, result_metadata, result_context
-        result_forms = {data.get('id', '__initial__'): data for data in snapshots}
-        result_context = {**{identity: data for identity, data in command_list.related_schemas.items()
-                              if identity not in command_list.workspace.originals},
-                          **command_list._base_related, **(related or {}), **result_forms}
-        result_metadata = {}
-        if execution is not None:
-            # Preserve warnings/record labels from the last reached command for
-            # each tab, without borrowing annotations from a later command.
-            for parent in command_list.executions:
-                for saved in (*parent.iterations, parent):
-                    if saved.schema is not None and saved.opschema and len(saved.opschema) <= len(snapshots):
-                        identity = saved.schema.get('id', '__initial__')
-                        if result_forms.get(identity) == saved.schema:
-                            result_metadata[identity] = (saved.names_schema, saved.issues)
-                if parent is execution or execution in parent.iterations:
-                    break
-        if execution is not None and execution.schema is not None:
-            result_metadata[execution.schema.get('id', '__initial__')] = (execution.names_schema, execution.issues)
-        if execution is not None and execution.form_issues is not None:
-            for identity in result_forms:
-                names, _ = result_metadata.get(identity, (None, ()))
-                result_metadata[identity] = (names, execution.form_issues.get(identity, ()))
+        nonlocal result_forms, result_metadata, result_context, result_database_names, result_historical
+        snapshot = execution.display_state if execution is not None else None
+        result_historical = execution is not None
+        if snapshot is not None:
+            active = snapshot.preferred_key.identity if snapshot.preferred_key is not None else None
+            result_forms = snapshot.legacy_forms()
+            result_metadata = snapshot.legacy_metadata()
+            result_context = thaw(snapshot.related_schemas)
+            result_database_names = thaw(snapshot.database_names)
+        else:
+            result_database_names = deepcopy(command_list.database_names)
+            result_forms = {data.get('id', '__initial__'): data for data in snapshots}
+            result_context = {**{identity: data for identity, data in command_list.related_schemas.items()
+                                  if identity not in command_list.workspace.originals},
+                              **command_list._base_related, **(related or {}), **result_forms}
+            result_metadata = {}
+            if execution is not None:
+                # Preserve warnings/record labels from the last reached command for
+                # each tab, without borrowing annotations from a later command.
+                for parent in command_list.executions:
+                    for saved in (*parent.iterations, parent):
+                        if saved.schema is not None and saved.opschema and len(saved.opschema) <= len(snapshots):
+                            identity = saved.schema.get('id', '__initial__')
+                            if result_forms.get(identity) == saved.schema:
+                                result_metadata[identity] = (saved.names_schema, saved.issues)
+                    if parent is execution or execution in parent.iterations:
+                        break
+            if execution is not None and execution.schema is not None:
+                result_metadata[execution.schema.get('id', '__initial__')] = (execution.names_schema, execution.issues)
+            if execution is not None and execution.form_issues is not None:
+                for identity in result_forms:
+                    names, _ = result_metadata.get(identity, (None, ()))
+                    result_metadata[identity] = (names, execution.form_issues.get(identity, ()))
         result_tabs.clear()
         with result_tabs:
             for identity, data in result_forms.items():
-                ui.tab(identity, label=data.get('label') or identity)
+                ui.tab(identity, label=data.get('label') or data.get('id') or 'Initial form')
         result_tabs.set_visibility(bool(result_forms))
         identity = active if active in result_forms else next(iter(result_forms), None)
         result_tabs.set_value(identity)
@@ -273,10 +286,10 @@ def connection_page():
         result_request += 1
         displayed_result = data
         displayed_names = names if names is not None else (
-            readable_schema(data, result_context, command_list.database_names)
+            readable_schema(data, result_context, result_database_names)
             if data is not None else None)
         render_result(empty_message)
-        if names is None and data is not None and service is not None and any(
+        if not result_historical and names is None and data is not None and service is not None and any(
             field.get('type') in ('reference', 'multiselectreference') and field.get('defaultValue')
             for field in data.get('elements', [])
         ):
@@ -287,20 +300,13 @@ def connection_page():
         # A cache belongs to one selected form/connection; stale reads cannot
         # update its successor, even when both reference the same record ID.
         cache = record_cache
-        labels = await load_default_record_labels(
-            current_service, data, result_context, cache)
-        if request != result_request or source_request != schema_request or service is not current_service:
+        related, databases = deepcopy(result_context), deepcopy(result_database_names)
+        generation = command_list._evaluation_version
+        labels = await load_default_record_labels(current_service, data, related, cache)
+        if (request != result_request or source_request != schema_request or service is not current_service
+                or generation != command_list._evaluation_version or result_historical):
             return
-        displayed_names = readable_schema(data, result_context,
-                                         command_list.database_names, record_labels=labels)
-        for index, execution in enumerate(command_list.executions):
-            if execution.schema is data:
-                command_list.executions[index] = replace(execution, names_schema=displayed_names)
-                execution = command_list.executions[index]
-            children = tuple(replace(child, names_schema=displayed_names) if child.schema is data else child
-                             for child in execution.iterations)
-            if children != execution.iterations:
-                command_list.executions[index] = replace(execution, iterations=children)
+        displayed_names = readable_schema(data, related, databases, record_labels=labels)
         render_result()
 
     def render_result(empty_message='No result'):
@@ -482,7 +488,7 @@ def connection_page():
             return
         selected_form_id = forms.value
         selected_service = service
-        schema_status.set_text('Loading schema…')
+        schema_status.set_text('Loading schemaÃ¢â‚¬Â¦')
         try:
             related = await selected_service.get_form_tree(selected_form_id)
             data = related.get(selected_form_id)
@@ -520,7 +526,7 @@ def connection_page():
         request = form_request
         if not databases.value or not service:
             return
-        form_status.set_text('Loading forms…')
+        form_status.set_text('Loading formsÃ¢â‚¬Â¦')
         try:
             options = await service.get_forms(databases.value)
             if request == form_request:
@@ -548,7 +554,7 @@ def connection_page():
         clear_databases()
         for control in (base_url, token, button):
             control.disable()
-        status.set_text('Loading databases…')
+        status.set_text('Loading databasesÃ¢â‚¬Â¦')
         try:
             await close_service()
             service = ActivityInfoService(base_url.value, token.value)
