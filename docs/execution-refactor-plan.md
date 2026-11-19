@@ -2,8 +2,9 @@
 
 Prepared: 2026-11-19. Implements the contracts in
 [execution-refactor-spec.md](execution-refactor-spec.md). The user subsequently
-authorized stages 0 and 1, now completed; see the [stage 0 record](execution-refactor-stage0.md)
-and [stage 1 record](execution-refactor-stage1.md). Stages 2 onward, dependency
+authorized stages 0-2, now completed; see the [stage 0 record](execution-refactor-stage0.md),
+[stage 1 record](execution-refactor-stage1.md) and [stage 2 record](execution-refactor-stage2.md).
+Stages 3 onward, dependency
 installation and live API writes remain outside the current authorization.
 
 ## Scope and agreed tradeoffs
@@ -114,6 +115,12 @@ Completion: state/result contracts can serve the existing UI without relying on
 mutable action payloads or reconstructing canonical state from displayed JSON.
 
 ## Stage 2 - Extract the Applier and atomic staging
+
+Completed 2026-11-19. Applier now owns local/connected evaluation, expansion and
+atomic publication of state, context, variables, identities, snapshots and effects.
+Rejected candidates are separate immutable attachments with a labelled UI inspector.
+Full suite: 386 passing tests (373 stage-1 + 13 new tests). See the
+[implementation record](execution-refactor-stage2.md). API plan compilation remains stage 3.
 
 Deliverables:
 

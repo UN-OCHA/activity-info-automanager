@@ -162,6 +162,10 @@ class ApplicationState:
         self._affected = []
         self.active_database_id = None
         self.active_form_key = None
+        self.variables = FrozenMap()
+        self.scoped_variables = FrozenMap()
+        self.active_scope = ()
+        self.reserved_identities = FrozenMap()
 
     @property
     def resources(self):

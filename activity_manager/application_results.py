@@ -43,9 +43,11 @@ class ActualCommand:
 class DiagnosticAttachment:
     candidate: FrozenMap
     diagnostics: tuple = ()
+    names_schema: FrozenMap | None = None
 
     def __post_init__(self):
         object.__setattr__(self, 'candidate', freeze(self.candidate))
+        object.__setattr__(self, 'names_schema', freeze(self.names_schema))
         object.__setattr__(self, 'diagnostics', tuple(self.diagnostics))
 
 
@@ -194,6 +196,7 @@ def adapt_authored_result(authored, execution, generation):
         command = ActualCommand(f'{generation}:{authored.authored_id}:{position}', authored.authored_id,
             authored.order, position, leaf.prepared_parameters, leaf.prepared_syntax, targets, context, members)
         applications.append(ApplicationResult(command, leaf.status, leaf.message,
-            leaf.display_state if leaf.status != 'not_executed' else None, leaf.diagnostics))
+            leaf.display_state if leaf.status != 'not_executed' else None, leaf.diagnostics,
+            effect_ids=leaf.effect_ids, rejected_candidate=leaf.rejected_candidate))
     return AuthoredCommandResult(authored, tuple(applications), execution.status,
                                  execution.message, execution.display_state, execution.diagnostics)

@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Any
 
 from .immutable import FrozenMap, command_parameters_snapshot
 
 if TYPE_CHECKING:
-    from .application_results import DisplayState
+    from .application_results import DisplayState, DiagnosticAttachment
+    from .command_iteration import IterationTarget
 from .schema_names import readable_schema, unresolved_formula_references
 
 
@@ -60,6 +61,8 @@ class ExecutionResult:
     prepared_syntax: str | None = None
     prepared_parameters: FrozenMap | None = None
     target_member_ids: tuple[str, ...] = ()
+    rejected_candidate: DiagnosticAttachment | None = None
+    effect_ids: tuple[str, ...] = ()
 
     @property
     def has_errors(self):
@@ -88,6 +91,50 @@ class ExecutionResult:
     @classmethod
     def warning(cls, schema, message, code=None):
         return cls(deepcopy(schema), (Diagnostic('warning', message, code=code),))
+
+
+@dataclass(frozen=True)
+class CommandExecution:
+    status: ExecutionStatus
+    schema: dict[str, Any] | None
+    message: str
+    names_schema: dict[str, Any] | None = None
+    diagnostics: tuple[Diagnostic, ...] = ()
+    iterations: tuple['CommandExecution', ...] = ()
+    field_code: str | None = None
+    concrete_command: Any = None
+    snapshot_issues: tuple[Diagnostic, ...] | None = None
+    target: IterationTarget | None = None
+    opschema: tuple[dict, ...] = ()
+    form_issues: dict | None = None
+    form_iterations: bool = False
+    field_iterations: bool = False
+    application_context: tuple[str, ...] = ()
+    display_state: DisplayState | None = None
+    prepared_syntax: str | None = None
+    prepared_parameters: FrozenMap | None = None
+    target_keys: tuple[ResourceKey, ...] = ()
+    target_member_ids: tuple[str, ...] = ()
+    rejected_candidate: DiagnosticAttachment | None = None
+    effect_ids: tuple[str, ...] = ()
+
+    @property
+    def application_label(self):
+        return ' / '.join(self.application_context) or self.field_code or ''
+
+    @property
+    def issues(self):
+        if self.snapshot_issues is not None:
+            return self.snapshot_issues
+        return tuple(item for item in self.diagnostics if item.path is not None)
+
+    @classmethod
+    def from_result(cls, result):
+        return cls(result.status, result.schema, result.message, result.names_schema, result.diagnostics,
+                   opschema=result.opschema, snapshot_issues=result.snapshot_issues, form_issues=result.form_issues,
+                   display_state=result.display_state, prepared_syntax=result.prepared_syntax,
+                   prepared_parameters=result.prepared_parameters, target_member_ids=result.target_member_ids, rejected_candidate=result.rejected_candidate,
+                   effect_ids=result.effect_ids)
 
 
 def with_prepared_command(result, command, source_schema=None):

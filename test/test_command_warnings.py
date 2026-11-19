@@ -96,7 +96,11 @@ class CommandWarningTests(unittest.IsolatedAsyncioTestCase):
             await manager._evaluation_task
             execution = manager.executions[0]
             self.assertEqual(execution.status, 'error')
-            self.assertEqual({issue.severity for issue in execution.issues}, {'error', 'warning'})
+            # Stage 2: rejected-candidate paths never annotate the successful state.
+            self.assertEqual(execution.issues, ())
+            self.assertEqual({issue.severity for issue in execution.rejected_candidate.diagnostics},
+                             {'error', 'warning'})
+            self.assertEqual(execution.schema, schema())
             self.assertIn('Missing option', execution.message)
             self.assertIn('UNKNOWN', execution.message)
             self.assertFalse(manager.execute_button.enabled)

@@ -335,6 +335,16 @@ def connection_page():
         selected_index: int | None,
         execution: CommandExecution | None,
     ) -> None:
+        rejected_view.set_visibility(False)
+        rejected_code.set_content('')
+        if execution is not None and execution.rejected_candidate is not None:
+            attachment = execution.rejected_candidate
+            candidate = thaw(attachment.candidate)
+            paths = tuple(item.path for item in attachment.diagnostics if item.path is not None)
+            rejected_code.markdown._sanitize = lambda html: underline_substitutions(html, candidate, paths, underline=False)
+            rejected_code.set_content(json.dumps(candidate, indent=2, ensure_ascii=False))
+            rejected_code.markdown._handle_content_change(rejected_code._render_markdown())
+            rejected_view.set_visibility(True)
         active = command_list.workspace.active_schema if command_list.workspace.opschema else source_schema
         command_creator.set_schema(active)
         if active:
@@ -626,6 +636,10 @@ def connection_page():
                     schema = ui.code('', language='json').classes('result-code')
                     schema.props['aria-label'] = 'Form schema'
                     schema.set_visibility(False)
+            with ui.expansion('Rejected candidate (not applied)').classes('w-full') as rejected_view:
+                rejected_code = ui.code('', language='json').classes('w-full max-h-72 overflow-auto')
+                rejected_code.props['aria-label'] = 'Rejected candidate'
+            rejected_view.set_visibility(False)
 
         with ui.card().classes('workbench-panel command-list-panel w-full no-shadow flex flex-col'):
             ui.label('Command List').classes('text-lg font-medium')

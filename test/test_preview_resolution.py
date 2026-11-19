@@ -175,14 +175,20 @@ class PreviewResolutionTests(unittest.IsolatedAsyncioTestCase):
             await manager._evaluation_task
             first = manager.executions[0]
             self.assertEqual(first.status, 'error')
-            self.assertEqual(len(first.issues), 4)
+            # Stage 2: candidate paths annotate the rejected draft, never the published schema.
+            self.assertEqual(first.issues, ())
+            self.assertEqual(len(first.rejected_candidate.diagnostics), 4)
+            self.assertEqual(first.schema, source)
+            self.assertEqual(manager.workspace.active_schema, source)
             self.assertEqual(manager.executions[1].status, 'not_executed')
             self.assertIsNone(manager.target_schema())
             for name in ('Missing A', 'Missing B', 'Absent A', 'Absent B'):
                 self.assertIn(name, first.message)
-            for data in (first.schema, first.names_schema):
+            from activity_manager.immutable import thaw
+            for data in (thaw(first.rejected_candidate.candidate), thaw(first.rejected_candidate.names_schema)):
                 highlighted = prepare_content('```json\n' + json.dumps(data, indent=2) + '\n```', extras='fenced-code-blocks')
-                html = underline_substitutions(highlighted, data, [issue.path for issue in first.issues])
+                html = underline_substitutions(highlighted, data,
+                    [issue.path for issue in first.rejected_candidate.diagnostics])
                 self.assertIn('<mark>', html)
                 self.assertIn('Missing A', html)
 
