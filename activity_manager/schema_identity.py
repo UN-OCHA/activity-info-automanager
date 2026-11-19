@@ -119,12 +119,13 @@ def prepare_schema_for_put(schema: dict, referenced_schemas: dict | None = None,
             metadata = element.get('metadata')
             if metadata:
                 reserved = {'ADDED_BY': '_addedBy', 'LAST_EDITED_BY': '_lastEditedBy'}.get(metadata)
-                if not reserved or reserved in used:
+                if not reserved or reserved in schema_identities(result) or reserved in replacements.values():
                     raise ValueError('Metadata field ID is invalid or already present.')
                 if element.get('type') != 'reference' or element.get('readOnly') is not True:
                     raise ValueError('Metadata requires a read-only user reference.')
                 used.add(reserved)
                 element['id'] = reserved
+                identity_map[(schema.get('id'), identity)] = reserved
             else:
                 element['id'] = allocate(identity)
             replacements[identity] = element['id']

@@ -20,6 +20,10 @@ from activity_info_api_client.models.query_rows_response_200_item import QueryRo
 
 from .schema_names import schemas_from_tree
 from .schema_identity import prepare_schema_for_write
+from .endpoint_evidence import EndpointFailure, EndpointReceipt, FailureKind, Observation, WriteEvidence
+from .resource_state import (
+    DatabaseResourcesPayload, Existence, FormPayload, LoadStatus, ResourceKey, ResourceState,
+)
 
 DEFAULT_BASE_URL = 'https://www.activityinfo.org/resources'
 
@@ -168,3 +172,70 @@ class ActivityInfoService:
     async def aclose(self) -> None:
         if not self._http_client.is_closed:
             await self._http_client.aclose()
+
+    async def _endpoint_evidence(self, endpoint, model, **kwargs):
+        """Use generated encoding/parsing, retaining the HTTP response before parsing.
+
+        The generated detailed helper parses before returning and loses response
+        evidence on malformed JSON. Keep this small boundary against client 2.0.4.
+        Legacy UI requests continue using _request until the executor cutover.
+        """
+        if self._http_client.is_closed:
+            return None, EndpointFailure(FailureKind.UNAVAILABLE, 'The connection is closed.')
+        try:
+            response = await self._http_client.request(**endpoint._get_kwargs(**kwargs))
+        except httpx.HTTPError as exc:
+            return None, EndpointFailure(FailureKind.UNAVAILABLE, f'{type(exc).__name__}: {exc}')
+        receipt = EndpointReceipt(response.status_code, dict(response.headers), response.text)
+        if response.status_code != 200:
+            kind = (FailureKind.MISSING if response.status_code in (404, 410) else
+                    FailureKind.FORBIDDEN if response.status_code in (401, 403) else
+                    FailureKind.UNAVAILABLE if response.status_code >= 500 else FailureKind.REJECTED)
+            return None, EndpointFailure(kind, f'HTTP {response.status_code}', receipt)
+        try:
+            parsed = endpoint._parse_response(client=self.client, response=response)
+            if not isinstance(parsed, model):
+                raise ValueError('Unexpected response model.')
+            data = parsed.to_dict()
+            version = (data.get('database', {}).get('version') if model is AddUpdateFormResponse else
+                       data.get('schemaVersion') if model is FormSchema else data.get('version'))
+            return EndpointReceipt(response.status_code, dict(response.headers), response.text,
+                                   data, version), None
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            return None, EndpointFailure(FailureKind.INVALID, f'{type(exc).__name__}: {exc}', receipt)
+
+    async def observe_resource(self, key):
+        schema = key.kind.value == 'form_schema'
+        receipt, failure = await self._endpoint_evidence(
+            get_form_schema if schema else get_database_tree, FormSchema if schema else Database,
+            **({'form_id': key.identity} if schema else {'database_id': key.identity}))
+        if failure is not None:
+            existence = Existence.ABSENT if failure.kind == FailureKind.MISSING else Existence.UNKNOWN
+            return Observation(key, existence, receipt=failure.receipt, failure=failure)
+        from .immutable import thaw
+        try:
+            data = thaw(receipt.body)
+            if not schema and data['databaseId'] != key.identity:
+                raise ValueError('Database response identity differs from the requested identity.')
+            resources = data.get('resources', [])
+            if not schema and len({entry['id'] for entry in resources}) != len(resources):
+                raise ValueError('Duplicate database resource identities.')
+            payload = FormPayload(data) if schema else DatabaseResourcesPayload(
+                {entry['id']: entry for entry in resources})
+            state = ResourceState(key, payload, load_status=LoadStatus.LOADED, server_version=receipt.version)
+            return Observation(key, Existence.PRESENT, state, receipt)
+        except (KeyError, TypeError, ValueError) as exc:
+            return Observation(key, Existence.UNKNOWN, receipt=receipt,
+                               failure=EndpointFailure(FailureKind.INVALID, str(exc), receipt))
+
+    async def write_schema_evidence(self, form_id, schema):
+        """Write an already reviewed schema; no resolution or ID allocation here."""
+        try:
+            body = FormSchema.from_dict(schema)
+            if body.id != form_id:
+                raise ValueError('Request and schema identities disagree.')
+        except (KeyError, TypeError, ValueError) as exc:
+            return WriteEvidence(failure=EndpointFailure(FailureKind.INVALID, str(exc)))
+        receipt, failure = await self._endpoint_evidence(
+            update_form_schema, AddUpdateFormResponse, form_id=form_id, body=body)
+        return WriteEvidence(receipt if failure is None else failure.receipt, failure)
