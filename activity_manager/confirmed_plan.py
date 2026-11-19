@@ -153,6 +153,7 @@ class ConfirmationAttempt:
         self._plan = materialize_plan(candidate, binding, **context)
         self._valid = True
         self._confirmed = False
+        self._started = False
 
     @property
     def plan(self):
@@ -181,3 +182,10 @@ class ConfirmationAttempt:
         if not self._confirmed:
             raise PlanError('Execution requires confirmation of the materialized plan.')
         return self.plan
+
+    def begin_execution(self, binding, candidate):
+        plan = self.require_confirmed(binding, candidate)
+        if self._started:
+            raise PlanError('This execution attempt has already started.')
+        self._started = True
+        return plan

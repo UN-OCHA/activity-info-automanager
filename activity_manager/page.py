@@ -17,7 +17,9 @@ from .schema_resolution import resolve_command_schema
 from .command_list import CommandExecution, CommandListManager
 from .commands import COMMAND_CREATORS
 from .listbox import DatabaseListbox
-from .schema_change import apply_schema_sequence
+from .confirmed_plan import AttemptBinding, ConfirmationAttempt
+from .executor import Executor
+from .application_results import DisplayResource, DisplayState
 
 
 def connection_page():
@@ -185,6 +187,7 @@ def connection_page():
     report_schemas = None
     report_version = None
     report_context = {}
+    report_display = None
     result_forms = {}
     result_metadata = {}
     result_context = {}
@@ -224,10 +227,10 @@ def connection_page():
             names, issues = result_metadata.get(identity, (None, ()))
             show_result(data, names=names, issues=issues)
 
-    def show_results(snapshots, active=None, execution=None, empty_message='No result', related=None):
+    def show_results(snapshots, active=None, execution=None, empty_message='No result', related=None, snapshot=None):
         nonlocal result_forms, result_metadata, result_context, result_database_names, result_historical
-        snapshot = execution.display_state if execution is not None else None
-        result_historical = execution is not None
+        snapshot = snapshot or (execution.display_state if execution is not None else None)
+        result_historical = execution is not None or snapshot is not None
         if snapshot is not None:
             active = snapshot.preferred_key.identity if snapshot.preferred_key is not None else None
             result_forms = snapshot.legacy_forms()
@@ -363,7 +366,8 @@ def connection_page():
             # per-command messages belong to executions until a command is selected.
             snapshots = report_schemas if report_version == command_list._evaluation_version else ([source_schema] if source_schema else [])
             show_results(snapshots or [], empty_message='Select a form to load its schema.',
-                         related=report_context if report_version == command_list._evaluation_version else None)
+                         related=report_context if report_version == command_list._evaluation_version else None,
+                         snapshot=report_display if report_version == command_list._evaluation_version else None)
             return
         if execution is None:
             console_message.set_text('Did not execute.')
@@ -378,7 +382,7 @@ def connection_page():
             ui.label('Form schema application did not fully succeed.').classes(
                 'text-lg font-medium text-red-700'
             )
-            ui.label('Execution has stopped. Leave changes in place, restore only the last update, or restore all updates in reverse order.')
+            ui.label('Execution has stopped. Restore the last update with a known or possible change, or restore all updates in reverse order. Unchanged attempts are skipped. Unknown outcomes require reconciliation; divergent or concurrent changes block automatic recovery.')
             ui.label('Differences from the expected schema:')
             ui.label(diff_summary).classes(
                 'w-full max-h-80 overflow-y-auto whitespace-pre-wrap break-all '
@@ -392,6 +396,14 @@ def connection_page():
                 ui.button('Roll back all updates', on_click=lambda: dialog.submit('rollback_all')).props('color=negative')
         return await dialog
 
+    def execution_context():
+        return (AttemptBinding(str(command_list._evaluation_version),
+            {'schema': source_schema, 'form': forms.value, 'database': databases.value,
+             'source_request': schema_request, 'view': command_list.current_view,
+             'draft': command_list.advanced_draft,
+             'commands': tuple(command.to_syntax() for command in command_list.commands)}, str(id(service))),
+            command_list.candidate_plan)
+
     def open_execute_confirmation():
         nonlocal pending_execution
         target_schema = command_list.target_schema()
@@ -402,21 +414,41 @@ def connection_page():
             or not forms.value
         ):
             return
-        pending_execution = {
-            'service': service,
-            'form_id': forms.value,
-            'opschema': command_list.target_opschema(),
-            'originals': deepcopy(command_list.workspace.originals),
-            'related_schemas': deepcopy(command_list.related_schemas),
-        }
-        confirmation_message.set_text(
-            'This will apply schema updates in this order: ' + ' -> '.join(
-                data.get('label') or data['id'] for data in pending_execution['opschema']) + '.'
-        )
+        cancel_execute_confirmation()
+        try:
+            binding, candidate = execution_context()
+            attempt = ConfirmationAttempt(candidate, binding,
+                related_schemas=command_list.related_schemas, reference_defaults=command_list.reference_defaults)
+        except (ValueError, TypeError, KeyError) as exc:
+            console_message.set_text(f'Could not prepare execution: {exc}')
+            return
+        pending_execution = {'service': service, 'form_id': forms.value, 'attempt': attempt,
+                             'source_schema': deepcopy(source_schema),
+                             'database_names': deepcopy(command_list.database_names),
+                             'record_labels': {key: value for result in command_list.results if result.display_state
+                                               for key, value in result.display_state.record_labels.items()}}
+        applications = {item.command.application_id: item.command for result in command_list.results
+                        for item in result.applications}
+        lines = ['Apply these updates in order:']
+        for index, reviewed in enumerate(attempt.plan.actions, 1):
+            action = reviewed.action
+            label = action.after.payload.schema.get('label') or action.key.identity
+            contributors = sorted({applications[identity].authored_index + 1 for identity in action.application_ids
+                                   if identity in applications})
+            detail = f'; delete field {action.deleted_member_id}' if action.deleted_member_id else ''
+            lines.append(f'{index}. {label} ({action.key.identity}){detail}; commands {contributors}')
+            if reviewed.recovery_limit == 'schema_only_data_unverified':
+                lines.append('Schema-only compensation; record-data restoration is unverified.')
+        if not attempt.plan.actions:
+            lines.append('No updates required.')
+        confirmation_message.set_text('\n'.join(lines))
+        confirmation_payload.set_content(json.dumps([thaw(item.request.schema) for item in attempt.plan.actions], indent=2))
         confirmation_dialog.open()
 
     def cancel_execute_confirmation():
         nonlocal pending_execution
+        if pending_execution is not None:
+            pending_execution['attempt'].cancel()
         pending_execution = None
         confirmation_dialog.close()
 
@@ -438,38 +470,55 @@ def connection_page():
         command_creator.set_enabled(not editing and not command_list.busy)
 
     async def execute_confirmed():
-        nonlocal pending_execution, source_schema, report_schemas, report_version, report_context, record_cache
+        nonlocal pending_execution, source_schema, report_schemas, report_version, report_context, record_cache, report_display
         confirmation_dialog.close()
         execution = pending_execution
+        pending_execution = None
         if execution is None:
             return
         set_write_busy(True)
         outcome = None
         unexpected_message = None
         try:
-            outcome = await apply_schema_sequence(
-                execution['service'], execution['originals'], execution['opschema'], choose_recovery,
-                related_schemas=execution['related_schemas'],
-            )
+            binding, candidate = execution_context()
+            attempt = execution['attempt']
+            attempt.confirm(attempt.plan.attempt_id, binding, candidate)
+            executor = Executor(execution['service'])
+            command_list.execution_executor = executor
+            outcome = await executor.execute(
+                attempt, binding, candidate, choose_recovery, current_context=execution_context)
+            command_list.execution_report = outcome
             # All cached reads belong to the pre-execution state.
             record_cache = {}
             command_list.resolution_cache = {}
             command_list.reference_defaults = {}
             command_list.related_schemas = {}
-            refreshed = outcome.actual_schemas.get(execution['form_id'])
+            observed_ids = {item.key.identity for item in outcome.observations}
+            refreshed = (outcome.actual_schemas.get(execution['form_id']) if execution['form_id'] in observed_ids
+                         else execution['source_schema'])
             source_schema = deepcopy(refreshed) if refreshed is not None else None
             command_creator.set_schema(source_schema)
             command_list.set_schema(source_schema)
-            report_context = {**execution['related_schemas'], **execution['originals'], **outcome.actual_schemas}
+            report_context = {identity: data for identity, data in thaw(outcome.plan.related_schemas).items()
+                              if identity not in observed_ids}
+            report_context.update(outcome.actual_schemas)
             report_schemas = list(outcome.actual_schemas.values())
+            report_display = DisplayState(tuple(DisplayResource(item.state, readable_schema(
+                item.state.payload.to_dict(), report_context, execution['database_names'],
+                record_labels=execution['record_labels'])) for item in outcome.observations if item.state is not None),
+                report_context, execution['database_names'], execution['record_labels'])
             report_version = command_list._evaluation_version
         except Exception as exc:
             unexpected_message = f'Unexpected schema change error: {exc}'
         finally:
+            record_cache = {}
+            command_list.resolution_cache = {}
+            command_list.reference_defaults = {}
+            command_list.related_schemas = {}
             command_list.clear_selection()
             if outcome is not None:
                 console_message.set_text('\n'.join(outcome.messages))
-                show_results(list(outcome.actual_schemas.values()), related=report_context)
+                show_results(list(outcome.actual_schemas.values()), related=report_context, snapshot=report_display)
             elif unexpected_message is not None:
                 console_message.set_text(unexpected_message)
                 show_result(None)
@@ -479,6 +528,7 @@ def connection_page():
     def clear_schema():
         nonlocal schema_request, source_schema, record_cache
         record_cache = {}
+        cancel_execute_confirmation()
         schema_request += 1
         source_schema = None
         command_creator.set_schema(None)
@@ -664,7 +714,8 @@ def connection_page():
 
     with ui.dialog() as confirmation_dialog, ui.card().classes('w-full max-w-lg'):
         confirmation_dialog.props('persistent')
-        confirmation_message = ui.label().classes('text-base')
+        confirmation_message = ui.label().classes('text-base whitespace-pre-wrap')
+        confirmation_payload = ui.code('', language='json').classes('w-full max-h-80 overflow-auto')
         with ui.row().classes('w-full justify-end gap-2'):
             ui.button('Cancel', on_click=cancel_execute_confirmation).props('flat')
             ui.button('OK', on_click=execute_confirmed).props('color=primary')

@@ -2,10 +2,11 @@
 
 Prepared: 2026-11-19. Implements the contracts in
 [execution-refactor-spec.md](execution-refactor-spec.md). The user subsequently
-authorized stages 0-4, now completed; see the [stage 0 record](execution-refactor-stage0.md),
+authorized stages 0-5, now completed; see the [stage 0 record](execution-refactor-stage0.md),
 [stage 1 record](execution-refactor-stage1.md), [stage 2 record](execution-refactor-stage2.md)
-and [stage 3 record](execution-refactor-stage3.md), plus [stage 4](execution-refactor-stage4.md).
-Stages 5 onward, dependency
+and [stage 3 record](execution-refactor-stage3.md), plus [stage 4](execution-refactor-stage4.md)
+and [stage 5](execution-refactor-stage5.md).
+Stages 6 onward, dependency
 installation and live API writes remain outside the current authorization.
 
 ## Scope and agreed tradeoffs

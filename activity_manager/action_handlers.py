@@ -24,6 +24,7 @@ class ActionHandler(Protocol):
     def compare(self, expected: ResourceState, observed: Observation) -> SchemaComparison: ...
     def encode_write(self, action: ApiAction) -> SchemaRequest: ...
     async def write(self, request: SchemaRequest) -> WriteEvidence: ...
+    def recovery_request(self, action: ApiAction, preimage: ResourceState) -> SchemaRequest: ...
 
 
 class SchemaHandler:
@@ -55,6 +56,9 @@ class SchemaHandler:
 
     async def write(self, request):
         return await self.service.write_schema_evidence(request.form_id, thaw(request.schema))
+
+    def recovery_request(self, action, preimage):
+        return SchemaRequest(preimage.key.identity, preimage.payload.to_dict())
 
 
 class PersistedFieldDeleteHandler(SchemaHandler):
