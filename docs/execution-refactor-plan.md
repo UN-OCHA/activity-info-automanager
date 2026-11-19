@@ -2,9 +2,10 @@
 
 Prepared: 2026-11-19. Implements the contracts in
 [execution-refactor-spec.md](execution-refactor-spec.md). The user subsequently
-authorized stages 0-2, now completed; see the [stage 0 record](execution-refactor-stage0.md),
-[stage 1 record](execution-refactor-stage1.md) and [stage 2 record](execution-refactor-stage2.md).
-Stages 3 onward, dependency
+authorized stages 0-3, now completed; see the [stage 0 record](execution-refactor-stage0.md),
+[stage 1 record](execution-refactor-stage1.md), [stage 2 record](execution-refactor-stage2.md)
+and [stage 3 record](execution-refactor-stage3.md).
+Stages 4 onward, dependency
 installation and live API writes remain outside the current authorization.
 
 ## Scope and agreed tradeoffs
@@ -141,6 +142,12 @@ Completion: application is callable without UI orchestration, and current parser
 field-edit, variable and iteration behavior passes except documented atomicity changes.
 
 ## Stage 3 - PlanBuilder, grouping and deletion boundaries
+
+Completed 2026-11-19. Atomic candidate planning now includes typed effects/actions,
+explicit groups, creator/action-start provenance, same-action elimination and isolated
+persisted field deletion actions. Full suite: 408 passing tests (386 stage-2 + 22 new
+planning tests). See the [implementation record](execution-refactor-stage3.md).
+The runtime executor remains unchanged until its later complete safety-path cutover.
 
 Deliverables:
 

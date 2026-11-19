@@ -172,7 +172,7 @@ class DisplaySnapshotBuilder:
         return DisplayState(tuple(resources), context, databases, self._labels, preferred, self.generation)
 
 
-def adapt_authored_result(authored, execution, generation):
+def adapt_authored_result(authored, execution, generation, *, plan=None):
     """Keep legacy cards while publishing separate authored and actual results."""
     if execution.iterations:
         leaves = execution.iterations
@@ -197,6 +197,7 @@ def adapt_authored_result(authored, execution, generation):
             authored.order, position, leaf.prepared_parameters, leaf.prepared_syntax, targets, context, members)
         applications.append(ApplicationResult(command, leaf.status, leaf.message,
             leaf.display_state if leaf.status != 'not_executed' else None, leaf.diagnostics,
-            effect_ids=leaf.effect_ids, rejected_candidate=leaf.rejected_candidate))
+            effect_ids=leaf.effect_ids, rejected_candidate=leaf.rejected_candidate,
+            action_ids=plan.action_ids_for_effects(leaf.effect_ids) if plan is not None else ()))
     return AuthoredCommandResult(authored, tuple(applications), execution.status,
                                  execution.message, execution.display_state, execution.diagnostics)

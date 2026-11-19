@@ -16,19 +16,11 @@ from .command_execution import (
 from .command_iteration import IterativeCommand, PreparedCommand
 from .immutable import freeze, command_parameters_snapshot
 from .multi_form import FormWorkspace
-from .resource_state import ResourceKey, ResourceState
+from .resource_state import ResourceKey
+from .planning import PlanBuilder, SchemaEffect
 from .schema_names import readable_schema
 
 ACTIVE_DRAFT = ContextVar('activity_manager_application_draft', default=None)
-
-
-@dataclass(frozen=True)
-class SchemaEffect:
-    effect_id: str
-    application_id: str
-    key: ResourceKey
-    before: ResourceState
-    after: ResourceState
 
 
 @dataclass
@@ -42,6 +34,7 @@ class ApplicationDraft:
     snapshot_builder: DisplaySnapshotBuilder
     effects: tuple
     variables: dict
+    plan_builder: PlanBuilder
 
 
 class Applier:
@@ -49,7 +42,7 @@ class Applier:
 
     _CONTEXT_FIELDS = ('workspace', 'related_schemas', 'database_names',
                        'reference_defaults', 'resolution_cache', 'snapshot_builder',
-                       'effects', 'variables')
+                       'effects', 'variables', 'plan_builder')
 
     def __init__(self, source_schema=None, commands=(), *, authored_commands=(),
                  related_schemas=None, database_names=None, reference_defaults=None,
@@ -70,6 +63,8 @@ class Applier:
         self._resolution_cache = deepcopy(resolution_cache or {})
         self._snapshot_builder = DisplaySnapshotBuilder(generation)
         self._effects = ()
+        self._plan_builder = PlanBuilder(active_form=self._workspace.state.active_form_key)
+        self._plan_builder.observe(self._workspace.state.baselines.entries.values())
         self._variables = {}
         self.scope = None
         self.assigned = set()
@@ -112,7 +107,8 @@ class Applier:
         draft = ApplicationDraft(
             self.owner, deepcopy(self.workspace), deepcopy(self.related_schemas),
             deepcopy(self.database_names), deepcopy(self.reference_defaults),
-            self.resolution_cache, deepcopy(self.snapshot_builder), self.effects, deepcopy(variables))
+            self.resolution_cache, deepcopy(self.snapshot_builder), self.effects, deepcopy(variables),
+            deepcopy(self.plan_builder))
         if slot is not None:
             draft.workspace.active_slot = slot
         return draft
@@ -173,6 +169,8 @@ class Applier:
         if result.has_errors:
             return self._failed_result(result, current)
         freeze(self.variables)
+        self.plan_builder.observe(self.workspace.state.baselines.entries.values())
+        self.plan_builder.record_application(self._attempt_id)
         return self._save_result(result)
 
     def _apply_local(self, application, current, variables):
@@ -194,14 +192,16 @@ class Applier:
             ACTIVE_DRAFT.reset(token)
         return self._commit(draft, result, current, variables, None)
 
-    async def _apply_actual(self, application, current, variables, *, slot=None, visit=False, on_success=None):
+    async def _apply_actual(self, application, current, variables, *, slot=None, visit=False,
+                            on_success=None, scope_context=None):
         draft = self._new_draft(variables, slot)
         self._attempt_id = self._application_id()
         self._position += 1
         result = None
         token = ACTIVE_DRAFT.set(draft)
         try:
-            result = await self._apply_candidate(application, deepcopy(current), draft.variables, visit=visit)
+            result = await self._apply_candidate(application, deepcopy(current), draft.variables,
+                                                 visit=visit, scope_context=scope_context)
             if not self.is_current():
                 return None
             result = self._stage_result(result, current)
@@ -264,9 +264,16 @@ class Applier:
 
     variables = property(lambda self: self._get('variables'), lambda self, value: self._set('variables', value))
 
+    plan_builder = property(lambda self: self._get('plan_builder'), lambda self, value: self._set('plan_builder', value))
+
+    @property
+    def candidate_plan(self):
+        return self.plan_builder.snapshot()
+
     @property
     def results(self):
-        return tuple(adapt_authored_result(authored, execution, self._evaluation_version)
+        plan = self.candidate_plan
+        return tuple(adapt_authored_result(authored, execution, self._evaluation_version, plan=plan)
                      for authored, execution in zip(self.authored_commands, self.executions))
 
 
@@ -379,6 +386,7 @@ class Applier:
             after = self.workspace.state.resources[key]
             if before is not None and (before.payload, before.lifecycle) != (after.payload, after.lifecycle):
                 effect = SchemaEffect(self._attempt_id + ':schema', self._attempt_id, key, before, after)
+                self.plan_builder.add(effect)
                 self.effects += (effect,)
                 effects = (effect.effect_id,)
             self.workspace.issues[identity] = result.issues
@@ -400,7 +408,7 @@ class Applier:
                        snapshot_issues=issues, form_issues=deepcopy(self.workspace.issues), display_state=display)
 
 
-    async def _apply_candidate(self, application, current, variables, *, visit=False):
+    async def _apply_candidate(self, application, current, variables, *, visit=False, scope_context=None):
         from .commands.with_form import WithFormCommand
         from .commands.set_variable import SetVariableCommand
         from .command_templates import command_parameters
@@ -413,6 +421,12 @@ class Applier:
                 schema = (await self.workspace.visit(prepared.form, self.form_service) if visit else
                           await self.workspace.switch(prepared.form, self.form_service, current, self.related_schemas))
                 self.related_schemas.update(self.workspace.latest)
+                if scope_context is not None:
+                    scope_id, keys = scope_context
+                    self.plan_builder.begin_scope(scope_id, keys)
+                    self.plan_builder.select_form(self.workspace.key_for(schema), scope_id=scope_id)
+                else:
+                    self.plan_builder.select_form(self.workspace.key_for(schema))
                 return with_prepared_command(ExecutionResult(schema, names_schema=readable_schema(
                         schema, self.related_schemas, self.database_names),
                     snapshot_issues=self.workspace.issues.get(schema.get('id'), ()),
@@ -526,14 +540,20 @@ class Applier:
         if failure is not None:
             return scope, self._snapshot_execution(CommandExecution.from_result(
                 self._save_result(self._failed_result(failure, current))))
+        scope_id = self.authored_commands[self._index].authored_id
+        scope_keys = tuple(ResourceKey.form(target['identity']) for target in scope)
         if not scope:
+            builder = deepcopy(self.plan_builder)
+            builder.begin_scope(scope_id, scope_keys)
+            self.plan_builder = builder
             commit_scope(scope)
             self._sync_context()
         children = self._pending_forms(scope)
         for i, target in enumerate(scope):
             concrete = replace(command, form=target['identity'], form_pattern=None)
             result = await self._apply_actual(PreparedCommand(concrete), current, target['variables'],
-                                             visit=True, on_success=lambda: commit_scope(scope))
+                                             visit=True, on_success=lambda: commit_scope(scope),
+                                             scope_context=(scope_id, scope_keys))
             if result is None or not self.is_current():
                 return scope, None
             if not result.has_errors:

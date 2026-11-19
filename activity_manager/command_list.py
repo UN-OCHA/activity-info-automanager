@@ -319,6 +319,10 @@ class CommandListManager:
             self._publish_evaluation()
 
     @property
+    def candidate_plan(self):
+        return self.applier.candidate_plan
+
+    @property
     def results(self):
         return self.applier.results
 
