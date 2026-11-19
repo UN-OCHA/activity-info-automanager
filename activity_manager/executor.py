@@ -105,6 +105,27 @@ class Executor:
         self._observations[key] = result
         return result
 
+    async def observe_action(self, action):
+        primary = await self.observe(action.key)
+        related = tuple([await self.observe(projection.before.key) for projection in action.projections])
+        return replace(primary, related=related)
+
+    def matches_related(self, action, expected, observed):
+        found = {item.key: item for item in observed.related}
+        for projection, state in zip(action.projections, expected):
+            observation = found.get(state.key)
+            if observation is None or not compare_resource_footprints(
+                    state, observation, projection.footprints).matches:
+                return False
+        return len(expected) == len(action.projections)
+
+    def matches_bundle(self, handler, action, expected, observed, related):
+        return self.matches(handler, expected, observed) and self.matches_related(action, related, observed)
+
+    def matches_observation(self, handler, action, expected, observed):
+        return (expected.complete and self.matches_bundle(handler, action, expected.state, observed,
+                tuple(item.state for item in expected.related)))
+
     async def write(self, handler, request):
         try:
             return await handler.write(request)
@@ -121,12 +142,12 @@ class Executor:
         except (KeyError, TypeError, ValueError):
             return False
 
-    def classify(self, handler, before, intended, observed):
-        if observed.existence != Existence.PRESENT or observed.failure:
+    def classify(self, handler, action, before, observed):
+        if not observed.complete:
             return Outcome.UNKNOWN
-        if self.matches(handler, intended, observed):
+        if self.matches_bundle(handler, action, action.after, observed, tuple(p.after for p in action.projections)):
             return Outcome.INTENDED
-        if self.matches(handler, before, observed):
+        if self.matches_observation(handler, action, before, observed):
             return Outcome.UNCHANGED
         return Outcome.DIVERGENT
 
@@ -176,8 +197,8 @@ class Executor:
         for reviewed in actions:
             action = reviewed.action
             handler = self.handler(action)
-            observed = await self.observe(action.key)
-            if not self.matches(handler, action.before, observed):
+            observed = await self.observe_action(action)
+            if not self.matches_bundle(handler, action, action.before, observed, tuple(p.before for p in action.projections)):
                 self._messages.append(f'{action.action_id}: immediate predecessor is unavailable or stale.')
                 failed = True
                 break
@@ -208,7 +229,7 @@ class Executor:
                     self._messages.append(str(exc))
                     failed = True
                     break
-            if self.matches(handler, action.after, observed):
+            if self.matches_bundle(handler, action, action.after, observed, tuple(p.after for p in action.projections)):
                 self.journal = (*self.journal, JournalEntry(reviewed, 'skipped', observed, timestamp(),
                     Outcome.UNCHANGED, postimage=observed, finished_at=timestamp()))
                 continue
@@ -218,8 +239,8 @@ class Executor:
             self.journal = (*self.journal, entry)
             evidence = await self.write(handler, reviewed.request)
             self.journal = (*self.journal[:-1], replace(entry, evidence=evidence))
-            actual = await self.observe(action.key)
-            outcome = self.classify(handler, observed.state, action.after, actual)
+            actual = await self.observe_action(action)
+            outcome = self.classify(handler, action, observed, actual)
             status = {Outcome.INTENDED: 'verified_applied', Outcome.UNCHANGED: 'verified_unchanged',
                       Outcome.DIVERGENT: 'failed_with_observed_state', Outcome.UNKNOWN: 'unknown_outcome'}[outcome]
             self.journal = (*self.journal[:-1], replace(entry, status=status, outcome=outcome,
@@ -227,7 +248,8 @@ class Executor:
             self._messages.append(f'{action.action_id}: {outcome.value}' +
                                   (f'; API error: {evidence.failure.message}' if evidence.failure else ''))
             if outcome == Outcome.DIVERGENT:
-                self._messages.append(handler.compare(action.after, actual).summary)
+                summary = handler.compare(action.after, actual).summary
+                self._messages.append(summary or 'The related resource representation differs from the intended shared label.')
             if outcome != Outcome.INTENDED or evidence.failure is not None:
                 failed = True
                 break
@@ -261,20 +283,20 @@ class Executor:
                 continue
             action = entry.reviewed.action
             handler = self.handler(action)
-            current = await self.observe(action.key)
+            current = await self.observe_action(action)
             if entry.outcome == Outcome.DIVERGENT:
                 reason = 'Divergent state does not establish ownership; automatic recovery blocked.'
                 self.record_recovery(index, 'blocked', current, message=reason)
                 self._messages.append(reason)
                 return self.report('recovery_blocked')
             if entry.outcome == Outcome.UNKNOWN:
-                reconciled = self.classify(handler, entry.preimage.state, action.after, current)
+                reconciled = self.classify(handler, action, entry.preimage, current)
                 self.record_recovery(index, 'reconciled', current, message=reconciled.value)
                 if reconciled == Outcome.UNCHANGED:
                     continue
                 safe = reconciled == Outcome.INTENDED
             else:
-                safe = self.matches(handler, entry.postimage.state, current)
+                safe = self.matches_observation(handler, action, entry.postimage, current)
             if not safe:
                 reason = 'Recovery stopped: outcome is unresolved or the observed postimage changed.'
                 self.record_recovery(index, 'blocked', current, message=reason)
@@ -284,10 +306,10 @@ class Executor:
             request = handler.recovery_request(action, entry.preimage.state)
             self.record_recovery(index, 'attempted', current, request=request)
             evidence = await self.write(handler, request)
-            actual = await self.observe(action.key)
-            verified = self.matches(handler, entry.preimage.state, actual)
+            actual = await self.observe_action(action)
+            verified = self.matches_observation(handler, action, entry.preimage, actual)
             status = 'verified_restored' if verified else (
-                'unknown' if actual.existence != Existence.PRESENT or actual.failure else 'failed')
+                'unknown' if not actual.complete else 'failed')
             self.record_recovery(index, status, actual, evidence, request=request)
             if evidence.failure or not verified:
                 self._messages.append('Recovery stopped after an API error or unverified restoration; read-back evidence retained.')

@@ -15,7 +15,7 @@ Use the command creator to see the available parameters for each command.
 | `DeleteField` | Removes an existing field from the form. It does not check for references to that field elsewhere. |
 | `WithForm` | Selects the active form and database for subsequent commands. |
 | `SetVariable` | Stores a literal or online lookup result for later substitutions. |
-| `ModifyForm` | Selects forms and optionally edits record-label settings or previews a rename. Rename execution is blocked pending verified endpoint behavior. |
+| `ModifyForm` | Selects forms and optionally edits record-label settings or renames a form. |
 | `MoveForm` | Selects top-level forms and moves them to a folder within their database. |
 
 ### Multiple forms
@@ -91,13 +91,14 @@ only. Persisted-field compensation restores schema only; record-data restoration
 is unverified. Read-check-write has a concurrency window, not a server transaction.
 
 `ModifyForm` supports `form` or `formPattern`, optional `recordLabelFieldId` (an ID
-or unambiguous code; blank clears), and optional `name`. Rename previews keep local
-labels coherent, but execution is blocked until schema/resource label side effects
-and recovery are established. `MoveForm` accepts folder ID, unique name or path;
+or unambiguous code; blank clears), and optional `name`. A rename sends one schema
+update for the shared form label. Verification and recovery check both its schema
+and database-tree representations; no separate resource-label write is sent.
+`MoveForm` accepts folder ID, unique name or path;
 `/` selects the database root. Subforms cannot move independently.
 
 See [execution architecture and capability limits](docs/execution-architecture.md)
-for the current module boundaries and unresolved rename contract.
+for the current module boundaries and supported recovery limits.
 
 ### SetVariable
 

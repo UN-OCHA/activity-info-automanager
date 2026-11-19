@@ -1,5 +1,9 @@
 # Stage 6: form commands and canonical resource execution
 
+Subsequent update: the user clarified the shared-label contract and authorized
+[rename execution](execution-refactor-rename.md), which is now implemented. The
+gate described below records the state at the stage-6 checkpoint.
+
 Implemented 2026-11-19 in `refactor/execution-state` following explicit stage-6
 authorization. Supported porting work is complete; **rename execution remains an
 explicit incomplete capability** because its endpoint side effects are unverified.

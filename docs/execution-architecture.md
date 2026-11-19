@@ -1,9 +1,9 @@
 # Current application and execution architecture
 
-The supported schema and move commands use one confirmed-plan executor. Rename
-execution remains explicitly incomplete; this is not a claim that every slice of
-the refactor has finished. The [stage records](execution-refactor-plan.md) explain
-the implementation checkpoints and intentional changes.
+All commands in the initial migration, including form rename, use one confirmed-plan
+executor. The [stage records](execution-refactor-plan.md) and
+[rename implementation record](execution-refactor-rename.md) explain the checkpoints,
+the user-confirmed shared-label contract and intentional behavior changes.
 
 ```mermaid
 flowchart LR
@@ -46,6 +46,12 @@ cross-form read/write consistency. Explicit prerequisites, endpoint/scope bounda
 and deletion boundaries constrain grouping; there is no general dependency graph.
 Resource moves precede later schema edits and may batch compatible entries.
 
+Rename is one schema action with a ResourceProjection for the same label's
+database-tree representation. The projection changes canonical/display state and
+declares verification footprints; it is not another endpoint write. Shared-label
+actions seal adjacent groups so later schema edits/moves retain coherent predecessors.
+Explicit predecessor provenance includes the action that projected a resource.
+
 Identity materialization precedes confirmation and is retained for that attempt.
 Formula literals and historical preview identities are preserved. Execution cannot
 substitute variables, expand commands, allocate replacement identities or query
@@ -57,6 +63,13 @@ immediate predecessor and explicit member prerequisites. The executor journals
 before sending. It reads back on reported success and error, distinguishing
 intended, unchanged, divergent and unknown state. Receipts alone prove none of these.
 A reported error stops forward execution even when intended state is observed.
+
+Observations can retain related observations, including each receipt/version or
+structured read failure. Rename preflight and immediate checks cover the schema
+plus the resource label, existence and type. Post-write classification and recovery
+check both representations. A missing read makes the outcome unknown; inconsistent
+observed labels are divergent. One schema restoration compensates the shared label,
+with both representations verified and unrelated resource properties preserved.
 
 RollbackLast skips proven unchanged attempts. RollbackAll reverses applicable
 actions. Unknown outcomes reconcile first; divergent outcomes do not establish
@@ -80,7 +93,7 @@ cross-endpoint transaction.
 | Add/modify/move/delete fields, WithForm, SetVariable | Supported through Apply and confirmed execution where writes are required. |
 | ModifyForm record label, including clear and pending field IDs | Supported. |
 | MoveForm within its database, top-level forms | Supported with resource snapshots and owned-property compensation. |
-| ModifyForm name | Local schema/resource preview supported; execution blocked. The [stage-6 evidence record](execution-refactor-stage6.md) explains the unverified label side effects and compensation order. |
+| ModifyForm name | Supported for forms/subforms using one schema write and verification/recovery of both representations of the shared label. |
 | Persisted-field compensation | Schema-only; record-data restoration unverified. |
 | Arbitrary resource property clearing, AddForm/DeleteForm, new recovery endpoints | Not enabled; separate feature/evidence work. |
 

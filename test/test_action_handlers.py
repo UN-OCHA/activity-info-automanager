@@ -120,14 +120,14 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(compare_resource_footprints(
                 left, Observation(before.key, Existence.PRESENT, right), (footprint,)).matches)
 
-    def test_rename_is_blocked_until_endpoint_side_effects_are_known(self):
+    def test_rename_without_resource_verification_projection_is_rejected(self):
         builder = PlanBuilder()
         effect = schema_effect(schema_state(), [], 'rename')
         data = effect.after.payload.to_dict()
         data['label'] = 'Renamed'
         effect = replace(effect, after=replace(effect.after, payload=type(effect.after.payload)(data)))
         builder.add(effect)
-        with self.assertRaisesRegex(PlanError, 'side effects'):
+        with self.assertRaisesRegex(PlanError, 'projection'):
             materialize_plan(builder.snapshot(), AttemptBinding('eval', {}, 'session'))
 
     def test_missing_resource_property_differs_from_null_and_existence_is_independent(self):

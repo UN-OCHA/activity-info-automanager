@@ -17,7 +17,7 @@ from .command_iteration import IterativeCommand, PreparedCommand
 from .immutable import freeze, command_parameters_snapshot
 from .multi_form import FormWorkspace
 from .resource_state import ResourceKey, ResourceState, DatabaseResourcesPayload, BaselineEvidence, Existence, LoadStatus
-from .planning import PlanBuilder, SchemaEffect, ResourcePatchEffect, MemberRef
+from .planning import PlanBuilder, SchemaEffect, ResourcePatchEffect, MemberRef, ResourceProjection, Footprint
 from .schema_names import readable_schema
 
 ACTIVE_DRAFT = ContextVar('activity_manager_application_draft', default=None)
@@ -385,7 +385,8 @@ class Applier:
             self.workspace.update(result.schema)
             after = self.workspace.state.resources[key]
             if before is not None and (before.payload, before.lifecycle) != (after.payload, after.lifecycle):
-                effect = SchemaEffect(self._attempt_id + ':schema', self._attempt_id, key, before, after)
+                effect = SchemaEffect(self._attempt_id + ':schema', self._attempt_id, key, before, after,
+                                      projections=result.resource_projections)
                 self.plan_builder.add(effect)
                 self.effects += (effect,)
                 effects += (effect.effect_id,)
@@ -436,7 +437,8 @@ class Applier:
                     result = apply_command_locally(PreparedCommand(replace(prepared, form=schema['id'])), schema,
                         self.related_schemas, self.database_names, variables=variables)
                     if not result.has_errors and prepared.new_name is not None:
-                        await self._project_resource_label(result.schema)
+                        projection = await self._project_resource_label(schema, result.schema)
+                        result = replace(result, resource_projections=(projection,) if projection is not None else ())
                     return result
                 return with_prepared_command(ExecutionResult(schema, names_schema=readable_schema(
                         schema, self.related_schemas, self.database_names),
@@ -660,8 +662,9 @@ class Applier:
             self.workspace.state.load(BaselineEvidence(key, Existence.PRESENT, state, state.server_version))
         return self.workspace.state.resources[key]
 
-    async def _project_resource_label(self, schema):
-        # Local rename projection is coherent even though remote rename remains gated.
+    async def _project_resource_label(self, original, schema):
+        # One label is exposed through two API representations. Only the schema
+        # endpoint writes it; the database change is a verified projection.
         # Existing schema-only preview services may not expose database resources.
         if not hasattr(self.form_service, 'get_database_resources'):
             return
@@ -670,13 +673,13 @@ class Applier:
         except AttributeError:
             return
         entries = {identity: dict(entry) for identity, entry in before.payload.entries.items()}
+        if entries[schema['id']].get('label') != original.get('label'):
+            raise ValueError('Schema and database representations disagree on the current form label.')
         entries[schema['id']]['label'] = schema['label']
         self.plan_builder.observe(self.workspace.state.baselines.entries.values())
         after = self.workspace.state.put(before.key, DatabaseResourcesPayload(entries, before.payload.order))
-        effect = ResourcePatchEffect(self._attempt_id + ':rename', self._attempt_id, before.key, before, after,
-            ((schema['id'], 'label'),), subjects=(ResourceKey.form(schema['id']),))
-        self.plan_builder.add(effect)
-        self.effects += (effect,)
+        return ResourceProjection(before, after, (Footprint(before.key, schema['id'], ('label',)),
+            Footprint(before.key, schema['id'], existence=True), Footprint(before.key, schema['id'], ('type',))))
 
     async def _move_form(self, command, schema):
         from .form_folders import form_location, resolve_folder

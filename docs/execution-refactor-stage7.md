@@ -1,5 +1,9 @@
 # Stage 7: integration, retirement and handover
 
+Subsequent update: the user clarified the shared-label contract and authorized
+[rename execution](execution-refactor-rename.md), which is now implemented. The
+remaining capability described below records the stage-7 checkpoint's state.
+
 Completed the supported integration/retirement work on 2026-11-19 after explicit
 stage-7 authorization. **Rename execution remains an incomplete capability**, as
 documented in the [stage-6 evidence record](execution-refactor-stage6.md). Do not

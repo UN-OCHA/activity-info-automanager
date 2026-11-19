@@ -471,6 +471,8 @@ def connection_page():
             contributors = sorted({applications[identity].authored_index + 1 for identity in action.application_ids
                                    if identity in applications})
             detail = f'; delete field {action.deleted_member_id}' if action.deleted_member_id else ''
+            if action.projections and hasattr(action.after.payload, 'schema'):
+                detail += f'; rename {action.before.payload.schema.get("label")} -> {action.after.payload.schema.get("label")}'
             if reviewed.destinations:
                 detail += '; destinations: ' + ', '.join(f'{identity} -> {parent}' for identity, parent in reviewed.destinations)
             lines.append(f'{index}. {label} ({action.key.identity}){detail}; commands {contributors}')

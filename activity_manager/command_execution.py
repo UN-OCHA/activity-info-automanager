@@ -63,6 +63,7 @@ class ExecutionResult:
     target_member_ids: tuple[str, ...] = ()
     rejected_candidate: DiagnosticAttachment | None = None
     effect_ids: tuple[str, ...] = ()
+    resource_projections: tuple = ()
 
     @property
     def has_errors(self):

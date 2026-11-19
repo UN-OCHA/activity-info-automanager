@@ -61,14 +61,17 @@ class ResourceExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.status, 'success')
         self.assertEqual(service.resources['db']['b']['label'], 'Concurrent B')
 
-    async def test_local_rename_projects_both_labels_but_execution_stays_gated(self):
+    async def test_local_rename_projects_both_labels_and_emits_one_schema_request(self):
         manager, service = await self.evaluate('ModifyForm(form="A", name="Renamed")')
         self.assertEqual(manager.executions[0].status, 'applied', manager.executions[0].message)
         snapshot = manager.executions[0].display_state
         resources = next(item for item in snapshot.resources if item.key.kind == ResourceKind.DATABASE_RESOURCES)
         self.assertEqual(resources.state.payload.entries['a']['label'], 'Renamed')
         self.assertEqual(manager.workspace.active_schema['label'], 'Renamed')
-        with self.assertRaisesRegex(PlanError, 'rename|Rename'):
-            materialize_plan(manager.candidate_plan, AttemptBinding('evaluation', {}, 'session'))
+        plan = materialize_plan(manager.candidate_plan, AttemptBinding('evaluation', {}, 'session'))
+        self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.actions[0].action.kind, ActionKind.FORM_SCHEMA_UPDATE)
+        report = await execute(manager, service)
+        self.assertEqual(report.status, 'success', report.messages)
         self.assertEqual(service.moves, [])
-        self.assertEqual(service.writes, [])
+        self.assertEqual(len(service.writes), 1)

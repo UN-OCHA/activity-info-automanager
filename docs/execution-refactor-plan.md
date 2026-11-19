@@ -11,8 +11,10 @@ Stage 6 was subsequently authorized; its supported ports are implemented in the
 incomplete pending endpoint evidence. Stage 7 was subsequently authorized; its
 supported integration and retirement work is complete in the
 [stage 7 record](execution-refactor-stage7.md). The whole migration is not declared
-complete while rename execution remains gated. Dependency installation and live API
-writes remain outside the current authorization.
+complete while rename execution remains gated. The user subsequently clarified that
+both interfaces expose the same writable label and authorized implementation of
+[rename execution](execution-refactor-rename.md), resolving that final migration gate.
+Dependency installation and live API writes remain outside the current authorization.
 
 ## Scope and agreed tradeoffs
 

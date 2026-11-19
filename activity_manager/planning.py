@@ -47,6 +47,21 @@ class Footprint:
 
 
 @dataclass(frozen=True)
+class ResourceProjection:
+    """A secondary representation changed by the primary endpoint request."""
+    before: ResourceState
+    after: ResourceState
+    footprints: tuple[Footprint, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, 'footprints', tuple(self.footprints))
+        if self.before.key != self.after.key or any(f.key != self.before.key for f in self.footprints):
+            raise PlanError('Projection identities disagree.')
+        if self.before.load_status != LoadStatus.LOADED or self.after.load_status != LoadStatus.LOADED:
+            raise PlanError('A projection requires loaded states.')
+
+
+@dataclass(frozen=True)
 class SchemaEffect:
     effect_id: str
     application_id: str
@@ -55,10 +70,12 @@ class SchemaEffect:
     after: ResourceState
     prerequisites: tuple[MemberRef, ...] = ()
     dependency_ids: tuple[str, ...] = ()
+    projections: tuple[ResourceProjection, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, 'prerequisites', tuple(self.prerequisites))
         object.__setattr__(self, 'dependency_ids', tuple(self.dependency_ids))
+        object.__setattr__(self, 'projections', tuple(self.projections))
 
 
 @dataclass(frozen=True)
@@ -121,11 +138,12 @@ class ApiAction:
     patches: tuple[PropertyPatch, ...] = ()
     recovery_capability: str = 'metadata_compensation'
     warnings: tuple[str, ...] = ()
+    projections: tuple[ResourceProjection, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, 'kind', ActionKind(self.kind))
         for name in ('application_ids', 'effect_ids', 'dependency_ids', 'subjects', 'start_member_ids',
-                     'created_member_ids', 'prerequisites', 'read_set', 'write_set', 'patches', 'warnings'):
+                     'created_member_ids', 'prerequisites', 'read_set', 'write_set', 'patches', 'warnings', 'projections'):
             object.__setattr__(self, name, tuple(getattr(self, name)))
 
     @property
@@ -301,7 +319,27 @@ class PlanBuilder:
         if isinstance(effect, SchemaEffect):
             if effect.key.kind != ResourceKind.FORM_SCHEMA:
                 raise PlanError('A schema effect requires a form resource.')
+            if effect.projections:
+                if len({p.before.key for p in effect.projections}) != len(effect.projections):
+                    raise PlanError('An action cannot project the same resource twice.')
+                self._seal('shared_property')
             self._schema(effect)
+            if effect.projections:
+                action = self._actions[-1]
+                dependencies = list(action.dependency_ids)
+                for projection in effect.projections:
+                    expected = self._state_for(projection.before.key)
+                    if expected is None or not _matches(expected, projection.before):
+                        raise PlanError('Projection does not start at its projected predecessor.')
+                    previous = self._last_action(projection.before.key)
+                    if previous is not None:
+                        dependencies.append(previous)
+                    self._projected[projection.before.key] = projection.after
+                reads = tuple(f for projection in effect.projections for f in projection.footprints)
+                self._replace_action(replace(action, projections=effect.projections,
+                    dependency_ids=_unique(dependencies), read_set=(*action.read_set, *reads),
+                    write_set=(*action.write_set, *(replace(f, phase='after') for f in reads))))
+                self._seal('after_shared_property')
         else:
             if effect.key.kind != ResourceKind.DATABASE_RESOURCES:
                 raise PlanError('A resource patch requires a database resource collection.')
@@ -336,7 +374,8 @@ class PlanBuilder:
 
     def _last_action(self, key):
         return next((action.action_id for action in reversed(self._actions)
-                     if action.key == key and not action.is_noop), None)
+                     if (action.key == key or any(p.before.key == key for p in action.projections))
+                     and not action.is_noop), None)
 
     def _candidate(self, key, kind):
         index = self._candidates.get((key, kind))
