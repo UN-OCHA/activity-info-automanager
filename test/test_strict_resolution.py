@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
 
-from activity_manager.schema_change import apply_form_schema_change
+from test.execution_fixtures import execute_schema_fixture
 from activity_manager.schema_identity import prepare_schema_for_write
 from test.test_add_field import schema
 from test.test_default_comparison import with_default
@@ -19,8 +19,8 @@ class StrictResolutionTests(unittest.IsolatedAsyncioTestCase):
                 target['elements'][-1]['typeParameters']['values'].extend([
                     {'id': 'a', 'label': 'Duplicated'}, {'id': 'b', 'label': 'Duplicated'}])
                 service = SimpleNamespace(get_form_schema=AsyncMock(return_value=loaded), put_form_schema=AsyncMock())
-                result = await apply_form_schema_change(service, 'form1', loaded, target, AsyncMock())
-                self.assertEqual(result.status, 'read_error', result.messages)
+                result = await execute_schema_fixture(service, 'form1', loaded, target, AsyncMock())
+                self.assertEqual(result.status, 'preparation_failed', result.messages)
                 self.assertIn('Enumerated default', result.messages[0])
                 service.put_form_schema.assert_not_awaited()
 
@@ -33,16 +33,16 @@ class StrictResolutionTests(unittest.IsolatedAsyncioTestCase):
                 service = SimpleNamespace(get_form_schema=AsyncMock(return_value=loaded),
                     get_form_tree=AsyncMock(return_value={'people': {'recordLabelFieldId': label_field}}),
                     query_rows=AsyncMock(return_value=[]), put_form_schema=AsyncMock())
-                result = await apply_form_schema_change(service, 'form1', loaded, target, AsyncMock())
-                self.assertEqual(result.status, 'read_error', result.messages)
+                result = await execute_schema_fixture(service, 'form1', loaded, target, AsyncMock())
+                self.assertEqual(result.status, 'preparation_failed', result.messages)
                 service.put_form_schema.assert_not_awaited()
 
     async def test_unresolved_formula_still_reaches_put(self):
         loaded = schema()
         target = deepcopy(loaded)
         target['elements'][0]['validationCondition'] = 'UNKNOWN == "1"'
-        service = SimpleNamespace(get_form_schema=AsyncMock(side_effect=[loaded, target]), put_form_schema=AsyncMock())
-        result = await apply_form_schema_change(service, 'form1', loaded, target, AsyncMock())
+        service = SimpleNamespace(get_form_schema=AsyncMock(side_effect=[loaded, loaded, target]), put_form_schema=AsyncMock())
+        result = await execute_schema_fixture(service, 'form1', loaded, target, AsyncMock())
         self.assertEqual(result.status, 'success', result.messages)
         service.put_form_schema.assert_awaited_once()
         self.assertEqual(service.put_form_schema.await_args.args[1]['elements'][0]['validationCondition'],
@@ -52,11 +52,11 @@ class StrictResolutionTests(unittest.IsolatedAsyncioTestCase):
         loaded = schema()
         target = with_default(None)
         target['elements'][-1]['typeParameters']['range'][0]['formId'] = 'missingformname'
-        service = SimpleNamespace(get_form_schema=AsyncMock(side_effect=[loaded, ValueError('Not found')]),
+        service = SimpleNamespace(get_form_schema=AsyncMock(side_effect=[loaded, loaded, ValueError('Not found')]),
             get_form_tree=AsyncMock(return_value={}), get_form_names=AsyncMock(return_value={}),
             put_form_schema=AsyncMock())
-        result = await apply_form_schema_change(service, 'form1', loaded, target, AsyncMock())
-        self.assertEqual(result.status, 'read_error', result.messages)
+        result = await execute_schema_fixture(service, 'form1', loaded, target, AsyncMock())
+        self.assertEqual(result.status, 'preparation_failed', result.messages)
         service.put_form_schema.assert_not_awaited()
 
     async def test_null_and_empty_defaults_can_clear_values(self):

@@ -14,7 +14,7 @@ from activity_manager.command_creator import (
 from activity_manager.command_list import CommandListManager
 from activity_manager.command_parser import CommandTextError, parse_command_text
 from activity_manager.commands import ADD_FIELD, AddFieldCommand
-from activity_manager.schema_change import apply_form_schema_change
+from test.execution_fixtures import execute_schema_fixture
 from activity_manager.schema_identity import prepare_schema_for_put
 
 
@@ -279,7 +279,7 @@ class DeferredWriteTests(unittest.IsolatedAsyncioTestCase):
         async def read(form_id):
             nonlocal reads
             reads += 1
-            return source if reads == 1 else written
+            return source if written is None else written
 
         async def write(form_id, target):
             nonlocal written
@@ -290,27 +290,27 @@ class DeferredWriteTests(unittest.IsolatedAsyncioTestCase):
                                   put_form_schema=AsyncMock(side_effect=write))
         choose = AsyncMock()
         with patch('activity_manager.schema_identity.secrets.token_hex', return_value='a' * 24) as generate:
-            outcome = await apply_form_schema_change(service, 'form1', source, preview, choose)
+            outcome = await execute_schema_fixture(service, 'form1', source, preview, choose)
         self.assertEqual(outcome.status, 'success')
         generate.assert_called_once()
         choose.assert_not_awaited()
         self.assertEqual(preview['elements'][-1]['id'], 'pending-field:name')
 
-    async def test_stale_and_add_then_delete_do_not_allocate_ids(self):
+    async def test_stale_materializes_before_preflight_and_eliminated_fields_allocate_nothing(self):
         source = schema()
         preview = AddFieldCommand('name', 'Name').execute(source).schema
         changed = deepcopy(source)
         changed['label'] = 'Changed elsewhere'
         service = SimpleNamespace(get_form_schema=AsyncMock(return_value=changed),
                                   put_form_schema=AsyncMock())
-        with patch('activity_manager.schema_identity.secrets.token_hex') as generate:
-            stale = await apply_form_schema_change(service, 'form1', source, preview, AsyncMock())
-            self.assertEqual(stale.status, 'stale')
+        with patch('activity_manager.schema_identity.secrets.token_hex', return_value='a' * 24) as generate:
+            stale = await execute_schema_fixture(service, 'form1', source, preview, AsyncMock())
+            self.assertEqual(stale.status, 'preflight_failed')
             service.get_form_schema.return_value = source
             target = parse_command_text('DeleteField(fieldCode="name")')[0].execute(preview).schema
-            noop = await apply_form_schema_change(service, 'form1', source, target, AsyncMock())
-            self.assertEqual(noop.status, 'unchanged')
-            generate.assert_not_called()
+            noop = await execute_schema_fixture(service, 'form1', source, target, AsyncMock())
+            self.assertEqual(noop.status, 'success')
+            generate.assert_called_once()
         service.put_form_schema.assert_not_awaited()
 
     async def test_api_materializes_direct_put_calls_without_mutating_input(self):

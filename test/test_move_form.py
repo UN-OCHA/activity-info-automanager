@@ -336,7 +336,7 @@ class MoveFormPageTests(unittest.IsolatedAsyncioTestCase):
         manager.form_service = CachedResolutionService(service, manager.resolution_cache)
         async def resolve(data):
             return await resolve_command_schema(service, data, manager.related_schemas, {}, {}, {},
-                                                source_schema=manager.workspace.originals[data['id']])
+                                                source_schema=manager.workspace.baseline_forms[data['id']])
         manager.resolve_schema = resolve
         manager.set_schema(service.schemas['a'])
         creator.command_select.set_value('move_form')
@@ -360,7 +360,7 @@ class MoveFormPageTests(unittest.IsolatedAsyncioTestCase):
         creator.target_mode.set_value('Multiple')
         await creator.on_parameter_change(creator)
         self.assertIn('/North/Archive', creator.controls['folder'].options)
-        self.assertEqual([s['id'] for s in manager.workspace.opschema], ['a'])
+        self.assertEqual([s['id'] for s in manager.workspace.form_snapshots], ['a'])
         self.assertEqual(service.timeline, [])
 
     async def test_folder_preview_tracks_selected_form_and_leaf_history(self):

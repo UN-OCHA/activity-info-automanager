@@ -14,6 +14,9 @@ Use the command creator to see the available parameters for each command.
 | `MoveField` | Moves an existing field to the beginning or end of the form, or before or after another field. |
 | `DeleteField` | Removes an existing field from the form. It does not check for references to that field elsewhere. |
 | `WithForm` | Selects the active form and database for subsequent commands. |
+| `SetVariable` | Stores a literal or online lookup result for later substitutions. |
+| `ModifyForm` | Selects forms and optionally edits record-label settings or previews a rename. Rename execution is blocked pending verified endpoint behavior. |
+| `MoveForm` | Selects top-level forms and moves them to a folder within their database. |
 
 ### Multiple forms
 
@@ -46,33 +49,55 @@ Expand upward to inspect each application, labeled with its form and field conte
 For two fields in A and three in B, the count is 5x, ordered A/i, A/ii,
 B/i, B/ii, B/iii. WithForm and single commands inside its scope also expand,
 with one child per form. Selecting a child shows all form tabs at that exact
-application snapshot and selects the affected form. Fixed schema slots accumulate edits within
-the scope, and execution writes those final schemas in slot order. Earlier visits
-and command previews remain frozen.
+application snapshot and selects the affected resource. Canonical state accumulates
+edits by resource identity; the candidate plan records endpoint actions separately.
+Historical previews remain frozen.
 
 Variables set before the scope are inherited independently by each form.
 SetVariable inside the scope changes only that form's values. On leaving the scope,
 any variable name assigned inside it becomes unavailable, including an inherited
 name that was reassigned. Other inherited names remain available.
 
-Each successful switch to a different form appends a schema snapshot, loading a
-new form only when the switch is reached. Revisiting a form copies its latest
-local version. Selecting the active form again is a no-op. Cross-form schema
+Each successful switch selects canonical state, loading a new form only when the
+switch is reached. Revisiting a form uses its latest local version. Selecting the
+active form again is a no-op. Cross-form schema
 references use the latest local versions, ahead of cached online schemas. Variable
 lookups still query online record data.
 
-Result tabs run vertically down the left, with one tab per distinct form. Selecting
-a command shows the forms and latest snapshots reached at that point, and selects
-that command's active form. Revisits reuse the existing tab.
+Result tabs run vertically down the left, with separate form and database-resource
+tabs. Selecting a command or expanded child displays its immutable snapshot.
+Moves prefer the resource tab; schema edits prefer the changed form. Selecting a
+tab does not change application context.
 
-Execute checks every participating form for external changes before writing, then
-checks again before each update. It writes snapshots in visit order, skips
-unchanged snapshots, and verifies every write. A failed step stops execution and
-offers **Leave**, **Roll back last update**, or **Roll back all updates**. Rollback
-restores saved pre-update schemas in reverse order, verifying each restoration;
-the first rollback failure stops recovery. Rollback submits original field IDs
-through the normal schema endpoint. Restoration of deleted field data through
-this mechanism has not yet been established against the live API.
+Execute materializes identities before confirmation, which shows the actual ordered
+actions and exact requests. Source, session or command changes invalidate that
+attempt. The executor checks every required baseline before any write and the
+immediate predecessor before each action, skips semantic no-ops, and reads back
+both successful and failed writes. API success alone does not prove application.
+
+Apply remains command-first (A1, B1, A2, B2). Compatible schema edits may execute as
+accumulated A then B updates. There is no general cross-form dependency analyzer;
+the accepted cross-form batching limitation remains. Moves execute before subsequent
+schema edits, compatible resource patches may batch, and each persisted-field
+deletion is isolated from later edits.
+
+After failure, **Leave** makes no compensating writes. **Roll back last update**
+skips attempts proven unchanged. **Roll back all updates** compensates in reverse
+action order using immediate observed preimages, verifying each restoration.
+Unknown outcomes require reconciliation; divergent outcomes and concurrent edits
+block automatic recovery. Recovery errors stop further compensation even when a
+read-back finds restored state. Resource compensation restores owned properties
+only. Persisted-field compensation restores schema only; record-data restoration
+is unverified. Read-check-write has a concurrency window, not a server transaction.
+
+`ModifyForm` supports `form` or `formPattern`, optional `recordLabelFieldId` (an ID
+or unambiguous code; blank clears), and optional `name`. Rename previews keep local
+labels coherent, but execution is blocked until schema/resource label side effects
+and recovery are established. `MoveForm` accepts folder ID, unique name or path;
+`/` selects the database root. Subforms cannot move independently.
+
+See [execution architecture and capability limits](docs/execution-architecture.md)
+for the current module boundaries and unresolved rename contract.
 
 ### SetVariable
 

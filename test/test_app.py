@@ -22,7 +22,8 @@ from activity_manager.commands import (
 )
 from activity_manager.listbox import DatabaseListbox
 from activity_manager.page import connection_page
-from activity_manager.schema_change import apply_form_schema_change, compare_schemas, schemas_match
+from activity_manager.schema_change import compare_schemas, schemas_match
+from test.execution_fixtures import execute_schema_fixture
 from activity_info_api_client.models.add_update_form_response import AddUpdateFormResponse
 from activity_info_api_client.models.form_schema import FormSchema
 
@@ -220,12 +221,13 @@ class SchemaChangeTests(unittest.IsolatedAsyncioTestCase):
         service = SimpleNamespace(
             get_form_schema=AsyncMock(side_effect=[
                 self.schema('A', 'B', version=2),
+                self.schema('A', 'B', version=2),
                 self.schema('B', 'A', version=3),
             ]),
             put_form_schema=AsyncMock(),
         )
         choose = AsyncMock(return_value='leave')
-        outcome = await apply_form_schema_change(
+        outcome = await execute_schema_fixture(
             service, 'form-1', loaded, target, choose,
         )
         self.assertEqual(outcome.status, 'success')
@@ -240,10 +242,10 @@ class SchemaChangeTests(unittest.IsolatedAsyncioTestCase):
             get_form_schema=AsyncMock(return_value=latest),
             put_form_schema=AsyncMock(),
         )
-        outcome = await apply_form_schema_change(
+        outcome = await execute_schema_fixture(
             service, 'form-1', loaded, self.schema('A', 'B'), AsyncMock(),
         )
-        self.assertEqual(outcome.status, 'stale')
+        self.assertEqual(outcome.status, 'preflight_failed')
         self.assertEqual(outcome.actual_schema, latest)
         service.put_form_schema.assert_not_awaited()
 
@@ -254,86 +256,86 @@ class SchemaChangeTests(unittest.IsolatedAsyncioTestCase):
             get_form_schema=AsyncMock(return_value=latest),
             put_form_schema=AsyncMock(),
         )
-        outcome = await apply_form_schema_change(
+        outcome = await execute_schema_fixture(
             service,
             'form-1',
             loaded,
             self.schema('A', 'B', version=1),
             AsyncMock(),
         )
-        self.assertEqual(outcome.status, 'unchanged')
-        self.assertEqual(outcome.actual_schema, latest)
-        self.assertEqual(outcome.messages, ('no schema changes required',))
-        service.get_form_schema.assert_awaited_once_with('form-1')
+        self.assertEqual(outcome.status, 'success')
+        self.assertIsNone(outcome.actual_schema)
+        self.assertEqual(outcome.report.journal, ())
+        service.get_form_schema.assert_not_awaited()
         service.put_form_schema.assert_not_awaited()
 
     async def test_api_error_and_unchanged_schema_are_both_reported(self):
         loaded = self.schema('A')
         service = SimpleNamespace(
-            get_form_schema=AsyncMock(side_effect=[loaded, self.schema('A', version=2)]),
+            get_form_schema=AsyncMock(side_effect=[loaded, loaded, self.schema('A', version=2)]),
             put_form_schema=AsyncMock(side_effect=ValueError('HTTP 500')),
         )
-        outcome = await apply_form_schema_change(
-            service, 'form-1', loaded, self.schema('B'), AsyncMock(),
+        outcome = await execute_schema_fixture(
+            service, 'form-1', loaded, self.schema('A', 'B'), AsyncMock(),
         )
-        self.assertEqual(outcome.status, 'unchanged')
-        self.assertEqual(len(outcome.messages), 2)
+        self.assertEqual(outcome.status, 'left')
         self.assertIn('HTTP 500', outcome.messages[0])
-        self.assertIn('Schema not changed', outcome.messages[1])
+        self.assertEqual(outcome.report.journal[0].outcome, 'unchanged')
 
-    async def test_partial_change_can_be_left_or_rolled_back(self):
+    async def test_partial_change_can_be_left_but_divergent_recovery_is_blocked(self):
         loaded = self.schema('A', 'B')
         target = self.schema('B', 'A')
         partial = self.schema('A', 'C', version=2)
 
         leave_service = SimpleNamespace(
-            get_form_schema=AsyncMock(side_effect=[loaded, partial]),
+            get_form_schema=AsyncMock(side_effect=[loaded, loaded, partial]),
             put_form_schema=AsyncMock(),
         )
         choose_leave = AsyncMock(return_value='leave')
-        left = await apply_form_schema_change(
+        left = await execute_schema_fixture(
             leave_service,
             'form-1',
             loaded,
             target,
             choose_leave,
         )
-        self.assertEqual(left.status, 'partial_left')
+        self.assertEqual(left.status, 'left')
         self.assertEqual(left.actual_schema, partial)
         summary = compare_schemas(FormSchema.from_dict(target), FormSchema.from_dict(partial)).summary
-        choose_leave.assert_awaited_once_with(summary)
+        choose_leave.assert_awaited_once()
+        self.assertIn(summary, choose_leave.await_args.args[0])
         self.assertIn(summary, '\n'.join(left.messages))
 
         rollback_actual = self.schema('A', 'B', version=3)
         rollback_service = SimpleNamespace(
-            get_form_schema=AsyncMock(side_effect=[loaded, partial, rollback_actual]),
+            get_form_schema=AsyncMock(side_effect=[loaded, loaded, partial, rollback_actual]),
             put_form_schema=AsyncMock(),
         )
-        rolled_back = await apply_form_schema_change(
+        rolled_back = await execute_schema_fixture(
             rollback_service,
             'form-1',
             loaded,
             target,
             AsyncMock(return_value='rollback'),
         )
-        self.assertEqual(rolled_back.status, 'rolled_back')
+        self.assertEqual(rolled_back.status, 'recovery_blocked')
         self.assertEqual(rolled_back.actual_schema, rollback_actual)
-        self.assertEqual(rollback_service.put_form_schema.await_count, 2)
+        self.assertEqual(rollback_service.put_form_schema.await_count, 1)
 
         failed_service = SimpleNamespace(
-            get_form_schema=AsyncMock(side_effect=[loaded, partial, partial]),
+            get_form_schema=AsyncMock(side_effect=[loaded, loaded, partial, partial]),
             put_form_schema=AsyncMock(),
         )
-        failed = await apply_form_schema_change(
+        failed = await execute_schema_fixture(
             failed_service,
             'form-1',
             loaded,
             target,
             AsyncMock(return_value='rollback'),
         )
-        self.assertEqual(failed.status, 'rollback_failed')
+        self.assertEqual(failed.status, 'recovery_blocked')
         self.assertEqual(failed.actual_schema, partial)
-        self.assertIn('failed verification', failed.messages[-1])
+        self.assertIn('Divergent', failed.messages[-1])
 
 
 class CommandParserTests(unittest.TestCase):

@@ -271,10 +271,10 @@ class CommandListManager:
             execution.status in EXECUTABLE_STATUSES for execution in self.executions
         ):
             return None
-        return deepcopy(self.executions[-1].schema)
+        return self.workspace.active_schema
 
-    def target_opschema(self):
-        return deepcopy(self.executions[-1].opschema) if self.target_schema() is not None else None
+    def target_forms(self):
+        return tuple(self.results[-1].display_state.legacy_forms().values()) if self.target_schema() is not None else None
 
 
     def set_busy(self, busy: bool) -> None:

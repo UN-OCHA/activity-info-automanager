@@ -103,14 +103,14 @@ class Applier:
         if self.is_current() and self._on_progress:
             self._on_progress(self)
 
-    def _new_draft(self, variables, slot=None):
+    def _new_draft(self, variables, form_key=None):
         draft = ApplicationDraft(
             self.owner, deepcopy(self.workspace), deepcopy(self.related_schemas),
             deepcopy(self.database_names), deepcopy(self.reference_defaults),
             self.resolution_cache, deepcopy(self.snapshot_builder), self.effects, deepcopy(variables),
             deepcopy(self.plan_builder))
-        if slot is not None:
-            draft.workspace.active_slot = slot
+        if form_key is not None:
+            draft.workspace.state.activate(form_key)
         return draft
 
     def _sync_context(self):
@@ -138,7 +138,7 @@ class Applier:
                 candidate = DiagnosticAttachment(result.schema, result.diagnostics, names)
             except (TypeError, ValueError):
                 candidate = None
-        previous = self.workspace.active_schema if self.workspace.opschema else current
+        previous = self.workspace.active_schema if self.workspace.form_snapshots else current
         return replace(result, schema=deepcopy(previous), names_schema=None,
                        record_labels=None, snapshot_issues=self.workspace.issues.get((previous or {}).get('id'), ()),
                        rejected_candidate=candidate, effect_ids=())
@@ -192,16 +192,16 @@ class Applier:
             ACTIVE_DRAFT.reset(token)
         return self._commit(draft, result, current, variables, None)
 
-    async def _apply_actual(self, application, current, variables, *, slot=None, visit=False,
+    async def _apply_actual(self, application, current, variables, *, form_key=None, scope_member=False,
                             on_success=None, scope_context=None):
-        draft = self._new_draft(variables, slot)
+        draft = self._new_draft(variables, form_key)
         self._attempt_id = self._application_id()
         self._position += 1
         result = None
         token = ACTIVE_DRAFT.set(draft)
         try:
             result = await self._apply_candidate(application, deepcopy(current), draft.variables,
-                                                 visit=visit, scope_context=scope_context)
+                                                 scope_member=scope_member, scope_context=scope_context)
             if not self.is_current():
                 return None
             result = self._stage_result(result, current)
@@ -337,7 +337,7 @@ class Applier:
             children[iteration] = CommandExecution(
                 execution.status, execution.schema, execution.message, execution.names_schema,
                 execution.diagnostics, field_code=target.original_code,
-                concrete_command=concrete.command if concrete else None, target=target, opschema=execution.opschema,
+                concrete_command=concrete.command if concrete else None, target=target, form_snapshots=execution.form_snapshots,
                 snapshot_issues=execution.issues, form_issues=execution.form_issues,
                 display_state=execution.display_state, prepared_syntax=execution.prepared_syntax,
                 prepared_parameters=execution.prepared_parameters, target_member_ids=execution.target_member_ids,
@@ -369,7 +369,7 @@ class Applier:
         reached = [child for child in children if child.schema is not None]
         final = reached[-1] if reached else None
         return CommandExecution(status, current, message, final.names_schema if final else None,
-            diagnostics, tuple(children), snapshot_issues=final.issues if final else (), opschema=final.opschema if final else (),
+            diagnostics, tuple(children), snapshot_issues=final.issues if final else (), form_snapshots=final.form_snapshots if final else (),
             form_issues=final.form_issues if final else None,
             display_state=final.display_state if final else None,
             rejected_candidate=final.rejected_candidate if final else None,
@@ -396,7 +396,7 @@ class Applier:
             active=next((effect.key for effect in reversed(self.effects) if effect.application_id == self._attempt_id),
                         self.workspace.key_for(result.schema) if result.schema else None),
             labels=result.record_labels)
-        return replace(result, opschema=tuple(deepcopy(self.workspace.opschema)),
+        return replace(result, form_snapshots=tuple(deepcopy(self.workspace.form_snapshots)),
                        form_issues=deepcopy(self.workspace.issues), display_state=display, effect_ids=effects)
 
 
@@ -405,11 +405,11 @@ class Applier:
         display = execution.display_state or self.snapshot_builder.capture(
             self.workspace.state, self.related_schemas, self.database_names, self.workspace.issues,
             active=self.workspace.key_for(execution.schema) if execution.schema else None)
-        return replace(execution, opschema=tuple(deepcopy(self.workspace.opschema)),
+        return replace(execution, form_snapshots=tuple(deepcopy(self.workspace.form_snapshots)),
                        snapshot_issues=issues, form_issues=deepcopy(self.workspace.issues), display_state=display)
 
 
-    async def _apply_candidate(self, application, current, variables, *, visit=False, scope_context=None):
+    async def _apply_candidate(self, application, current, variables, *, scope_member=False, scope_context=None):
         from .commands.with_form import WithFormCommand
         from .commands.modify_form import ModifyFormCommand
         from .commands.move_form import MoveFormCommand
@@ -421,7 +421,7 @@ class Applier:
             if isinstance(prepared, (WithFormCommand, ModifyFormCommand, MoveFormCommand)):
                 if self.form_service is None:
                     return prepared.execute(current)
-                schema = (await self.workspace.visit(prepared.form, self.form_service) if visit else
+                schema = (await self.workspace.select(prepared.form, self.form_service) if scope_member else
                           await self.workspace.switch(prepared.form, self.form_service, current, self.related_schemas))
                 self.related_schemas.update(self.workspace.latest)
                 if scope_context is not None:
@@ -506,14 +506,14 @@ class Applier:
             self._publish_evaluation()
 
     async def _run_connected_command(self, index, current, variables, version, *, publish=True,
-                                     targets=None, slot=None, on_success=None):
+                                     targets=None, form_key=None, on_success=None):
         steps = self._application_steps(index, current, variables, targets, record_progress=publish)
         try:
             application = next(steps)
             while True:
                 if publish:
                     self._publish_evaluation()
-                result = await self._apply_actual(application, current, variables, slot=slot, on_success=on_success)
+                result = await self._apply_actual(application, current, variables, form_key=form_key, on_success=on_success)
                 if result is None or not self.is_current():
                     return None
                 current = result.schema
@@ -545,7 +545,7 @@ class Applier:
                 local = {**variables, 'form.name': name, 'form.index': len(scope) + 1}
                 local.update({f'form.{i}': value for i, value in enumerate(match.groups(), 1)})
                 local.update({f'form.{key}': value for key, value in match.groupdict().items()})
-                scope.append(dict(identity=identity, name=name, variables=local, slot=None))
+                scope.append(dict(identity=identity, name=name, variables=local, form_key=None))
         except Exception as exc:
             failure = ExecutionResult.error(current, str(exc), 'form_selector_failed')
         finally:
@@ -566,12 +566,12 @@ class Applier:
             from .command_templates import command_parameters
             concrete = command_parameters(replace(command, form=target['identity'], form_pattern=None), target['variables'])
             result = await self._apply_actual(PreparedCommand(concrete), current, target['variables'],
-                                             visit=True, on_success=lambda: commit_scope(scope),
+                                             scope_member=True, on_success=lambda: commit_scope(scope),
                                              scope_context=(scope_id, scope_keys))
             if result is None or not self.is_current():
                 return scope, None
             if not result.has_errors:
-                target['slot'] = self.workspace.active_slot
+                target['form_key'] = self.workspace.state.active_form_key
             children[i] = replace(CommandExecution.from_result(result), field_code=target['name'],
                                   target_keys=(ResourceKey.form(target['identity']),))
             current = result.schema
@@ -623,7 +623,7 @@ class Applier:
             # leaves the complete set of unexecuted applications visible.
             for i, target in enumerate(scope):
                 try:
-                    plans[i] = command.targets(self.workspace.opschema[target['slot']], target['variables'])
+                    plans[i] = command.targets(self.workspace.state.resources[target['form_key']].payload.to_dict(), target['variables'])
                 except ValueError:
                     continue  # Report selector errors when their form is reached.
                 children[i] = replace(children[i], field_iterations=True, iterations=tuple(
@@ -632,9 +632,9 @@ class Applier:
         self.executions[index] = self._form_summary(children, current)
         self._publish_evaluation()
         for i, target in enumerate(scope):
-            current = deepcopy(self.workspace.opschema[target['slot']])
+            current = deepcopy(self.workspace.state.resources[target['form_key']].payload.to_dict())
             execution = await self._run_connected_command(index, current, target['variables'], version,
-                                                          publish=False, targets=plans[i], slot=target['slot'],
+                                                          publish=False, targets=plans[i], form_key=target['form_key'],
                 on_success=(lambda: self.assigned.add(f'vars.{command.name}'))
                 if isinstance(command, SetVariableCommand) else None)
             if not self.is_current():

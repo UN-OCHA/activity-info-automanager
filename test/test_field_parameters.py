@@ -16,7 +16,7 @@ from activity_manager.commands import ADD_FIELD, AddFieldCommand
 from activity_manager.page import connection_page
 from activity_manager.api import ActivityInfoService
 from activity_manager.listbox import DatabaseListbox
-from activity_manager.schema_change import apply_form_schema_change
+from test.execution_fixtures import execute_schema_fixture
 from activity_manager.schema_identity import prepare_schema_for_put, prepare_schema_for_write
 from test.test_add_field import schema
 
@@ -518,8 +518,8 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
                                   translation_language='fr').execute(loaded).schema
         service = SimpleNamespace(get_form_schema=AsyncMock(return_value=loaded), put_form_schema=AsyncMock())
         choose = AsyncMock()
-        outcome = await apply_form_schema_change(service, 'form1', loaded, preview, choose)
-        self.assertEqual(outcome.status, 'read_error')
+        outcome = await execute_schema_fixture(service, 'form1', loaded, preview, choose)
+        self.assertEqual(outcome.status, 'preparation_failed')
         self.assertIn('missing', outcome.messages[0])
         service.put_form_schema.assert_not_awaited()
         choose.assert_not_awaited()
@@ -539,7 +539,7 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
 
         service = SimpleNamespace(get_form_schema=AsyncMock(side_effect=read),
                                   put_form_schema=AsyncMock(side_effect=write))
-        outcome = await apply_form_schema_change(service, 'form1', source, preview, AsyncMock())
+        outcome = await execute_schema_fixture(service, 'form1', source, preview, AsyncMock())
         self.assertEqual(outcome.status, 'success')
         self.assertTrue(preview['elements'][-1]['id'].startswith('pending-field:'))
         field = written['elements'][-1]

@@ -17,7 +17,7 @@ from activity_manager.command_creator import CommandCreatorRenderer
 from activity_manager.command_list import CommandListManager
 from activity_manager.command_parser import parse_command_text
 from activity_manager.commands import MODIFY_FIELD, AddFieldCommand
-from activity_manager.schema_change import apply_form_schema_change
+from test.execution_fixtures import execute_schema_fixture
 from activity_manager.schema_resolution import resolve_command_schema
 
 
@@ -133,12 +133,12 @@ class ModifyFieldEndToEndTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch.object(service, '_request', AsyncMock(side_effect=request)) as update, \
                     patch.object(service, 'get_form_schema', AsyncMock(side_effect=read)) as get_schema:
-                outcome = await apply_form_schema_change(service, 'form1', source, preview, recovery,
+                outcome = await execute_schema_fixture(service, 'form1', source, preview, recovery,
                                                          resolved=True, related_schemas=related)
                 self.assertEqual(outcome.status, expected_status, outcome.messages)
-                if expected_status == 'success':
+                if payloads:
                     update.assert_awaited_once()
-                    self.assertEqual(get_schema.await_count, 2)
+                    self.assertEqual(get_schema.await_count, 3)
                     self.assertEqual(outcome.actual_schema, written)
                 else:
                     update.assert_not_awaited()
@@ -212,7 +212,7 @@ class ModifyFieldEndToEndTests(unittest.IsolatedAsyncioTestCase):
         repeated, related = await self.preview(payload, commands)
         self.assertEqual([run.status for run in repeated.executions], ['applied'] * 3)
         self.assertEqual(repeated.target_schema(), payload)
-        await self.write_and_verify(payload, repeated.target_schema(), related, expected_status='unchanged')
+        await self.write_and_verify(payload, repeated.target_schema(), related, expected_status='success')
 
     async def test_empty_lookup_collection_removes_property_in_generated_payload(self):
         source = source_schema()

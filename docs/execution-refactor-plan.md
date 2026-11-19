@@ -8,8 +8,11 @@ and [stage 3 record](execution-refactor-stage3.md), plus [stage 4](execution-ref
 and [stage 5](execution-refactor-stage5.md).
 Stage 6 was subsequently authorized; its supported ports are implemented in the
 [stage 6 record](execution-refactor-stage6.md), with rename execution explicitly
-incomplete pending endpoint evidence. Stage 7 awaits instruction. Dependency
-installation and live API writes remain outside the current authorization.
+incomplete pending endpoint evidence. Stage 7 was subsequently authorized; its
+supported integration and retirement work is complete in the
+[stage 7 record](execution-refactor-stage7.md). The whole migration is not declared
+complete while rename execution remains gated. Dependency installation and live API
+writes remain outside the current authorization.
 
 ## Scope and agreed tradeoffs
 

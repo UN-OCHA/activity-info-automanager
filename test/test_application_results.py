@@ -108,7 +108,7 @@ class ResultIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actual.command.member_ids, ('pending-field:new',))
         self.assertEqual(manager.results[-1].applications[0].command.member_ids, ('pending-field:new',))
         manager.executions[1].schema['elements'].clear()
-        manager.executions[1].opschema[0]['elements'].clear()
+        manager.executions[1].form_snapshots[0]['elements'].clear()
         authored.display_state.legacy_forms()['a']['elements'].clear()
         self.assertEqual(actual.display_state.legacy_forms()['a']['elements'][0]['label'], 'Added')
         self.assertEqual(manager.workspace.state.forms['a']['elements'], [])
@@ -154,12 +154,12 @@ class ResultIntegrationTests(unittest.IsolatedAsyncioTestCase):
                   'typeParameters': {'range': [{'formId': 'people'}]}}])
         manager, _ = await self.evaluate('DeleteField(fieldCode="missing")', [source],
                                         related={'people': form('people', 'People')})
-        before, target = manager.results[-1].display_state, manager.target_opschema()
+        before, target = manager.results[-1].display_state, manager.target_forms()
         self.assertIsNone(manager.enrich_current_display(before.snapshot_id, before.generation - 1, {}))
         enriched = manager.enrich_current_display(before.snapshot_id, before.generation, {('people', 'r'): 'Alice'})
         self.assertIn('Alice', enriched.legacy_metadata()['a'][0]['elements'][0]['defaultValue'])
         self.assertNotIn(('people', 'r'), before.record_labels)
-        self.assertEqual(manager.target_opschema(), target)
+        self.assertEqual(manager.target_forms(), target)
         self.assertIsNone(manager.enrich_current_display(before.snapshot_id, before.generation, {}))
         manager._evaluate_commands()
         await manager._evaluation_task

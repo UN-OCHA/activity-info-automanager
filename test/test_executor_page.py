@@ -19,6 +19,12 @@ from test.test_planning import schema_state
 
 
 class PageService(MemoryEvidenceService):
+    async def get_form_names(self, database):
+        return {key: data['label'] for key, data in self.schemas.items() if data.get('databaseId') == database}
+
+    async def query_rows(self, query):
+        self.queries = getattr(self, 'queries', 0) + 1
+        return [{'_id': 'first', 'label': 'Alice'}]
     async def get_databases(self):
         return {'db': 'Database'}
 
@@ -44,8 +50,8 @@ def callback(button):
 
 
 class ExecutorPageTests(unittest.IsolatedAsyncioTestCase):
-    async def build(self, modes=(), text='AddField(fieldCode="NEW", label="New")'):
-        service = PageService({'a': schema_state()}, modes)
+    async def build(self, modes=(), text='AddField(fieldCode="NEW", label="New")', initial=None):
+        service = PageService(initial or {'a': schema_state()}, modes)
         managers = []
 
         def make_manager(**kwargs):
@@ -158,3 +164,39 @@ class ExecutorPageTests(unittest.IsolatedAsyncioTestCase):
             ok = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'OK')
             await callback(ok)()
         self.assertEqual(service.writes, [])
+
+    async def test_reference_default_survives_frozen_confirmation_without_requery(self):
+        from dataclasses import replace
+        from activity_manager.resource_state import FormPayload
+        people = schema_state('people')
+        data = people.payload.to_dict()
+        data.update(recordLabelFieldId='name', elements=[dict(id='name', code='NAME', label='Name', type='FREE_TEXT', required=False)])
+        people = replace(people, payload=FormPayload(data))
+        service, manager, page = await self.build(initial={'a': schema_state(), 'people': people},
+            text='AddField(fieldCode="REF", label="Reference", fieldType="reference", referencedForm="people", defaultValue="Alice")')
+        with self.client:
+            queries = service.queries
+            manager.on_execute()
+            self.assertEqual(service.queries, queries)
+            ok = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'OK')
+            await callback(ok)()
+            report = manager.execution_report
+            self.assertEqual(report.status, 'success', report.messages)
+            self.assertEqual(service.queries, queries)
+            self.assertEqual(report.plan.reference_defaults[('people', 'str', 'Alice')], 'people:first')
+            self.assertEqual(service.writes[0][1]['elements'][-1]['defaultValue'], 'people:first')
+            await self.finish_evaluation(manager)
+
+    async def test_remote_stale_edit_is_reported_before_any_write(self):
+        service, manager, page = await self.build()
+        service.schemas['a']['label'] = 'Changed remotely'
+        with self.client:
+            manager.on_execute()
+            ok = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'OK')
+            await callback(ok)()
+            report = manager.execution_report
+            self.assertEqual(report.status, 'preflight_failed')
+            self.assertEqual(service.writes, [])
+            self.assertEqual(report.actual_schemas['a']['label'], 'Changed remotely')
+            self.assertEqual(manager.resolution_cache, {})
+            await self.finish_evaluation(manager)

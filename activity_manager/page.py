@@ -164,7 +164,7 @@ def connection_page():
         nonlocal form_field_request
         form_field_request += 1
         request = form_field_request
-        active = command_list.workspace.active_schema if command_list.workspace.opschema else source_schema
+        active = command_list.workspace.active_schema if command_list.workspace.form_snapshots else source_schema
         control = creator.controls.get('referenced_form')
         reference = control.value if control is not None else None
         data = None
@@ -255,7 +255,7 @@ def connection_page():
             raise ValueError('Connect before resolving command names.')
         return await resolve_command_schema(service, data, command_list.related_schemas,
             command_list.database_names, command_list.reference_defaults, command_list.resolution_cache,
-            source_schema=command_list.workspace.originals.get(data.get("id"), data))
+            source_schema=command_list.workspace.baseline_forms.get(data.get("id"), data))
 
     async def lookup_variable(command, schema):
         from .commands.set_variable import query_variable
@@ -271,10 +271,9 @@ def connection_page():
             names, issues = result_metadata.get(identity, (None, ()))
             show_result(data, names=names, issues=issues)
 
-    def show_results(snapshots, active=None, execution=None, empty_message='No result', related=None, snapshot=None):
+    def show_results(snapshots, active=None, empty_message='No result', related=None, snapshot=None):
         nonlocal result_forms, result_metadata, result_context, result_database_names, result_historical
-        snapshot = snapshot or (execution.display_state if execution is not None else None)
-        result_historical = execution is not None or snapshot is not None
+        result_historical = snapshot is not None
         if snapshot is not None:
             active = (('database:' if snapshot.preferred_key.kind.value == 'database_resources' else '') +
                       snapshot.preferred_key.identity) if snapshot.preferred_key is not None else None
@@ -286,26 +285,9 @@ def connection_page():
             result_database_names = deepcopy(command_list.database_names)
             result_forms = {data.get('id', '__initial__'): data for data in snapshots}
             result_context = {**{identity: data for identity, data in command_list.related_schemas.items()
-                                  if identity not in command_list.workspace.originals},
+                                  if identity not in command_list.workspace.baseline_forms},
                               **command_list._base_related, **(related or {}), **result_forms}
             result_metadata = {}
-            if execution is not None:
-                # Preserve warnings/record labels from the last reached command for
-                # each tab, without borrowing annotations from a later command.
-                for parent in command_list.executions:
-                    for saved in (*parent.iterations, parent):
-                        if saved.schema is not None and saved.opschema and len(saved.opschema) <= len(snapshots):
-                            identity = saved.schema.get('id', '__initial__')
-                            if result_forms.get(identity) == saved.schema:
-                                result_metadata[identity] = (saved.names_schema, saved.issues)
-                    if parent is execution or execution in parent.iterations:
-                        break
-            if execution is not None and execution.schema is not None:
-                result_metadata[execution.schema.get('id', '__initial__')] = (execution.names_schema, execution.issues)
-            if execution is not None and execution.form_issues is not None:
-                for identity in result_forms:
-                    names, _ = result_metadata.get(identity, (None, ()))
-                    result_metadata[identity] = (names, execution.form_issues.get(identity, ()))
         result_tabs.clear()
         with result_tabs:
             for identity, data in result_forms.items():
@@ -383,17 +365,24 @@ def connection_page():
         selected_index: int | None,
         execution: CommandExecution | None,
     ) -> None:
-        rejected_view.set_visibility(False)
+        view = None
+        if selected_index is not None and selected_index < len(command_list.results):
+            view = command_list.results[selected_index]
+            if command_list.selected_iteration is not None:
+                view = view.applications[command_list.selected_iteration]
+        attachment = getattr(view, 'rejected_candidate', None)
+        if attachment is None and view is not None and hasattr(view, 'applications'):
+            attachment = next((item.rejected_candidate for item in reversed(view.applications)
+                               if item.rejected_candidate is not None), None)
+        rejected_view.set_visibility(attachment is not None)
         rejected_code.set_content('')
-        if execution is not None and execution.rejected_candidate is not None:
-            attachment = execution.rejected_candidate
+        if attachment is not None:
             candidate = thaw(attachment.candidate)
             paths = tuple(item.path for item in attachment.diagnostics if item.path is not None)
             rejected_code.markdown._sanitize = lambda html: underline_substitutions(html, candidate, paths, underline=False)
             rejected_code.set_content(json.dumps(candidate, indent=2, ensure_ascii=False))
             rejected_code.markdown._handle_content_change(rejected_code._render_markdown())
-            rejected_view.set_visibility(True)
-        active = command_list.workspace.active_schema if command_list.workspace.opschema else source_schema
+        active = command_list.workspace.active_schema if command_list.workspace.form_snapshots else source_schema
         command_creator.set_schema(active)
         if active:
             directory = command_list.resolution_cache.get(('get_form_names', json.dumps((active.get('databaseId'),))))
@@ -414,12 +403,12 @@ def connection_page():
                          related=report_context if report_version == command_list._evaluation_version else None,
                          snapshot=report_display if report_version == command_list._evaluation_version else None)
             return
-        if execution is None:
+        if view is None:
             console_message.set_text('Did not execute.')
             show_results([])
             return
-        console_message.set_text(execution.message)
-        show_results(execution.opschema, active=execution.schema.get("id") if execution.schema else None, execution=execution)
+        console_message.set_text(view.message)
+        show_results([], snapshot=view.display_state)
 
     async def choose_recovery(diff_summary: str):
         with ui.dialog() as dialog, ui.card().classes('w-full max-w-3xl'):

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 from activity_manager.commands import AddFieldCommand
 from activity_manager.schema_identity import prepare_schema_for_put, prepare_schema_for_write
 from activity_manager.schema_names import schema_with_ids, substitute_record_label
-from activity_manager.schema_change import apply_form_schema_change
+from test.execution_fixtures import execute_schema_fixture
 from test.test_add_field import schema
 from test.test_field_parameters import OPTIONS
 
@@ -125,7 +125,7 @@ class ReferenceWriteTests(unittest.IsolatedAsyncioTestCase):
         service = SimpleNamespace(get_form_schema=AsyncMock(side_effect=read),
             get_form_tree=AsyncMock(return_value={'people': {'recordLabelFieldId': 'label', 'elements': []}}),
             put_form_schema=AsyncMock(side_effect=write), query_rows=AsyncMock(return_value=[{'_id': 'person'}]))
-        outcome = await apply_form_schema_change(service, loaded['id'], loaded, preview, AsyncMock())
+        outcome = await execute_schema_fixture(service, loaded['id'], loaded, preview, AsyncMock())
         self.assertEqual(outcome.status, 'success', outcome.messages)
         self.assertEqual(written['elements'][-1]['defaultValue'], 'people:person')
         self.assertEqual(written['elements'][-1]['validationCondition'], loaded['elements'][0]['id'] + ' != ""')

@@ -53,7 +53,7 @@ class ExecutionResult:
     diagnostics: tuple[Diagnostic, ...] = ()
     names_schema: dict | None = None
     success_message: str | None = None
-    opschema: tuple[dict, ...] = ()
+    form_snapshots: tuple[dict, ...] = ()
     snapshot_issues: tuple[Diagnostic, ...] | None = None
     form_issues: dict | None = None
     display_state: DisplayState | None = None
@@ -105,7 +105,7 @@ class CommandExecution:
     concrete_command: Any = None
     snapshot_issues: tuple[Diagnostic, ...] | None = None
     target: IterationTarget | None = None
-    opschema: tuple[dict, ...] = ()
+    form_snapshots: tuple[dict, ...] = ()
     form_issues: dict | None = None
     form_iterations: bool = False
     field_iterations: bool = False
@@ -131,7 +131,7 @@ class CommandExecution:
     @classmethod
     def from_result(cls, result):
         return cls(result.status, result.schema, result.message, result.names_schema, result.diagnostics,
-                   opschema=result.opschema, snapshot_issues=result.snapshot_issues, form_issues=result.form_issues,
+                   form_snapshots=result.form_snapshots, snapshot_issues=result.snapshot_issues, form_issues=result.form_issues,
                    display_state=result.display_state, prepared_syntax=result.prepared_syntax,
                    prepared_parameters=result.prepared_parameters, target_member_ids=result.target_member_ids, rejected_candidate=result.rejected_candidate,
                    effect_ids=result.effect_ids)

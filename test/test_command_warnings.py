@@ -9,7 +9,7 @@ from activity_manager.commands import AddFieldCommand, MoveFieldCommand, DeleteF
 from activity_manager.command_list import CommandListManager
 from activity_manager.schema_names import unresolved_formula_references
 from activity_manager.schema_resolution import resolve_command_schema
-from activity_manager.schema_change import apply_form_schema_change
+from test.execution_fixtures import execute_schema_fixture
 from test.test_add_field import schema
 
 
@@ -57,14 +57,14 @@ class CommandWarningTests(unittest.IsolatedAsyncioTestCase):
             icons = [element.props.get('name') for element in manager.simple_content.descendants()
                      if isinstance(element, ui.icon)]
             self.assertIn('warning', icons)
-            service = SimpleNamespace(get_form_schema=AsyncMock(side_effect=[source, manager.target_schema()]),
+            service = SimpleNamespace(get_form_schema=AsyncMock(side_effect=[source, source, manager.target_schema()]),
                                       put_resolved_form_schema=AsyncMock())
             # Use a write echo so verification sees the materialized IDs.
             async def write(form_id, target):
                 service.get_form_schema.side_effect = None
                 service.get_form_schema.return_value = target
             service.put_resolved_form_schema.side_effect = write
-            result = await apply_form_schema_change(service, 'form1', source, manager.target_schema(),
+            result = await execute_schema_fixture(service, 'form1', source, manager.target_schema(),
                                                     AsyncMock(), resolved=True)
             self.assertEqual(result.status, 'success', result.messages)
             self.assertEqual(service.put_resolved_form_schema.await_args.args[1]['elements'][-2]['validationCondition'],

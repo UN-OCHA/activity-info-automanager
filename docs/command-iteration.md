@@ -71,10 +71,11 @@ Each target has an independent inherited variable mapping; names assigned by
 SetVariable inside the scope are discarded from the outer mapping on exit.
 An empty selection warns and skips applications until a new switch.
 
-FormWorkspace.active_slot selects which opschema entry update() changes. A scope
-appends one visit per target and reuses those slots for subsequent commands,
-while ordinary switches keep ordered visit behavior. Command snapshots are deep
-copies. CommandExecution.form_iterations identifies scope summaries. _form_summary
+FormWorkspace selects canonical state through a ResourceKey. A scope retains
+those keys for subsequent commands; revisits reuse current state without appending
+mutable visit arrays. PlanBuilder independently records action order and grouping.
+DisplayState owns immutable historical snapshots. CommandExecution.form_iterations
+identifies card summaries. _form_summary
 recursively flattens nested results into concrete `iterations`, carrying tuple
 application_context paths (form / field) and preserving every leaf snapshot.
 field_iterations marks empty field groups so zero matches contribute no leaf.
@@ -85,5 +86,6 @@ to _application_steps; early failure retains all remaining planned leaves as
 not_executed. Nested evaluation does not replace the published flat parent with
 a temporary field-only summary. All repeated commands expand upward and count
 concrete leaves, including WithForm and scoped single commands/SetVariable.
-Selection indexes the flat list and displays that leaf's complete opschema with
-its affected form selected. Execution still consumes the ordered snapshots.
+Selection indexes the flat list and renders that application's immutable
+DisplayState with its affected resource selected. Execution consumes the confirmed
+action plan, independently of display order or selected tabs.

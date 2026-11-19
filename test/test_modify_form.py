@@ -10,8 +10,8 @@ from activity_manager.command_creator import CommandCreatorRenderer
 from activity_manager.command_list import CommandListManager
 from activity_manager.command_parser import parse_command_text, CommandTextError
 from activity_manager.commands.modify_form import MODIFY_FORM, ModifyFormCommand
-from activity_manager.multi_form import prepare_operations
-from activity_manager.schema_change import apply_schema_sequence
+from test.execution_fixtures import materialized_targets
+from test.execution_fixtures import execute_sequence_fixture
 from activity_manager.schema_resolution import CachedResolutionService
 from test import test_multi_form as fixtures
 
@@ -104,7 +104,7 @@ WithForm(form="Renamed")
         self.assertEqual(manager.executions[0].schema['recordLabelFieldId'], 'b-name')
         self.assertEqual(manager.executions[1].schema['elements'][-1]['code'], 'new')
         self.assertEqual(manager.executions[-1].schema['label'], 'Renamed')
-        self.assertEqual(manager.executions[0].opschema[0]['label'], 'A')
+        self.assertEqual(manager.executions[0].form_snapshots[0]['label'], 'A')
         self.assertEqual(len(manager.executions[0].schema['elements']), 1)
 
     async def test_multiple_renames_keep_frozen_captures_and_active_scope(self):
@@ -115,9 +115,9 @@ AddField(fieldCode="new", label="${form.name}/${form.1}/${form.index}")
         self.assertEqual([e.status for e in manager.executions], ['applied', 'applied'],
                          [e.message for e in manager.executions])
         self.assertEqual([e.application_label for e in manager.executions[0].iterations], ['Site A', 'Site B'])
-        self.assertEqual([s['label'] for s in manager.target_opschema()], ['Root', 'New A', 'New B'])
-        self.assertEqual([s['recordLabelFieldId'] for s in manager.target_opschema()[1:]], ['a-name', 'b-name'])
-        self.assertEqual([s['elements'][-1]['label'] for s in manager.target_opschema()[1:]], ['Site A/A/1', 'Site B/B/2'])
+        self.assertEqual([s['label'] for s in manager.target_forms()], ['Root', 'New A', 'New B'])
+        self.assertEqual([s['recordLabelFieldId'] for s in manager.target_forms()[1:]], ['a-name', 'b-name'])
+        self.assertEqual([s['elements'][-1]['label'] for s in manager.target_forms()[1:]], ['Site A/A/1', 'Site B/B/2'])
         self.assertEqual(manager.workspace.active_schema['id'], 'b')
 
     async def test_multiple_error_is_atomic_and_stops_remaining_targets(self):
@@ -130,7 +130,7 @@ AddField(fieldCode="later", label="Later")
         self.assertEqual(manager.executions[0].schema['id'], 'root')
         self.assertEqual(manager.executions[0].schema['label'], 'Root')
         self.assertEqual(manager.executions[1].status, 'not_executed')
-        self.assertEqual([s['id'] for s in manager.workspace.opschema], ['root'])
+        self.assertEqual([s['id'] for s in manager.workspace.form_snapshots], ['root'])
 
     async def test_new_form_command_replaces_scope_and_discards_local_variables(self):
         manager, _ = await self.evaluate([form('a', 'A'), form('b', 'B')], '''
@@ -169,7 +169,7 @@ AddField(fieldCode="new", label="New")
 ModifyForm(form="A", recordLabelFieldId="new")
 ''')
         self.assertEqual([e.status for e in manager.executions], ['applied', 'applied'])
-        preview = manager.target_opschema()[0]
+        preview = manager.target_forms()[0]
         self.assertTrue(preview['recordLabelFieldId'].startswith('pending-field:'))
         from activity_manager.confirmed_plan import materialize_plan, AttemptBinding
         from test.form_command_runtime import execute
@@ -231,7 +231,7 @@ class ModifyFormSuggestionTests(unittest.IsolatedAsyncioTestCase):
         await creator.on_parameter_change(creator)
         self.assertEqual(creator.controls['record_label_field_id'].options, ['SECOND'])
         self.assertEqual(service.reads, ['b'])
-        self.assertEqual([s['id'] for s in manager.workspace.opschema], ['a'])
+        self.assertEqual([s['id'] for s in manager.workspace.form_snapshots], ['a'])
         await creator.on_parameter_change(creator)
         self.assertEqual(service.reads, ['b'])
         local = deepcopy(manager.workspace.active_schema)

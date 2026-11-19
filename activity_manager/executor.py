@@ -226,6 +226,8 @@ class Executor:
                 evidence=evidence, postimage=actual, finished_at=timestamp()))
             self._messages.append(f'{action.action_id}: {outcome.value}' +
                                   (f'; API error: {evidence.failure.message}' if evidence.failure else ''))
+            if outcome == Outcome.DIVERGENT:
+                self._messages.append(handler.compare(action.after, actual).summary)
             if outcome != Outcome.INTENDED or evidence.failure is not None:
                 failed = True
                 break

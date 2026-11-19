@@ -8,8 +8,8 @@ from nicegui.client import Client
 from activity_manager.command_list import CommandListManager
 from activity_manager.command_parser import parse_command_text, CommandTextError
 from activity_manager.command_execution import ExecutionResult
-from activity_manager.multi_form import prepare_operations
-from activity_manager.schema_change import apply_schema_sequence
+from test.execution_fixtures import materialized_targets
+from test.execution_fixtures import execute_sequence_fixture
 from activity_manager.schema_resolution import resolve_command_schema
 from activity_manager.page import connection_page
 
@@ -57,7 +57,7 @@ class PreviewTests(unittest.IsolatedAsyncioTestCase):
             manager = CommandListManager(form_service=service, on_execute=AsyncMock())
         async def resolve(data):
             return await resolve_command_schema(service, data, manager.related_schemas, {}, {}, {},
-                                                source_schema=manager.workspace.originals[data['id']])
+                                                source_schema=manager.workspace.baseline_forms[data['id']])
         manager.resolve_schema = resolve
         manager.set_schema(schemas[0])
         manager.commands = parse_command_text(text)
@@ -82,21 +82,18 @@ DeleteField(fieldCode="old")
 ''')
         self.assertTrue(all(e.status == 'applied' for e in manager.executions),
                         [e.message for e in manager.executions])
-        snapshots = manager.target_opschema()
-        self.assertEqual([s['id'] for s in snapshots], ['one', 'two', 'one'])
-        self.assertEqual([f['code'] for f in snapshots[0]['elements']], ['old', 'new'])
-        self.assertEqual([f['code'] for f in snapshots[2]['elements']], ['new'])
-        self.assertIn('pending-field:new', snapshots[1]['elements'][1]['typeParameters']['formula'])
-        self.assertEqual(service.reads, ['two'])
-        self.assertEqual(len(manager.executions[0].opschema), 1)
-        self.assertEqual(len(manager.executions[2].opschema), 2)
-        self.assertEqual(one['elements'][0]['code'], 'old')
-
-        operations = prepare_operations(snapshots, manager.workspace.originals, {})
-        first_id = operations[0][0]['elements'][-1]['id']
-        self.assertEqual(operations[2][0]['elements'][0]['id'], first_id)
-        self.assertEqual(operations[1][0]['elements'][1]['typeParameters']['formula'], f'refid.{first_id}')
-        outcome = await apply_schema_sequence(service, manager.workspace.originals, snapshots, AsyncMock())
+        snapshots = manager.target_forms()
+        self.assertEqual([item['id'] for item in snapshots], ['one', 'two'])
+        self.assertEqual([f['code'] for f in snapshots[0]['elements']], ['new'])
+        self.assertEqual([f['code'] for f in manager.executions[0].schema['elements']], ['old', 'new'])
+        from activity_manager.confirmed_plan import materialize_plan, AttemptBinding
+        from test.form_command_runtime import execute
+        plan = materialize_plan(manager.candidate_plan, AttemptBinding('fixture', {}, 'session'))
+        self.assertEqual([item.action.key.identity for item in plan.actions], ['one', 'two', 'one'])
+        first_id = plan.actions[0].request.schema['elements'][-1]['id']
+        self.assertEqual(plan.actions[2].request.schema['elements'][0]['id'], first_id)
+        self.assertEqual(plan.actions[1].request.schema['elements'][1]['typeParameters']['formula'], f'refid.{first_id}')
+        outcome = await execute(manager, service)
         self.assertEqual(outcome.status, 'success', outcome.messages)
         self.assertEqual([key for key, _ in service.writes], ['one', 'two', 'one'])
 
@@ -108,7 +105,7 @@ WithForm(form="${vars.target}")
 WithForm(form="Two")
 WithForm(form="Three")
 ''')
-        self.assertEqual([s['id'] for s in manager.target_opschema()], ['one', 'two', 'three'])
+        self.assertEqual([s['id'] for s in manager.target_forms()], ['one', 'two', 'three'])
         self.assertEqual(manager.executions[-1].schema['databaseId'], 'remote')
         self.assertEqual(service.reads, ['two', 'three'])
 
@@ -120,7 +117,7 @@ AddField(fieldCode="new", label="New")
         self.assertEqual(manager.executions[0].status, 'error')
         self.assertEqual(manager.executions[1].status, 'not_executed')
         self.assertEqual(manager.executions[0].schema['id'], 'one')
-        self.assertEqual(len(manager.workspace.opschema), 1)
+        self.assertEqual(len(manager.workspace.form_snapshots), 1)
 
     async def test_reevaluation_does_not_reuse_previous_local_edits(self):
         manager, _ = await self.evaluate([form('one', 'One'), form('two', 'Two')], '''
@@ -130,7 +127,7 @@ WithForm(form="Two")
         manager.commands = parse_command_text('WithForm(form="Two")\nWithForm(form="One")')
         manager._evaluate_commands()
         await manager._evaluation_task
-        self.assertEqual(manager.target_opschema()[-1]['elements'], [])
+        self.assertTrue(all(not item['elements'] for item in manager.target_forms()))
 
     async def test_deleted_pending_field_is_not_reused_for_a_new_field(self):
         manager, _ = await self.evaluate([form('one', 'One'), form('two', 'Two')], '''
@@ -140,10 +137,10 @@ WithForm(form="One")
 DeleteField(fieldCode="new")
 AddField(fieldCode="new", label="Replacement")
 ''')
-        snapshots = manager.target_opschema()
-        self.assertNotEqual(snapshots[0]['elements'][0]['id'], snapshots[-1]['elements'][0]['id'])
-        operations = prepare_operations(snapshots, manager.workspace.originals, {})
-        self.assertNotEqual(operations[0][0]['elements'][0]['id'], operations[-1][0]['elements'][0]['id'])
+        self.assertNotEqual(manager.executions[0].schema['elements'][0]['id'], manager.target_schema()['elements'][0]['id'])
+        from activity_manager.confirmed_plan import materialize_plan, AttemptBinding
+        plan = materialize_plan(manager.candidate_plan, AttemptBinding('fixture', {}, 'session'))
+        self.assertNotEqual(plan.actions[0].request.schema['elements'][0]['id'], plan.actions[-1].request.schema['elements'][0]['id'])
 
     async def test_zero_match_iteration_keeps_the_full_write_sequence(self):
         manager, _ = await self.evaluate([form('one', 'One'), form('two', 'Two')], '''
@@ -152,8 +149,8 @@ WithForm(form="Two")
 DeleteField(fieldPattern="missing.*")
 ''')
         self.assertEqual(manager.executions[-1].status, 'warning')
-        self.assertEqual([s['id'] for s in manager.target_opschema()], ['one', 'two'])
-        self.assertEqual(manager.target_opschema()[0]['elements'][0]['code'], 'first')
+        self.assertEqual([s['id'] for s in manager.target_forms()], ['one', 'two'])
+        self.assertEqual(manager.target_forms()[0]['elements'][0]['code'], 'first')
 
     async def test_unchanged_steps_retain_annotations_before_a_revisit(self):
         manager, _ = await self.evaluate([form('one', 'One'), form('two', 'Two')], '''
@@ -227,7 +224,7 @@ DeleteField(fieldCode="first")
 
         async def resolve(data):
             return await resolve_command_schema(manager.form_service, data, manager.related_schemas,
-                                                {}, {}, {}, source_schema=manager.workspace.originals[data['id']])
+                                                {}, {}, {}, source_schema=manager.workspace.baseline_forms[data['id']])
 
         manager.resolve_schema = resolve
         manager.set_schema(form('one', 'One'))
@@ -331,22 +328,31 @@ class SequenceTests(unittest.IsolatedAsyncioTestCase):
     def setup_sequence(self):
         one, two = form('one', 'One'), form('two', 'Two')
         a, b, c = deepcopy(one), deepcopy(two), deepcopy(one)
-        a['label'], b['label'], c['label'] = 'One intermediate', 'Two final', 'One final'
-        return MemoryService([one, two]), {'one': one, 'two': two}, [a, b, c]
+        a['description'], b['description'], c['description'] = 'One intermediate', 'Two final', 'One final'
+        service = MemoryService([one, two])
+        async def commit(identity, schema):
+            service.writes.append((identity, deepcopy(schema)))
+            if len(service.writes) == service.reject_at:
+                raise ValueError('Rejected')
+            service.schemas[identity] = deepcopy(schema)
+            if len(service.writes) == service.fail_at:
+                raise ValueError('Response lost after commit')
+        service.put_form_schema = commit
+        return service, {'one': one, 'two': two}, [a, b, c]
 
     async def test_reverse_rollback_includes_repeated_form_and_failed_update(self):
         service, originals, steps = self.setup_sequence()
         service.fail_at = 3
-        outcome = await apply_schema_sequence(service, originals, steps, AsyncMock(return_value='rollback_all'))
-        self.assertEqual(outcome.status, 'rolled_back', outcome.messages)
+        outcome = await execute_sequence_fixture(service, originals, steps, AsyncMock(return_value='rollback_all'))
+        self.assertEqual(outcome.status, 'rolled_back_all', outcome.messages)
         self.assertEqual([i for i, _ in service.writes], ['one', 'two', 'one', 'one', 'two', 'one'])
         self.assertEqual(service.schemas, originals)
-        self.assertEqual(service.writes[3][1]['label'], 'One intermediate')
+        self.assertEqual(service.writes[3][1]['description'], 'One intermediate')
 
     async def test_last_only_restores_preceding_visit(self):
         service, originals, steps = self.setup_sequence()
         service.fail_at = 3
-        outcome = await apply_schema_sequence(service, originals, steps, AsyncMock(return_value='rollback_last'))
+        outcome = await execute_sequence_fixture(service, originals, steps, AsyncMock(return_value='rollback_last'))
         self.assertEqual(outcome.status, 'rolled_back_last')
         self.assertEqual(service.schemas['one'], steps[0])
         self.assertEqual(service.schemas['two'], steps[1])
@@ -354,15 +360,15 @@ class SequenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_leave_stops_forward_execution(self):
         service, originals, steps = self.setup_sequence()
         service.fail_at = 2
-        outcome = await apply_schema_sequence(service, originals, steps, AsyncMock(return_value='leave'))
-        self.assertEqual(outcome.status, 'partial_left')
+        outcome = await execute_sequence_fixture(service, originals, steps, AsyncMock(return_value='leave'))
+        self.assertEqual(outcome.status, 'left')
         self.assertEqual(len(service.writes), 2)
 
     async def test_rollback_failure_stops_immediately(self):
         service, originals, steps = self.setup_sequence()
         service.fail_at, service.reject_at = 3, 4
-        outcome = await apply_schema_sequence(service, originals, steps, AsyncMock(return_value='rollback_all'))
-        self.assertEqual(outcome.status, 'rollback_failed')
+        outcome = await execute_sequence_fixture(service, originals, steps, AsyncMock(return_value='rollback_all'))
+        self.assertEqual(outcome.status, 'recovery_failed')
         self.assertEqual(len(service.writes), 4)
 
     async def test_rollback_verification_failure_stops_immediately(self):
@@ -373,19 +379,19 @@ class SequenceTests(unittest.IsolatedAsyncioTestCase):
             if len(service.writes) in (3, 4):
                 service.schemas[identity]['label'] = 'Partial change'
         service.put_form_schema = partial
-        outcome = await apply_schema_sequence(service, originals, steps, AsyncMock(return_value='rollback_all'))
-        self.assertEqual(outcome.status, 'rollback_failed')
-        self.assertEqual(len(service.writes), 4)
+        outcome = await execute_sequence_fixture(service, originals, steps, AsyncMock(return_value='rollback_all'))
+        self.assertEqual(outcome.status, 'recovery_blocked')
+        self.assertEqual(len(service.writes), 3)
 
     async def test_single_form_and_unchanged_visits(self):
         one = form('one', 'One')
         service = MemoryService([one])
         choose = AsyncMock()
-        outcome = await apply_schema_sequence(service, {'one': one}, [one], choose)
+        outcome = await execute_sequence_fixture(service, {'one': one}, [one], choose)
         self.assertEqual(outcome.status, 'success')
         self.assertEqual(service.writes, [])
-        changed = {**one, 'label': 'Updated'}
-        outcome = await apply_schema_sequence(service, {'one': one}, [changed], choose)
+        changed = {**one, 'description': 'Updated'}
+        outcome = await execute_sequence_fixture(service, {'one': one}, [changed], choose)
         self.assertEqual(outcome.status, 'success')
         self.assertEqual(service.schemas['one'], changed)
         choose.assert_not_awaited()
@@ -393,16 +399,16 @@ class SequenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_preflight_checks_all_forms_before_writing(self):
         service, originals, steps = self.setup_sequence()
         service.schemas['two']['label'] = 'Concurrent edit'
-        outcome = await apply_schema_sequence(service, originals, steps, AsyncMock())
-        self.assertEqual(outcome.status, 'stale')
+        outcome = await execute_sequence_fixture(service, originals, steps, AsyncMock())
+        self.assertEqual(outcome.status, 'preflight_failed')
         self.assertEqual(service.writes, [])
 
     async def test_rejected_write_offers_full_rollback(self):
         service, originals, steps = self.setup_sequence()
         service.reject_at = 2
         choose = AsyncMock(return_value='rollback_all')
-        outcome = await apply_schema_sequence(service, originals, steps, choose)
-        self.assertEqual(outcome.status, 'rolled_back')
+        outcome = await execute_sequence_fixture(service, originals, steps, choose)
+        self.assertEqual(outcome.status, 'rolled_back_all')
         choose.assert_awaited_once()
         self.assertEqual(service.schemas, originals)
 
@@ -417,8 +423,8 @@ class SequenceTests(unittest.IsolatedAsyncioTestCase):
                 raise ValueError('Read unavailable')
             return await read(identity)
         service.get_form_schema = flaky
-        outcome = await apply_schema_sequence(service, originals, steps, AsyncMock(return_value='rollback_all'))
-        self.assertEqual(outcome.status, 'rolled_back', outcome.messages)
+        outcome = await execute_sequence_fixture(service, originals, steps, AsyncMock(return_value='rollback_all'))
+        self.assertEqual(outcome.status, 'rolled_back_all', outcome.messages)
         self.assertEqual(service.schemas, originals)
 
     async def test_later_stale_check_offers_recovery(self):
@@ -429,8 +435,8 @@ class SequenceTests(unittest.IsolatedAsyncioTestCase):
             if len(service.writes) == 1:
                 service.schemas['two']['label'] = 'Concurrent edit'
         service.put_form_schema = concurrent
-        outcome = await apply_schema_sequence(service, originals, steps, AsyncMock(return_value='rollback_all'))
-        self.assertEqual(outcome.status, 'rolled_back', outcome.messages)
+        outcome = await execute_sequence_fixture(service, originals, steps, AsyncMock(return_value='rollback_all'))
+        self.assertEqual(outcome.status, 'rolled_back_all', outcome.messages)
         self.assertEqual(service.schemas['one'], originals['one'])
         self.assertEqual(service.schemas['two']['label'], 'Concurrent edit')
 
@@ -439,7 +445,9 @@ class SequenceTests(unittest.IsolatedAsyncioTestCase):
         a, b = deepcopy(one), deepcopy(two)
         for schema in (a, b):
             schema['elements'] = [{'id': 'pending-field:new', 'code': 'new', 'type': 'text', 'label': 'New'}]
-        operations = prepare_operations([a, b, a], {'one': one, 'two': two}, {})
+        again = deepcopy(a)
+        again['description'] = 'Revisit'
+        operations = materialized_targets([a, b, again], {'one': one, 'two': two}, {})
         ids = [schema['elements'][0]['id'] for schema, _ in operations]
         self.assertEqual(ids[0], ids[2])
         self.assertNotEqual(ids[0], ids[1])

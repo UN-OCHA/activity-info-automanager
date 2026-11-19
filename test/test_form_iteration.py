@@ -10,7 +10,7 @@ from activity_manager.command_list import CommandListManager
 from activity_manager.command_parser import parse_command_text, CommandTextError
 from activity_manager.commands.with_form import WITH_FORM
 from activity_manager.commands.add_field import AddFieldCommand
-from activity_manager.schema_change import apply_schema_sequence
+from test.execution_fixtures import execute_sequence_fixture
 from activity_manager.listbox import DatabaseListbox
 from test import test_multi_form as fixtures
 
@@ -63,12 +63,12 @@ AddField(fieldCode="three", label="Three")
 ''')
         self.assertEqual(trace, [('a', 'one'), ('b', 'one'), ('a', 'two'), ('b', 'two'), ('a', 'three'), ('b', 'three')])
         self.assertTrue(all(e.status == 'applied' for e in manager.executions), [e.message for e in manager.executions])
-        self.assertEqual([s['id'] for s in manager.target_opschema()], ['root', 'a', 'b'])
-        self.assertEqual([len(s['elements']) for s in manager.executions[1].opschema], [0, 1, 1])
-        self.assertEqual([len(s['elements']) for s in manager.executions[2].opschema], [0, 2, 2])
+        self.assertEqual([s['id'] for s in manager.target_forms()], ['root', 'a', 'b'])
+        self.assertEqual([len(s['elements']) for s in manager.executions[1].form_snapshots], [0, 1, 1])
+        self.assertEqual([len(s['elements']) for s in manager.executions[2].form_snapshots], [0, 2, 2])
         self.assertTrue(manager.executions[1].form_iterations)
         self.assertEqual(len(manager.executions[1].iterations), 2)
-        outcome = await apply_schema_sequence(service, manager.workspace.originals, manager.target_opschema(), AsyncMock())
+        outcome = await execute_sequence_fixture(service, manager.workspace.baseline_forms, manager.target_forms(), AsyncMock())
         self.assertEqual(outcome.status, 'success', outcome.messages)
         self.assertEqual([key for key, _ in service.writes], ['a', 'b'])
 
@@ -84,7 +84,7 @@ AddField(fieldCode="after", label="${vars.shared}")
 AddField(fieldCode="bad", label="${vars.local}")
 ''')
         self.assertEqual([e.status for e in manager.executions], ['applied'] * 6 + ['error'])
-        snapshots = manager.executions[3].opschema
+        snapshots = manager.executions[3].form_snapshots
         self.assertEqual(snapshots[-2]['elements'][0]['label'], 'Inherited: A-A-1')
         self.assertEqual(snapshots[-1]['elements'][0]['label'], 'Inherited: B-B-2')
         self.assertIn('undefined', manager.executions[-1].message)
@@ -109,7 +109,7 @@ AddField(fieldCode="later", label="Later")
 ''')
         execution = manager.executions[1]
         self.assertEqual([child.status for child in execution.iterations], ['error', 'not_executed'])
-        self.assertEqual(execution.opschema[-1]['elements'], [])
+        self.assertEqual(execution.form_snapshots[-1]['elements'], [])
         self.assertEqual(manager.executions[2].status, 'not_executed')
 
     async def test_zero_matches_skip_scope_then_single_switch_resumes(self):
@@ -131,8 +131,8 @@ WithForm(formPattern="Root")
 AddField(fieldCode="second", label="${form.name}")
 ''')
         self.assertEqual([child.field_code for child in manager.executions[1].iterations], ['A', 'A'])
-        self.assertNotIn('other', manager.workspace.originals)
-        self.assertEqual(manager.executions[2].opschema[-1]['elements'][0]['label'], '${form.name}')
+        self.assertNotIn('other', manager.workspace.baseline_forms)
+        self.assertEqual(manager.executions[2].form_snapshots[-1]['elements'][0]['label'], '${form.name}')
         self.assertEqual(manager.target_schema()['id'], 'root')
         self.assertEqual([f['code'] for f in manager.target_schema()['elements']], ['second'])
 
@@ -151,8 +151,8 @@ WithForm(formPattern="A|B")
 DeleteField(fieldPattern="${form.name}")
 ''')
         self.assertEqual([e.status for e in manager.executions], ['applied', 'applied'])
-        self.assertEqual([f['code'] for f in manager.target_opschema()[-2]['elements']], ['B'])
-        self.assertEqual([f['code'] for f in manager.target_opschema()[-1]['elements']], ['A'])
+        self.assertEqual([f['code'] for f in manager.target_forms()[-2]['elements']], ['B'])
+        self.assertEqual([f['code'] for f in manager.target_forms()[-1]['elements']], ['A'])
 
     async def test_optional_capture_undefined_stops_at_first_form(self):
         manager, _ = await self.evaluate([form('a', 'A'), form('b', 'AB')], '''
@@ -171,8 +171,8 @@ AddField(fieldCode="new", label="${vars.local}")
         manager.commands = parse_command_text('WithForm(form="B")\nAddField(fieldCode="bad", label="${vars.local}")')
         manager._evaluate_commands()
         await manager._evaluation_task
-        self.assertEqual([s['id'] for s in manager.workspace.opschema], ['a', 'b'])
-        self.assertEqual(manager.workspace.opschema[-1]['elements'], [])
+        self.assertEqual([s['id'] for s in manager.workspace.form_snapshots], ['a', 'b'])
+        self.assertEqual(manager.workspace.form_snapshots[-1]['elements'], [])
         self.assertEqual(manager.executions[-1].status, 'error')
 
     async def test_load_failure_keeps_reached_forms_and_stops(self):
@@ -187,7 +187,7 @@ WithForm(formPattern="A|B")
 AddField(fieldCode="later", label="Later")
 ''')
         self.assertEqual([e.status for e in manager.executions[0].iterations], ['applied', 'error'])
-        self.assertEqual([s['id'] for s in manager.executions[0].opschema], ['root', 'a'])
+        self.assertEqual([s['id'] for s in manager.executions[0].form_snapshots], ['root', 'a'])
         self.assertEqual(manager.executions[1].status, 'not_executed')
 
     async def test_zero_field_matches_keep_parent_warnings_without_applications(self):
@@ -226,11 +226,11 @@ ModifyField(fieldPattern="f_.*", fieldType="FREE_TEXT", fieldVariant="text", lab
         self.assertEqual([e.application_label for e in applications], labels)
         self.assertEqual([e.schema['id'] for e in applications], ['a', 'a', 'b', 'b', 'b'])
         for index, child in enumerate(applications):
-            self.assertEqual([s['id'] for s in child.opschema], ['root', 'a', 'b'])
-            changed = [f['label'] for s in child.opschema for f in s['elements'] if f['label'] != 'Old']
+            self.assertEqual([s['id'] for s in child.form_snapshots], ['root', 'a', 'b'])
+            changed = [f['label'] for s in child.form_snapshots for f in s['elements'] if f['label'] != 'Old']
             self.assertEqual(len(changed), index + 1)
-        self.assertEqual([f['label'] for f in applications[1].opschema[-1]['elements']], ['Old'] * 3)
-        self.assertEqual([f['label'] for f in applications[2].opschema[-1]['elements']], ['B/f_i', 'Old', 'Old'])
+        self.assertEqual([f['label'] for f in applications[1].form_snapshots[-1]['elements']], ['Old'] * 3)
+        self.assertEqual([f['label'] for f in applications[2].form_snapshots[-1]['elements']], ['B/f_i', 'Old', 'Old'])
         selected = []
         manager.on_selection_change = lambda index, execution: selected.append(execution)
         manager.toggle_iterations(2)
@@ -258,8 +258,8 @@ DeleteField(fieldCode="later")
         self.assertEqual([e.application_label for e in applications],
                          ['A / f_i', 'A / f_ii', 'B / f_i', 'B / f_ii', 'B / f_iii'])
         self.assertEqual([e.status for e in applications], ['applied', 'error'] + ['not_executed'] * 3)
-        self.assertEqual([f['code'] for f in applications[1].opschema[-2]['elements']], ['collision', 'f_ii'])
-        self.assertEqual([f['code'] for f in applications[1].opschema[-1]['elements']], ['f_i', 'f_ii', 'f_iii'])
+        self.assertEqual([f['code'] for f in applications[1].form_snapshots[-2]['elements']], ['collision', 'f_ii'])
+        self.assertEqual([f['code'] for f in applications[1].form_snapshots[-1]['elements']], ['f_i', 'f_ii', 'f_iii'])
         self.assertEqual(manager.executions[2].status, 'not_executed')
 
     async def test_single_commands_in_scope_expand_with_form_and_field_context(self):
@@ -274,10 +274,10 @@ MoveField(fieldCode="f_i", position="End")
         selected = []
         manager.on_selection_change = lambda index, execution: selected.append(execution)
         manager.select_iteration(0, 0)
-        self.assertEqual([s['id'] for s in selected[-1].opschema], ['root', 'a'])
+        self.assertEqual([s['id'] for s in selected[-1].form_snapshots], ['root', 'a'])
         manager.select_iteration(2, 0)
-        self.assertEqual([f['code'] for f in selected[-1].opschema[-2]['elements']], ['f_ii', 'f_i'])
-        self.assertEqual([f['code'] for f in selected[-1].opschema[-1]['elements']], ['f_i', 'f_ii', 'f_iii'])
+        self.assertEqual([f['code'] for f in selected[-1].form_snapshots[-2]['elements']], ['f_ii', 'f_i'])
+        self.assertEqual([f['code'] for f in selected[-1].form_snapshots[-1]['elements']], ['f_i', 'f_ii', 'f_iii'])
 
     async def test_mixed_zero_match_and_success_count_only_real_applications(self):
         manager, _ = await self.evaluate(self.repeated_forms(), '''
@@ -296,8 +296,8 @@ ModifyField(fieldPattern="f_(?P<optional>x)?.*", fieldType="FREE_TEXT", fieldVar
 ''')
         applications = manager.executions[1].iterations
         self.assertEqual([e.status for e in applications], ['error'] + ['not_executed'] * 4)
-        self.assertEqual([s['id'] for s in applications[0].opschema], ['root', 'a', 'b'])
-        self.assertEqual([f['label'] for f in applications[0].opschema[-2]['elements']], ['Old', 'Old'])
+        self.assertEqual([s['id'] for s in applications[0].form_snapshots], ['root', 'a', 'b'])
+        self.assertEqual([f['label'] for f in applications[0].form_snapshots[-2]['elements']], ['Old', 'Old'])
 
     async def test_selecting_flat_child_displays_its_historical_form_tabs(self):
         managers = []
@@ -313,7 +313,7 @@ ModifyField(fieldPattern="f_(?P<optional>x)?.*", fieldType="FREE_TEXT", fieldVar
         manager.form_service = fixtures.MemoryService(forms)
         async def resolve(data):
             return await fixtures.resolve_command_schema(manager.form_service, data, manager.related_schemas,
-                                                         {}, {}, {}, source_schema=manager.workspace.originals[data['id']])
+                                                         {}, {}, {}, source_schema=manager.workspace.baseline_forms[data['id']])
         manager.resolve_schema = resolve
         manager.set_schema(forms[0])
         manager.commands = parse_command_text('''

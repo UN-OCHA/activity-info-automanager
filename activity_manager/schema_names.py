@@ -258,7 +258,7 @@ def schema_with_ids(schema, related_schemas=None, reference_defaults=None):
                 isinstance(value, str) and value.startswith(f'{form_id}:')
             ):
                 return value
-            return (reference_defaults or {}).get((form_id, type(value), value), value)
+            return (reference_defaults or {}).get((form_id, type(value).__name__, str(value)), value)
 
         value = field['defaultValue']
         field['defaultValue'] = [canonical(item) for item in value] if isinstance(value, list) else canonical(value)
@@ -309,7 +309,7 @@ async def resolve_reference_defaults(service, schema, related_schemas, cache=Non
                 if strict and not value.removeprefix(f'{form_id}:'):
                     fail()
                 return value
-            key = (form_id, type(value), value)
+            key = (form_id, type(value).__name__, str(value))
             if key not in cache:
                 cache[key] = await substitute_record_label(service, form_id, value, forms)
             if strict and not (isinstance(cache[key], str) and cache[key].startswith(f'{form_id}:')

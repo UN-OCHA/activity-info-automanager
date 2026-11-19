@@ -14,7 +14,7 @@ from activity_manager.commands import AddFieldCommand
 from activity_manager.schema_resolution import resolve_command_schema
 from activity_manager.command_execution import ExecutionResult
 from activity_manager.schema_display import underline_substitutions
-from activity_manager.schema_change import apply_form_schema_change
+from test.execution_fixtures import execute_schema_fixture
 from activity_manager.schema_identity import prepare_schema_for_put
 from test.test_add_field import schema
 
@@ -265,7 +265,7 @@ class PreviewResolutionTests(unittest.IsolatedAsyncioTestCase):
         for method in (service.query_rows, service.get_form_tree, service.get_form_names, service.get_database_names):
             method.reset_mock()
             method.side_effect = AssertionError('Execution must not repeat resolution queries')
-        result = await apply_form_schema_change(service, 'form1', loaded, resolution.schema, AsyncMock(),
+        result = await execute_schema_fixture(service, 'form1', loaded, resolution.schema, AsyncMock(),
             resolved=True, related_schemas=related, reference_defaults=aliases)
         self.assertEqual(result.status, 'success', result.messages)
         ref = written['elements'][-2]
