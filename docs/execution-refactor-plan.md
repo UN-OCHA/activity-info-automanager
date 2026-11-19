@@ -6,7 +6,9 @@ authorized stages 0-5, now completed; see the [stage 0 record](execution-refacto
 [stage 1 record](execution-refactor-stage1.md), [stage 2 record](execution-refactor-stage2.md)
 and [stage 3 record](execution-refactor-stage3.md), plus [stage 4](execution-refactor-stage4.md)
 and [stage 5](execution-refactor-stage5.md).
-Stages 6 onward, dependency
+Stage 6 was subsequently authorized; its supported ports are implemented in the
+[stage 6 record](execution-refactor-stage6.md), with rename execution explicitly
+incomplete pending endpoint evidence. Stage 7 awaits instruction. Dependency
 installation and live API writes remain outside the current authorization.
 
 ## Scope and agreed tradeoffs

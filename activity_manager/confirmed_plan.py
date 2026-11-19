@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from copy import deepcopy
 from uuid import uuid4
 
-from .action_handlers import PersistedFieldDeleteHandler, SchemaHandler
+from .action_handlers import PersistedFieldDeleteHandler, SchemaHandler, ResourceHandler
 from .immutable import freeze
 from .planning import ActionKind, PlanError
 from .resource_state import FormPayload
@@ -71,7 +71,7 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
                     identity_map[(evidence.key.identity, identity)] = identity
     for action in candidate.actions:
         if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
-            raise PlanError('Resource request encoding remains a stage-6 capability.')
+            continue
         for phase in ('before', 'after'):
             state = getattr(action, phase)
             schema = state.payload.to_dict()
@@ -109,6 +109,8 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
     readable = {key: readable_schema(data, related, formulas_only=True) for key, data in prepared.items()}
     materialized_related = {identity: remap_schema(dict(schema), identity) for identity, schema in related.items()}
     for action in candidate.actions:
+        if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
+            continue
         materialized_related[action.key.identity] = remap_schema(
             prepared[(action.action_id, 'after')], action.key.identity)
 
@@ -117,6 +119,9 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
 
     actions = []
     for action in candidate.actions:
+        if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
+            actions.append(action)
+            continue
         owner = action.key.identity
         before, after = (replace(getattr(action, phase), payload=FormPayload(
             schema_with_ids(remap_schema(readable[(action.action_id, phase)], owner), materialized_related)))
@@ -132,12 +137,19 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
         replace(row, member=member(row.member)) for row in candidate.member_provenance))
     reviewed = []
     for action in actions:
+        if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
+            handler = ResourceHandler(None, action)
+            reviewed.append(ReviewedAction(action, handler.encode_write(action),
+                tuple((patch.member_id, patch.after_value) for patch in action.patches if patch.property_name == 'parentId'),
+                (), action.recovery_capability))
+            continue
         handler = (PersistedFieldDeleteHandler if action.kind == ActionKind.PERSISTED_FIELD_DELETE else SchemaHandler)(
             None, related_schemas=related, reference_defaults=reference_defaults)
         reviewed.append(ReviewedAction(action, handler.encode_write(action), (),
             (action.deleted_member_id,) if action.deleted_member_id else (), action.recovery_capability))
     for action in actions:
-        materialized_related[action.key.identity] = action.after.payload.to_dict()
+        if isinstance(action.after.payload, FormPayload):
+            materialized_related[action.key.identity] = action.after.payload.to_dict()
     return ExecutionPlan(uuid4().hex, binding, materialized, freeze(identity_map), tuple(reviewed),
                          freeze(materialized_related), freeze(reference_defaults or {}))
 

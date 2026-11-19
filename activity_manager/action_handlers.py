@@ -5,7 +5,7 @@ from typing import Protocol
 
 from .endpoint_evidence import Observation, WriteEvidence
 from .immutable import freeze, thaw
-from .planning import ActionKind, ApiAction, PlanError
+from .planning import ActionKind, ApiAction, PlanError, Footprint
 from .resource_state import Existence, FormPayload, ResourceState
 from .schema_change import SchemaComparison, compare_schemas, _as_form_schema
 
@@ -70,6 +70,46 @@ class PersistedFieldDeleteHandler(SchemaHandler):
         if before - after != {action.deleted_member_id}:
             raise PlanError('A persisted deletion must remove exactly its identified field.')
         return super().encode_write(action)
+
+
+@dataclass(frozen=True)
+class ResourceRequest:
+    database_id: str
+    schema: object
+
+    def __post_init__(self):
+        object.__setattr__(self, 'schema', freeze(self.schema))
+
+
+class ResourceHandler:
+    def __init__(self, service, action):
+        self.service, self.action = service, action
+
+    def compare(self, expected, observed):
+        footprints = (*self.action.read_set, *(Footprint(ref.key, ref.member_id, ('type',))
+                      for ref in self.action.prerequisites))
+        return compare_resource_footprints(expected, observed, footprints)
+
+    def encode_write(self, action):
+        entries = {}
+        for patch in action.patches:
+            if patch.property_name != 'parentId' or not patch.after_present:
+                raise PlanError('Only existing-resource parent updates have an established execution contract; rename remains blocked.')
+            entries.setdefault(patch.member_id, {'id': patch.member_id})[patch.property_name] = thaw(patch.after_value)
+        return ResourceRequest(action.key.identity, {'resourceUpdates': list(entries.values())})
+
+    async def write(self, request):
+        return await self.service.write_resources_evidence(request.database_id, thaw(request.schema))
+
+    def recovery_request(self, action, preimage):
+        entries = {}
+        for patch in action.patches:
+            old = preimage.payload.entries[patch.member_id]
+            if patch.property_name not in old and patch.property_name != 'parentId':
+                raise PlanError('Absent-property compensation lacks an established clearing contract.')
+            entries.setdefault(patch.member_id, {'id': patch.member_id})[patch.property_name] = thaw(
+                old.get(patch.property_name, action.key.identity))
+        return ResourceRequest(action.key.identity, {'resourceUpdates': list(entries.values())})
 
 
 def compare_resource_footprints(expected, observed, footprints):

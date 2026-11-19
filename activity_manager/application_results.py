@@ -8,6 +8,13 @@ from .resource_state import ResourceKey, ResourceKind, ResourceState
 from .schema_names import readable_schema, unresolved_formula_references
 
 
+def display_payload(state):
+    if state.key.kind == ResourceKind.FORM_SCHEMA:
+        return state.payload.to_dict()
+    return {'id': 'database:' + state.key.identity, 'label': 'Database resources (' + state.key.identity + ')',
+            'databaseId': state.key.identity, 'resources': state.payload.to_list()}
+
+
 @dataclass(frozen=True)
 class AuthoredCommand:
     authored_id: str
@@ -94,9 +101,15 @@ class DisplayState:
         return {item.key.identity: item.state.payload.to_dict() for item in self.resources
                 if item.key.kind == ResourceKind.FORM_SCHEMA and item.state.payload is not None}
 
+    def legacy_tabs(self):
+        return {(('database:' if item.key.kind == ResourceKind.DATABASE_RESOURCES else '') + item.key.identity):
+                display_payload(item.state) for item in self.resources
+                if item.state.payload is not None}
+
     def legacy_metadata(self):
-        return {item.key.identity: (thaw(item.names), item.annotations) for item in self.resources
-                if item.key.kind == ResourceKind.FORM_SCHEMA and item.state.payload is not None}
+        return {(('database:' if item.key.kind == ResourceKind.DATABASE_RESOURCES else '') + item.key.identity):
+                (thaw(item.names), item.annotations) for item in self.resources
+                if item.state.payload is not None}
 
     def enrich(self, labels):
         # Existing labels are pinned. Only the owner may publish this replacement.

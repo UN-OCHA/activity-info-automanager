@@ -375,7 +375,9 @@ async def resolve_form_names(service, schema, related_schemas=None, *, known_for
             raise ValueError(f'Cannot resolve referenced form {value!r} without a database ID.')
         if database_id not in directories:
             directories[database_id] = await service.get_form_names(database_id)
-        directory = directories[database_id]
+        directory = {**directories[database_id], **{
+            identity: candidate.get('label') or identity for identity, candidate in forms.items()
+            if candidate.get('databaseId') == database_id}}
         if value in directory:
             return value
         matches = [identity for identity, label in directory.items() if label == name]

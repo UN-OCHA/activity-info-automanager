@@ -40,6 +40,12 @@ class CachedResolutionService:
     async def get_form_schema(self, form_id):
         return await self._read('get_form_schema', form_id)
 
+    async def get_database_resources(self, database_id):
+        return await self._read('get_database_resources', database_id)
+
+    async def get_database_state(self, database_id):
+        return await self._read('get_database_state', database_id)
+
     async def query_rows(self, query):
         return await self._read('query_rows', query)
 

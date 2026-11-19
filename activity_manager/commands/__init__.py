@@ -9,6 +9,10 @@ from .set_variable import SET_VARIABLE, SetVariableCommand
 from .with_form import WITH_FORM, WithFormCommand
 
 __all__ = [
+    'MODIFY_FORM',
+    'ModifyFormCommand',
+    'MOVE_FORM',
+    'MoveFormCommand',
     'WITH_FORM',
     'WithFormCommand',
     'SET_VARIABLE',
@@ -26,3 +30,6 @@ __all__ = [
     'DeleteFieldCommand',
     'MoveFieldCommand',
 ]
+
+from .modify_form import MODIFY_FORM, ModifyFormCommand
+from .move_form import MOVE_FORM, MoveFormCommand

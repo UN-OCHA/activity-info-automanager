@@ -9,11 +9,13 @@ from activity_info_api_client.api.default import (
     query_rows,
     get_user_databases,
     update_form_schema,
+    update_database,
 )
 from activity_info_api_client.models.add_update_form_response import AddUpdateFormResponse
 from activity_info_api_client.models.database import Database
 from activity_info_api_client.models.database_resource_type import DatabaseResourceType
 from activity_info_api_client.models.form_schema import FormSchema
+from activity_info_api_client.models.update_database_request import UpdateDatabaseRequest
 from activity_info_api_client.models.form_tree import FormTree
 from activity_info_api_client.models.query_rows_request import QueryRowsRequest
 from activity_info_api_client.models.query_rows_response_200_item import QueryRowsResponse200Item
@@ -218,6 +220,10 @@ class ActivityInfoService:
             if not schema and data['databaseId'] != key.identity:
                 raise ValueError('Database response identity differs from the requested identity.')
             resources = data.get('resources', [])
+            if not schema:
+                for entry in resources:
+                    if entry.get('type') in ('FORM', 'FOLDER') and not entry.get('parentId'):
+                        entry['parentId'] = key.identity
             if not schema and len({entry['id'] for entry in resources}) != len(resources):
                 raise ValueError('Duplicate database resource identities.')
             payload = FormPayload(data) if schema else DatabaseResourcesPayload(
@@ -238,4 +244,22 @@ class ActivityInfoService:
             return WriteEvidence(failure=EndpointFailure(FailureKind.INVALID, str(exc)))
         receipt, failure = await self._endpoint_evidence(
             update_form_schema, AddUpdateFormResponse, form_id=form_id, body=body)
+        return WriteEvidence(receipt if failure is None else failure.receipt, failure)
+
+    async def get_database_resources(self, database_id):
+        state = await self.get_database_state(database_id)
+        return {entry['id']: entry for entry in state.payload.to_list()}
+
+    async def get_database_state(self, database_id):
+        observed = await self.observe_resource(ResourceKey.database(database_id))
+        if observed.failure or observed.state is None:
+            raise ValueError(observed.failure.message if observed.failure else 'Database unavailable.')
+        return observed.state
+
+    async def write_resources_evidence(self, database_id, payload):
+        try:
+            body = UpdateDatabaseRequest.from_dict(payload)
+        except (KeyError, TypeError, ValueError) as exc:
+            return WriteEvidence(failure=EndpointFailure(FailureKind.INVALID, str(exc)))
+        receipt, failure = await self._endpoint_evidence(update_database, Database, database_id=database_id, body=body)
         return WriteEvidence(receipt if failure is None else failure.receipt, failure)

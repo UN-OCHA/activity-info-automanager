@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime, timezone
 from enum import StrEnum
 
-from .action_handlers import SchemaHandler, PersistedFieldDeleteHandler, compare_resource_footprints
+from .action_handlers import SchemaHandler, PersistedFieldDeleteHandler, ResourceHandler, compare_resource_footprints
 from .endpoint_evidence import EndpointFailure, FailureKind, Observation, WriteEvidence
 from .immutable import thaw
 from .planning import ActionKind, PlanError
@@ -86,6 +86,8 @@ class Executor:
     def handler(self, action):
         if self.handler_factory:
             return self.handler_factory(action)
+        if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
+            return ResourceHandler(self.service, action)
         cls = PersistedFieldDeleteHandler if action.kind == ActionKind.PERSISTED_FIELD_DELETE else SchemaHandler
         return cls(self.service, related_schemas=thaw(self.plan.related_schemas),
                    reference_defaults=thaw(self.plan.reference_defaults))
@@ -163,6 +165,9 @@ class Executor:
             else:
                 footprints = tuple(f for item in actions for f in item.action.read_set if f.key == key)
                 invalid |= not compare_resource_footprints(baseline.state, observed, footprints).matches
+                for item in actions:
+                    if item.action.key == key:
+                        invalid |= not self.matches(self.handler(item.action), baseline.state, observed)
         if invalid:
             self._messages.append('Execution stopped before writes: required baseline is unavailable or stale.')
             return self.report('preflight_failed')

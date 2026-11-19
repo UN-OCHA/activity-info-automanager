@@ -9,6 +9,9 @@ from .set_variable import COMMAND as SET_VARIABLE
 from .with_form import COMMAND as WITH_FORM
 
 
-COMMANDS = (MOVE_FIELD, DELETE_FIELD, ADD_FIELD, MODIFY_FIELD, SET_VARIABLE, WITH_FORM)
+from .modify_form import COMMAND as MODIFY_FORM
+from .move_form import COMMAND as MOVE_FORM
+
+COMMANDS = (MOVE_FIELD, DELETE_FIELD, ADD_FIELD, MODIFY_FIELD, SET_VARIABLE, WITH_FORM, MODIFY_FORM, MOVE_FORM)
 COMMANDS_BY_NAME = index_definitions(COMMANDS)
 COMMAND_CREATORS = tuple(definition.creator for definition in COMMANDS)

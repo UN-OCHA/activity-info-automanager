@@ -16,8 +16,8 @@ from .command_execution import (
 from .command_iteration import IterativeCommand, PreparedCommand
 from .immutable import freeze, command_parameters_snapshot
 from .multi_form import FormWorkspace
-from .resource_state import ResourceKey
-from .planning import PlanBuilder, SchemaEffect
+from .resource_state import ResourceKey, ResourceState, DatabaseResourcesPayload, BaselineEvidence, Existence, LoadStatus
+from .planning import PlanBuilder, SchemaEffect, ResourcePatchEffect, MemberRef
 from .schema_names import readable_schema
 
 ACTIVE_DRAFT = ContextVar('activity_manager_application_draft', default=None)
@@ -377,7 +377,7 @@ class Applier:
 
 
     def _save_result(self, result):
-        effects = ()
+        effects = tuple(effect.effect_id for effect in self.effects if effect.application_id == self._attempt_id)
         if result.schema is not None and not result.has_errors:
             identity = result.schema.get('id')
             key = self.workspace.key_for(result.schema)
@@ -388,12 +388,13 @@ class Applier:
                 effect = SchemaEffect(self._attempt_id + ':schema', self._attempt_id, key, before, after)
                 self.plan_builder.add(effect)
                 self.effects += (effect,)
-                effects = (effect.effect_id,)
+                effects += (effect.effect_id,)
             self.workspace.issues[identity] = result.issues
             self.related_schemas.update(self.workspace.latest)
         display = self.snapshot_builder.capture(self.workspace.state, self.related_schemas,
             self.database_names, self.workspace.issues,
-            active=self.workspace.key_for(result.schema) if result.schema else None,
+            active=next((effect.key for effect in reversed(self.effects) if effect.application_id == self._attempt_id),
+                        self.workspace.key_for(result.schema) if result.schema else None),
             labels=result.record_labels)
         return replace(result, opschema=tuple(deepcopy(self.workspace.opschema)),
                        form_issues=deepcopy(self.workspace.issues), display_state=display, effect_ids=effects)
@@ -410,12 +411,14 @@ class Applier:
 
     async def _apply_candidate(self, application, current, variables, *, visit=False, scope_context=None):
         from .commands.with_form import WithFormCommand
+        from .commands.modify_form import ModifyFormCommand
+        from .commands.move_form import MoveFormCommand
         from .commands.set_variable import SetVariableCommand
         from .command_templates import command_parameters
         from .command_iteration import PreparedCommand
         try:
             prepared = application.command if isinstance(application, PreparedCommand) else command_parameters(application, variables)
-            if isinstance(prepared, WithFormCommand):
+            if isinstance(prepared, (WithFormCommand, ModifyFormCommand, MoveFormCommand)):
                 if self.form_service is None:
                     return prepared.execute(current)
                 schema = (await self.workspace.visit(prepared.form, self.form_service) if visit else
@@ -427,6 +430,14 @@ class Applier:
                     self.plan_builder.select_form(self.workspace.key_for(schema), scope_id=scope_id)
                 else:
                     self.plan_builder.select_form(self.workspace.key_for(schema))
+                if isinstance(prepared, MoveFormCommand):
+                    return await self._move_form(replace(prepared, form=schema['id']), schema)
+                if isinstance(prepared, ModifyFormCommand):
+                    result = apply_command_locally(PreparedCommand(replace(prepared, form=schema['id'])), schema,
+                        self.related_schemas, self.database_names, variables=variables)
+                    if not result.has_errors and prepared.new_name is not None:
+                        await self._project_resource_label(result.schema)
+                    return result
                 return with_prepared_command(ExecutionResult(schema, names_schema=readable_schema(
                         schema, self.related_schemas, self.database_names),
                     snapshot_issues=self.workspace.issues.get(schema.get('id'), ()),
@@ -449,6 +460,8 @@ class Applier:
 
     async def _resolve_commands(self, version, current, commands):
         from .commands.with_form import WithFormCommand
+        from .commands.modify_form import ModifyFormCommand
+        from .commands.move_form import MoveFormCommand
         if current is None:
             self.evaluate_local()
             return
@@ -458,7 +471,7 @@ class Applier:
             self._index, self._position = index, 0
             self.executions[index] = CommandExecution('resolving', None, 'Resolving names...')
             self._publish_evaluation()
-            if isinstance(command, WithFormCommand):
+            if isinstance(command, (WithFormCommand, ModifyFormCommand, MoveFormCommand)):
                 next_variables = deepcopy(self.variables)
                 for name in self.assigned:
                     next_variables.pop(name, None)
@@ -550,7 +563,8 @@ class Applier:
             self._sync_context()
         children = self._pending_forms(scope)
         for i, target in enumerate(scope):
-            concrete = replace(command, form=target['identity'], form_pattern=None)
+            from .command_templates import command_parameters
+            concrete = command_parameters(replace(command, form=target['identity'], form_pattern=None), target['variables'])
             result = await self._apply_actual(PreparedCommand(concrete), current, target['variables'],
                                              visit=True, on_success=lambda: commit_scope(scope),
                                              scope_context=(scope_id, scope_keys))
@@ -634,3 +648,51 @@ class Applier:
             if execution.status == 'error':
                 break
         return self._form_summary(children, current)
+
+    async def _database(self, identity):
+        key = ResourceKey.database(identity)
+        if key not in self.workspace.state.resources:
+            try:
+                state = await self.form_service.get_database_state(identity)
+            except AttributeError:
+                entries = await self.form_service.get_database_resources(identity)
+                state = ResourceState(key, DatabaseResourcesPayload(entries), load_status=LoadStatus.LOADED)
+            self.workspace.state.load(BaselineEvidence(key, Existence.PRESENT, state, state.server_version))
+        return self.workspace.state.resources[key]
+
+    async def _project_resource_label(self, schema):
+        # Local rename projection is coherent even though remote rename remains gated.
+        # Existing schema-only preview services may not expose database resources.
+        if not hasattr(self.form_service, 'get_database_resources'):
+            return
+        try:
+            before = await self._database(schema['databaseId'])
+        except AttributeError:
+            return
+        entries = {identity: dict(entry) for identity, entry in before.payload.entries.items()}
+        entries[schema['id']]['label'] = schema['label']
+        self.plan_builder.observe(self.workspace.state.baselines.entries.values())
+        after = self.workspace.state.put(before.key, DatabaseResourcesPayload(entries, before.payload.order))
+        effect = ResourcePatchEffect(self._attempt_id + ':rename', self._attempt_id, before.key, before, after,
+            ((schema['id'], 'label'),), subjects=(ResourceKey.form(schema['id']),))
+        self.plan_builder.add(effect)
+        self.effects += (effect,)
+
+    async def _move_form(self, command, schema):
+        from .form_folders import form_location, resolve_folder
+        before = await self._database(schema['databaseId'])
+        entries = {identity: dict(entry) for identity, entry in before.payload.entries.items()}
+        location = form_location(schema['databaseId'], entries, schema['id'])
+        parent, path = resolve_folder(schema['databaseId'], entries, command.folder)
+        # Normalize an omitted parent to the documented database-root identity.
+        if location['parentId'] == parent:
+            return with_prepared_command(ExecutionResult(schema, success_message='Form already in destination folder.'), command)
+        entries[schema['id']]['parentId'] = parent
+        self.plan_builder.observe(self.workspace.state.baselines.entries.values())
+        after = self.workspace.state.put(before.key, DatabaseResourcesPayload(entries, before.payload.order))
+        prerequisites = (MemberRef(before.key, parent),) if parent != schema['databaseId'] else ()
+        effect = ResourcePatchEffect(self._attempt_id + ':resource', self._attempt_id, before.key, before, after,
+            ((schema['id'], 'parentId'),), subjects=(ResourceKey.form(schema['id']),), prerequisites=prerequisites)
+        self.plan_builder.add(effect)
+        self.effects += (effect,)
+        return with_prepared_command(ExecutionResult(schema, success_message=f'Moved form to {path}'), command)

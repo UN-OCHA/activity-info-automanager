@@ -19,7 +19,7 @@ from .commands import COMMAND_CREATORS
 from .listbox import DatabaseListbox
 from .confirmed_plan import AttemptBinding, ConfirmationAttempt
 from .executor import Executor
-from .application_results import DisplayResource, DisplayState
+from .application_results import DisplayResource, DisplayState, display_payload
 
 
 def connection_page():
@@ -159,7 +159,11 @@ def connection_page():
     text_mode = False
     form_request = 0
     schema_request = 0
+    form_field_request = 0
     async def refresh_reference_suggestions(creator):
+        nonlocal form_field_request
+        form_field_request += 1
+        request = form_field_request
         active = command_list.workspace.active_schema if command_list.workspace.opschema else source_schema
         control = creator.controls.get('referenced_form')
         reference = control.value if control is not None else None
@@ -177,6 +181,46 @@ def connection_page():
                 if len(matches) == 1:
                     data = matches[0]
         creator.set_suggestions('reference_field_codes', field_codes_from_schema(data))
+        command_key = creator.command_select.value
+        if command_key not in ('modify_form', 'move_form'):
+            return
+        moving = command_key == 'move_form'
+        multiple = creator._multiple_forms()
+        source = 'folder_paths' if moving else 'form_field_codes'
+        creator.set_suggestions(source, [])
+        if (multiple and not moving) or not active:
+            return
+        selected = creator.controls['form'].value
+        source_request = schema_request
+        evaluation = command_list._evaluation_version
+        if (not moving and not selected) or (not multiple and selected and '${' in selected):
+            return
+        try:
+            from .schema_names import resolve_form_names
+            data = active
+            if selected and not multiple:
+                probe = {**active, 'elements': [{'type': 'reference', 'typeParameters': {
+                    'range': [{'formId': selected}]}}]}
+                resolved = await resolve_form_names(command_list.form_service, probe,
+                                                    dict(command_list.related_schemas), load_related=False)
+                identity = resolved['elements'][0]['typeParameters']['range'][0]['formId']
+                data = command_list.workspace.latest.get(identity) or command_list.related_schemas.get(identity)
+                if data is None:
+                    data = await command_list.form_service.get_form_schema(identity)
+            suggestions = field_codes_from_schema(data)
+            if moving:
+                from .form_folders import folder_choices
+                resources = await command_list.form_service.get_database_resources(data['databaseId'])
+                suggestions = folder_choices(data['databaseId'], resources)
+            if (request == form_field_request and source_request == schema_request
+                    and evaluation == command_list._evaluation_version
+                    and creator.command_select.value == command_key and creator._multiple_forms() == multiple
+                    and creator.controls['form'].value == selected):
+                creator.set_suggestions(source, suggestions)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            # Suggestions are optional; application reports invalid selectors.
+            pass
+
 
     async def close_service():
         nonlocal service
@@ -232,8 +276,9 @@ def connection_page():
         snapshot = snapshot or (execution.display_state if execution is not None else None)
         result_historical = execution is not None or snapshot is not None
         if snapshot is not None:
-            active = snapshot.preferred_key.identity if snapshot.preferred_key is not None else None
-            result_forms = snapshot.legacy_forms()
+            active = (('database:' if snapshot.preferred_key.kind.value == 'database_resources' else '') +
+                      snapshot.preferred_key.identity) if snapshot.preferred_key is not None else None
+            result_forms = snapshot.legacy_tabs()
             result_metadata = snapshot.legacy_metadata()
             result_context = thaw(snapshot.related_schemas)
             result_database_names = thaw(snapshot.database_names)
@@ -432,10 +477,13 @@ def connection_page():
         lines = ['Apply these updates in order:']
         for index, reviewed in enumerate(attempt.plan.actions, 1):
             action = reviewed.action
-            label = action.after.payload.schema.get('label') or action.key.identity
+            label = (action.after.payload.schema.get('label') if hasattr(action.after.payload, 'schema')
+                     else 'Database resources') or action.key.identity
             contributors = sorted({applications[identity].authored_index + 1 for identity in action.application_ids
                                    if identity in applications})
             detail = f'; delete field {action.deleted_member_id}' if action.deleted_member_id else ''
+            if reviewed.destinations:
+                detail += '; destinations: ' + ', '.join(f'{identity} -> {parent}' for identity, parent in reviewed.destinations)
             lines.append(f'{index}. {label} ({action.key.identity}){detail}; commands {contributors}')
             if reviewed.recovery_limit == 'schema_only_data_unverified':
                 lines.append('Schema-only compensation; record-data restoration is unverified.')
@@ -504,7 +552,7 @@ def connection_page():
             report_context.update(outcome.actual_schemas)
             report_schemas = list(outcome.actual_schemas.values())
             report_display = DisplayState(tuple(DisplayResource(item.state, readable_schema(
-                item.state.payload.to_dict(), report_context, execution['database_names'],
+                display_payload(item.state), report_context, execution['database_names'],
                 record_labels=execution['record_labels'])) for item in outcome.observations if item.state is not None),
                 report_context, execution['database_names'], execution['record_labels'])
             report_version = command_list._evaluation_version

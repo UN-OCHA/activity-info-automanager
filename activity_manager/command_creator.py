@@ -400,7 +400,7 @@ class CommandCreatorRenderer:
         return self.command_select.value in ITERABLE_CREATORS and self.target_mode.value == 'Multiple'
 
     def _multiple_forms(self):
-        return self.command_select.value == 'with_form' and self.target_mode.value == 'Multiple'
+        return self.command_select.value in ('with_form', 'modify_form', 'move_form') and self.target_mode.value == 'Multiple'
 
     def _render_selected_command(self):
         self._updating = True
@@ -412,7 +412,7 @@ class CommandCreatorRenderer:
             self.parameter_containers.clear()
             definition = self.definitions.get(self.command_select.value)
             from .command_iteration import ITERABLE_CREATORS
-            supports_multiple = self.command_select.value in ITERABLE_CREATORS or self.command_select.value == 'with_form'
+            supports_multiple = self.command_select.value in ITERABLE_CREATORS or self.command_select.value in ('with_form', 'modify_form', 'move_form')
             self.target_mode.set_visibility(supports_multiple)
             self.target_label.set_visibility(supports_multiple)
             with self.parameters:
@@ -443,6 +443,9 @@ class CommandCreatorRenderer:
             'Whole-name regex; captures: (?P<year>...). Values: ${form.year}. Literal escape: $${'
             if self._multiple_forms() else
             'Whole-code regex; captures: (?P<year>...). Values: ${field.year}. Literal escape: $${')
+        record_label = self.controls.get('record_label_field_id')
+        if record_label is not None and self._multiple_forms():
+            record_label.set_options([])
         form_target = self.controls.get('form')
         if form_target is not None:
             form_target.set_label('Form Name Pattern' if self._multiple_forms() else 'Form Name')
