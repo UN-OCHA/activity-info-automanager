@@ -212,11 +212,13 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.actual_schemas, {})
         self.assertEqual(report.journal[-1].recovery[-1].status, 'unknown')
 
-    async def test_persisted_deletion_only_promises_schema_restoration(self):
+    async def test_persisted_deletion_reports_successful_restoration(self):
         report, service, _, _ = await self.run_plan(sequence=('a',), modes=('commit_error',),
             choice='rollback_all', deletion=True)
-        self.assertEqual(report.status, 'schema_restored_data_unverified')
-        self.assertIn('record-data restoration', ' '.join(report.messages))
+        self.assertEqual(report.status, 'rolled_back_all')
+        self.assertIn('1 update(s) restored and verified.', report.messages)
+        self.assertFalse(any('unverified' in message for message in report.messages))
+        self.assertEqual(report.journal[0].reviewed.action.warnings, ())
         self.assertEqual(report.journal[0].reviewed.deletions, ('original',))
 
     async def test_final_report_and_preimages_cannot_be_changed_by_cache_or_service_edits(self):

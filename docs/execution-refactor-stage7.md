@@ -99,6 +99,7 @@ do not establish that behavior, and no live experiment is authorized. Preparatio
 continues to block the entire rename attempt before writes. Record-label-only
 ModifyForm and parent-only MoveForm remain supported.
 
-Persisted-field compensation remains schema-only/data-unverified. Optimistic
+User testing subsequently confirmed deleted-field and deleted-form data restoration;
+former limitation notices have been removed. Optimistic
 read-check-write retains a concurrency window. AddForm/DeleteForm, arbitrary
 property clearing and new recovery endpoints remain separate feature/evidence work.

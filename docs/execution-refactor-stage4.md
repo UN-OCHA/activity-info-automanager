@@ -58,8 +58,9 @@ Resource footprint comparison/read evidence is available, but materializing a
 database patch explicitly rejects it until stage 6 supplies request encoding and
 MoveForm. Schema confirmation therefore has no destinations; its review contract
 reserves that dimension for resource actions. No new form lifecycle handlers,
-recovery endpoints or general dependency analyzer were added. Persisted deletion
-recovery remains schema-only with record-data restoration unverified. Rename
+recovery endpoints or general dependency analyzer were added. User testing
+subsequently confirmed deleted-field data restoration; former limitation notices
+have been removed. Rename
 remains blocked. No live writes, recovery experiments or packages were introduced.
 
 ## Validation

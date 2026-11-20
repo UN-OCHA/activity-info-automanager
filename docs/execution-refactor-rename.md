@@ -51,7 +51,8 @@ Compensation sends the immediate schema preimage once, restoring the shared labe
 and verifies both representations before continuing reverse recovery. No second
 resource-label write or repair is guessed. A reported restoration error still
 stops recovery even if both restored representations are subsequently observed.
-Existing schema-only/data-unverified limits for field deletion remain unchanged.
+User testing subsequently confirmed deleted-field data restoration; the former
+limitation notices have been removed.
 
 ## Validation
 

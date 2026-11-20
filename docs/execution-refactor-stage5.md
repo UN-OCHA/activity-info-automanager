@@ -51,10 +51,10 @@ without rewriting forward outcomes. Every request is read back and verified befo
 continuing. A recovery error stops automatic recovery even if read-back establishes
 restoration; wrong-state success and unreadable verification also stop.
 
-Persisted-field deletion keeps schema-only compensation with record-data restoration
-unverified, in both confirmation and reports. Its successful recovery has a distinct
-schema_restored_data_unverified status. No new recovery endpoint or data-restoration
-guarantee was added. Read-check-write remains optimistic: the endpoint does not
+Persisted-field deletion restores the immediate schema preimage. User testing
+subsequently confirmed data restoration for both field and form deletion. The former
+limitation notices and special recovery status have been removed; successful recovery
+uses the regular rollback status. Read-check-write remains optimistic: the endpoint does
 provide conditional writes that close the concurrency window.
 
 ## UI cutover and retained code
@@ -90,7 +90,7 @@ all-baseline preflight, missing/unavailable/stale baselines, immediate checks,
 attempt-before-write journaling, exact reviewed payloads, revisits/preimages,
 no-op skips, before/after-commit errors, divergent success, unknown reconciliation,
 unchanged rollback-last selection, concurrent edits, recovery errors/read-back,
-wrong-state/unreadable recovery, schema-only deletion recovery, immutable reports,
+wrong-state/unreadable recovery, schema-preimage deletion recovery, immutable reports,
 single-use confirmation, context changes, interruption, cache invalidation,
 cancel/edit/source invalidation and all three recovery choices through mocked pages.
 

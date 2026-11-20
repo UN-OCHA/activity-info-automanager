@@ -123,7 +123,7 @@ assert new class structure. Counts below are discovered tests in the current tre
 | Mixed move/schema order | `MoveFormTests.test_single_move_switches_context_and_keeps_schema_clean` asserts schema-before-move; mixed rollback tests use that order | Move before subsequent schema edits; reverse that actual order during recovery; adjust rollback-last expectations explicitly | 6 |
 | Patch batching | Current adapter handles one form location per step | Compatible adjacent moves may share a request and complete rollback unit; owned-property checks preserve unrelated entries | 6 |
 | Rename | Preview tests cover local renames; server resource-label side effects remain unestablished | Verify both projections with endpoint evidence, retain receipts/versions, and gate unresolved rename execution | 4, 6 |
-| Schema-only field recovery | No verified deleted-field data recovery | Confirmation/reports state the limitation; schema equality never claims restored record data | 4, 5 |
+| Field recovery | User subsequently confirmed deleted-field data restoration | Restore the schema preimage and verify it; former limitation notices removed | 4, 5 |
 | Final reports and browser flow | Existing schema/move page tests cover reporting | Mixed resources, unknown observations, confirmation invalidation and reevaluation retain truthful stable reports | 5-7 |
 
 Future AddForm/DeleteForm and recovery-endpoint experiments remain outside these

@@ -114,7 +114,7 @@ class InitialContextTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([e.status for e in manager.executions], ['applied', 'applied'])
                 self.assertTrue(all(e.value is None for e in page.descendants() if isinstance(e, DatabaseListbox)))
                 manager.on_execute()
-                self.assertTrue(any(isinstance(e, ui.label) and 'Apply these updates in order:' in e.text for e in client.elements.values()))
+                self.assertTrue(any(isinstance(e, ui.label) and 'Execute these updates?' in e.text for e in client.elements.values()))
                 self.assertEqual(service.writes, [])
 
     async def test_qualified_lookup_variable_does_not_require_or_change_context(self):

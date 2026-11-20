@@ -58,9 +58,9 @@ flatten to one-field applications. The temporary-field counterexample compiles a
 schema-create-x, resource move, schema-add-y, persisted-delete-x, although x still
 has a preview ID during Apply.
 
-Persisted deletion candidates retain identity/preimage and explicitly report
-schema-only compensation with record-data restoration unverified. No recovery
-endpoints or stronger record-data guarantees were added.
+Persisted deletion candidates retain identity/preimage. User testing subsequently
+confirmed data restoration through the existing rollback process, and the former
+limitation notices have been removed. No recovery endpoints were added.
 
 ## Resource fixtures and immutable publication
 

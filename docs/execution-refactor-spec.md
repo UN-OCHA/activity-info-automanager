@@ -601,25 +601,14 @@ per-field recovery endpoint followed by exact schema-preimage restoration and re
 One deletion action initially isolates one persisted field; batching several
 deletions needs an explicitly tested multi-step recovery recipe.
 
-The current handover explicitly says not to add/patch field recovery yet. Initial
-migration preserves existing field-delete functionality and its schema-only,
-data-unverified recovery limitation. It does not silently enable a new recovery
-endpoint or advertise data recovery. A verified handler is a subsequent milestone.
-Confirmation and final reports must state this limitation for persisted field
-deletions. Successful schema-only compensation must not be described as verified
-record-data restoration or complete data rollback.
-
-FormDelete cannot be called fully reversible until restoring the original form,
-resource placement and record data has been validated. Recreating a schema with
-the old ID is not an accepted recovery strategy. Keep the action/state contracts
-available, but gate new deletion execution on an explicit recovery/product decision.
-
-The official reference documents Revert Database Update by database/version. It is
-a candidate for resource-deletion recovery, not established proof of safe inverse
-behavior or record restoration. Retain returned database versions so it can be
-evaluated. It and Recover Form Field are absent from the installed client endpoint
-set inspected during this discussion. Generated-client additions/updates require
-a deliberate later implementation task; do not bypass the adapter with ad hoc HTTP.
+The user has since confirmed that rollback restores deleted fields and deleted
+forms with their data. Field rollback restores the immediate schema preimage;
+form rollback reverts the attributed database deletion event using its receipt
+version. Keep original identities and receipts; recreating an empty form schema
+is not the form recovery strategy. Confirmation and reports no longer show the
+former data-restoration limitation. Automated recovery checks remain schema and
+resource read-back; user testing supplies the record-data restoration evidence.
+No new recovery endpoint or dependency change is needed for this update.
 
 ## 15. Endpoint mapping and evidence
 
@@ -644,7 +633,7 @@ References:
 - [Add form](https://www.activityinfo.org/support/docs/api/reference/addForm.html): combined formResource/formClass creation request.
 - [Update schema](https://www.activityinfo.org/support/docs/api/reference/updateFormSchema.html).
 - [Recover form field](https://www.activityinfo.org/support/docs/api/reference/recoverFormField.html): recovers from the latest schema version containing the field; subform recovery explicitly unsupported. Exact state/data restoration requires validation.
-- [Revert database update](https://www.activityinfo.org/support/docs/api/reference/revertDatabaseUpdate.html): version-addressed revert exists; complete recovery guarantees remain unverified here.
+- [Revert database update](https://www.activityinfo.org/support/docs/api/reference/revertDatabaseUpdate.html): version-addressed revert exists; user testing has confirmed form and record-data restoration.
 
 ## 16. Implementation sequence and acceptance criteria
 
@@ -734,7 +723,7 @@ Reviewed resolutions: retain command-first application and form-first multi-form
 schema batching, accepting rare cross-form inconsistencies without general dependency
 guards; respect explicit schema/resource/deletion boundaries; move before subsequent
 schema edits; make resolution failures atomic with separate rejected-candidate
-diagnostics; isolate persisted field deletions with honest data-recovery limits;
+diagnostics; isolate persisted field deletions with retained identities and preimages;
 verify coherent rename projections; block unsafe divergent-outcome recovery; retain
 snapshot-specific rendering context and pinned historical record labels. Use a
 preserved current checkpoint as reference and `df131da` as the migration base.

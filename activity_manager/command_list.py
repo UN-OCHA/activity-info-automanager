@@ -127,6 +127,7 @@ class CommandListManager:
                 }''')
 
         with ui.column().classes('w-full'):
+            self.step_checkbox = ui.checkbox('Execute step by step').props('dense')
             self.execute_button = ui.button(
                 'Execute', icon='play_arrow', on_click=on_execute,
             ).classes('w-full')
@@ -282,7 +283,7 @@ class CommandListManager:
 
     def set_busy(self, busy: bool) -> None:
         self.busy = busy
-        for control in (self.view_toggle, self.advanced_editor, self.paste_button):
+        for control in (self.view_toggle, self.advanced_editor, self.paste_button, self.step_checkbox):
             (control.disable if busy else control.enable)()
         self._render_simple_view()
         self._update_execute_button()

@@ -12,6 +12,7 @@ from enum import StrEnum
 from .action_handlers import AddFormHandler, SchemaHandler, PersistedFieldDeleteHandler, ResourceHandler, DeleteFormHandler, compare_resource_footprints
 from .endpoint_evidence import EndpointFailure, FailureKind, Observation, WriteEvidence
 from .immutable import thaw
+from .execution_presentation import recovery_console_message
 from .planning import ActionKind, PlanError
 from .resource_state import Existence, ResourceKind
 
@@ -58,6 +59,7 @@ class ExecutionReport:
     observations: tuple[Observation, ...]
     messages: tuple[str, ...]
     preflight: tuple[Observation, ...]
+    console_messages: tuple[str, ...] = ()
 
     @property
     def action_statuses(self):
@@ -72,14 +74,20 @@ class ExecutionReport:
                 if item.key.kind == ResourceKind.FORM_SCHEMA and item.existence == Existence.PRESENT}
 
 
+class StepStopped(Exception):
+    """Stop requested at an execution boundary."""
+
+
 class Executor:
-    def __init__(self, service, *, handler_factory=None):
+    def __init__(self, service, *, handler_factory=None, step_control=None):
+        self.step_control = step_control
         self.service = service
         self.handler_factory = handler_factory
         self.journal = ()
         self._observations = {}
         self._preflight = ()
         self._messages = []
+        self.console_messages = []
         self._used = False
         self._cancelled = False
 
@@ -189,15 +197,37 @@ class Executor:
 
     def report(self, status):
         return ExecutionReport(self.plan, status, self.journal, tuple(self._observations.values()),
-                               tuple(self._messages), self._preflight)
+                               tuple(self._messages), self._preflight, tuple(self.console_messages))
+
+    def message(self, message):
+        self._messages.append(message)
+        for entry in reversed(self.journal):
+            result = f'{self.action_label(entry.reviewed.action)}: {self.outcome_message(entry.reviewed.action, entry.outcome)}'
+            if message.startswith(result) and entry.evidence and entry.evidence.receipt:
+                message += f' (HTTP {entry.evidence.receipt.status})'
+                break
+        self.console_messages.append(message)
 
     def record_recovery(self, index, status, observed, evidence=None, message='', request=None):
         entry = self.journal[index]
         record = RecoveryRecord(status, observed, evidence, message, timestamp(), request)
+        self.console_messages.append(recovery_console_message(record))
         self.journal = (*self.journal[:index], replace(entry, recovery=(*entry.recovery, record)),
                         *self.journal[index + 1:])
 
+    async def step(self, phase, reviewed=None, request=None):
+        if self.step_control is not None:
+            return await self.step_control(self, phase, reviewed, request)
+
     async def execute(self, attempt, binding, candidate, choose_recovery, *, current_context=None):
+        try:
+            return await self._execute(attempt, binding, candidate, choose_recovery,
+                                       current_context=current_context)
+        except StepStopped:
+            self.message('Execution stopped by user; verified evidence retained.')
+            return self.report('interrupted')
+
+    async def _execute(self, attempt, binding, candidate, choose_recovery, *, current_context=None):
         if self._used:
             raise PlanError('An Executor instance serves only one execution attempt.')
         self.plan = attempt.begin_execution(binding, candidate)
@@ -230,16 +260,17 @@ class Executor:
                     if item.action.key == key:
                         invalid |= not self.matches(self.handler(item.action), baseline.state, observed)
         if invalid:
-            self._messages.append('Execution stopped before writes: required baseline is unavailable or stale.')
+            self.message('Execution stopped before writes: required baseline is unavailable or stale.')
             return self.report('preflight_failed')
 
         failed = False
         for reviewed in actions:
             action = reviewed.action
             handler = self.handler(action)
+            await self.step('forward', reviewed, reviewed.request)
             observed = await self.observe_action(action)
             if not self.matches_bundle(handler, action, action.before, observed, tuple(p.before for p in action.projections)):
-                self._messages.append(f'{self.action_label(action)}: immediate predecessor is unavailable or stale.')
+                self.message(f'{self.action_label(action)}: immediate predecessor is unavailable or stale.')
                 failed = True
                 break
             if action.kind == ActionKind.FORM_DELETE:
@@ -248,7 +279,7 @@ class Executor:
                 for state in action.deleted_forms:
                     schemas_match &= self.matches(schema_handler, state, await self.observe(state.key))
                 if not schemas_match:
-                    self._messages.append('Deletion stopped: a target schema changed since application.')
+                    self.message('Deletion stopped: a target schema changed since application.')
                     failed = True
                     break
             # Prerequisites explicitly declared by the planner only. No inferred
@@ -268,19 +299,21 @@ class Executor:
                     prerequisites_ok = False
                     break
             if not prerequisites_ok:
-                self._messages.append(f'{self.action_label(action)}: required member no longer exists.')
+                self.message(f'{self.action_label(action)}: required member no longer exists.')
                 failed = True
                 break
             if current_context is not None:
                 try:
                     attempt.require_confirmed(*current_context())
                 except PlanError as exc:
-                    self._messages.append(str(exc))
+                    self.message(str(exc))
                     failed = True
                     break
             if self.matches_bundle(handler, action, action.after, observed, tuple(p.after for p in action.projections)):
                 self.journal = (*self.journal, JournalEntry(reviewed, 'skipped', observed, timestamp(),
                     Outcome.UNCHANGED, postimage=observed, finished_at=timestamp()))
+                if await self.step('applied', reviewed) == 'rollback':
+                    return await self.recover('rollback_all')
                 continue
             # Publish the attempt before invoking the endpoint. All retained state
             # and request snapshots are recursively immutable canonical values.
@@ -294,41 +327,42 @@ class Executor:
                       Outcome.DIVERGENT: 'failed_with_observed_state', Outcome.UNKNOWN: 'unknown_outcome'}[outcome]
             self.journal = (*self.journal[:-1], replace(entry, status=status, outcome=outcome,
                 evidence=evidence, postimage=actual, finished_at=timestamp()))
-            self._messages.append(f'{self.action_label(action)}: {self.outcome_message(action, outcome)}' +
+            self.message(f'{self.action_label(action)}: {self.outcome_message(action, outcome)}' +
                                   (f'; API error: {evidence.failure.message}' if evidence.failure else ''))
             if outcome == Outcome.DIVERGENT:
                 summary = handler.compare(action.after, actual).summary
-                self._messages.append(summary or 'The related resource representation differs from the intended shared label.')
+                self.message(summary or 'The related resource representation differs from the requested shared label.')
+            if outcome == Outcome.INTENDED and evidence.failure is None:
+                if await self.step('applied', reviewed) == 'rollback':
+                    return await self.recover('rollback_all')
             if outcome != Outcome.INTENDED or evidence.failure is not None:
                 failed = True
                 break
-        limits = [item.recovery_limit for item in actions]
-        if 'schema_only_data_unverified' in limits:
-            self._messages.append('Persisted field deletion: schema-only compensation; record-data restoration is unverified.')
         if not failed:
-            self._messages.append('All requested updates verified.' if self.journal else 'No updates required.')
+            self.message('All requested updates verified.' if self.journal else 'No updates required.')
             return self.report('success')
         if not any(entry.status != 'skipped' for entry in self.journal):
             return self.report('stopped')
         if self._cancelled:
-            self._messages.append('Execution interrupted; write/read-back evidence retained without automatic recovery.')
+            self.message('Execution interrupted; write/read-back evidence retained without automatic recovery.')
             return self.report('interrupted')
         try:
-            choice = await choose_recovery('\n'.join(self._messages))
+            choice = ('rollback_all' if self.step_control is not None else
+                      await choose_recovery('\n'.join(self._messages)))
         except (Exception, asyncio.CancelledError) as exc:
-            self._messages.append(f'Recovery decision interrupted: {type(exc).__name__}; changes left in place.')
+            self.message(f'Recovery decision interrupted: {type(exc).__name__}; changes left in place.')
             return self.report('interrupted')
         if choice not in ('rollback_last', 'rollback_all'):
-            self._messages.append('Changes left in place; unresolved outcomes remain explicit.')
+            self.message('Changes left in place; unresolved outcomes remain explicit.')
             return self.report('left')
         return await self.recover(choice)
 
     async def recover(self, choice):
         restored = 0
-        data_unverified = False
         for index in range(len(self.journal) - 1, -1, -1):
             entry = self.journal[index]
             if entry.status == 'skipped' or entry.outcome == Outcome.UNCHANGED:
+                await self.step('rollback_skip', entry.reviewed)
                 continue
             action = entry.reviewed.action
             handler = self.handler(action)
@@ -336,12 +370,13 @@ class Executor:
             if entry.outcome == Outcome.DIVERGENT:
                 reason = 'Divergent state does not establish ownership; automatic recovery blocked.'
                 self.record_recovery(index, 'blocked', current, message=reason)
-                self._messages.append(reason)
+                self.message(reason)
                 return self.report('recovery_blocked')
             if entry.outcome == Outcome.UNKNOWN:
                 reconciled = self.classify(handler, action, entry.preimage, current)
                 self.record_recovery(index, 'reconciled', current, message=reconciled.value)
                 if reconciled == Outcome.UNCHANGED:
+                    await self.step('rollback_skip', entry.reviewed)
                     continue
                 safe = reconciled == Outcome.INTENDED
             else:
@@ -349,7 +384,7 @@ class Executor:
             if not safe:
                 reason = 'Recovery stopped: outcome is unresolved or the observed postimage changed.'
                 self.record_recovery(index, 'blocked', current, message=reason)
-                self._messages.append(reason)
+                self.message(reason)
                 return self.report('recovery_blocked')
             # Restore the immediate observed preimage, never a stale plan baseline.
             try:
@@ -357,8 +392,16 @@ class Executor:
                            if action.kind == ActionKind.FORM_DELETE else handler.recovery_request(action, entry.preimage.state))
             except PlanError as exc:
                 self.record_recovery(index, 'blocked', current, message=str(exc))
-                self._messages.append(str(exc))
+                self.message(str(exc))
                 return self.report('recovery_blocked')
+            await self.step('rollback', entry.reviewed, request)
+            if self.step_control is not None:
+                latest = await self.observe_action(action)
+                if not self.matches_observation(handler, action, current, latest):
+                    reason = 'Recovery stopped: observed state changed while awaiting execution.'
+                    self.record_recovery(index, 'blocked', latest, message=reason)
+                    self.message(reason)
+                    return self.report('recovery_blocked')
             self.record_recovery(index, 'attempted', current, request=request)
             evidence = await self.write(handler, request)
             actual = await self.observe_action(action)
@@ -371,14 +414,12 @@ class Executor:
                 'unknown' if not actual.complete else 'failed')
             self.record_recovery(index, status, actual, evidence, request=request)
             if (evidence.failure and action.kind != ActionKind.FORM_DELETE) or not verified:
-                self._messages.append('Recovery stopped after an API error or unverified restoration; read-back evidence retained.')
+                self.message('Recovery stopped after an API error or unverified restoration; read-back evidence retained.')
                 return self.report('recovery_failed')
+            self.message(f'{self.action_label(action)}: rollback write and verification completed.')
+            await self.step('restored', entry.reviewed, request)
             restored += 1
-            data_unverified |= entry.reviewed.recovery_limit == 'schema_only_data_unverified'
             if choice == 'rollback_last':
                 break
-        self._messages.append(f'{restored} update(s) restored and verified at the schema level.')
-        if data_unverified:
-            self._messages.append('Record-data restoration remains unverified.')
-        return self.report('schema_restored_data_unverified' if data_unverified else
-                           'rolled_back_all' if choice == 'rollback_all' else 'rolled_back_last')
+        self.message(f'{restored} update(s) restored and verified.')
+        return self.report('rolled_back_all' if choice == 'rollback_all' else 'rolled_back_last')

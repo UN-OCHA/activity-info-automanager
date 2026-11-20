@@ -69,4 +69,4 @@ class RestoreTests(unittest.IsolatedAsyncioTestCase):
                     managers[0].delete_command(0)
                     store.save.assert_called_once_with(api_token='token',
                                                        dbid=selections[0].value,
-                                                       formid=selections[1].value, commands='')
+                                                       formid=selections[1].value, commands='', execute_step_by_step=False)

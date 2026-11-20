@@ -14,6 +14,7 @@ from activity_manager.command_list import CommandListManager
 from activity_manager.command_parser import parse_command_text
 from activity_manager.listbox import DatabaseListbox
 from activity_manager.page import connection_page
+from activity_manager.immutable import thaw
 from test.test_executor import MemoryEvidenceService
 from test.test_planning import schema_state
 
@@ -88,13 +89,17 @@ class ExecutorPageTests(unittest.IsolatedAsyncioTestCase):
         with self.client:
             manager.on_execute()
             self.assertEqual(service.writes, [])
-            payload = next(item for item in self.client.layout.descendants()
-                           if isinstance(item, ui.code) and item.content.startswith('[\n'))
-            reviewed = json.loads(payload.content)
-            ok = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'OK')
+            self.assertFalse(any(isinstance(item, ui.code) and item.content.startswith('[\n')
+                                 for item in self.client.layout.descendants()))
+            ok = [item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'Execute'][-1]
+            execute = callback(ok)
+            closure = dict(zip(execute.__code__.co_freevars, (cell.cell_contents for cell in execute.__closure__)))
+            reviewed = [thaw(item.request.schema) for item in closure['pending_execution']['attempt'].plan.actions]
             await callback(ok)()
             report = manager.execution_report
             self.assertEqual(report.status, 'success')
+            self.assertTrue(any(isinstance(item, ui.label) and item.text == '\n'.join(report.console_messages)
+                                for item in page.descendants()))
             self.assertEqual(service.writes[0][1], reviewed[0])
             self.assertEqual(manager.resolution_cache, {})
             self.assertEqual(manager.reference_defaults, {})
@@ -110,7 +115,7 @@ class ExecutorPageTests(unittest.IsolatedAsyncioTestCase):
             manager.on_execute()
             cancel = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'Cancel')
             callback(cancel)()
-            ok = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'OK')
+            ok = [item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'Execute'][-1]
             await callback(ok)()
         self.assertEqual(service.writes, [])
         self.assertEqual(service.reads, [])
@@ -122,7 +127,7 @@ class ExecutorPageTests(unittest.IsolatedAsyncioTestCase):
             manager.commands = parse_command_text('AddField(fieldCode="DIFFERENT", label="Different")')
             manager._evaluate_commands()
             await self.finish_evaluation(manager)
-            ok = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'OK')
+            ok = [item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'Execute'][-1]
             await callback(ok)()
         self.assertEqual(service.writes, [])
         self.assertEqual(service.reads, [])
@@ -133,7 +138,7 @@ class ExecutorPageTests(unittest.IsolatedAsyncioTestCase):
             service, manager, page = await self.build(modes=('commit_error',))
             with self.client:
                 manager.on_execute()
-                ok = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'OK')
+                ok = [item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'Execute'][-1]
                 async def click():
                     with self.client:
                         await callback(ok)()
@@ -161,7 +166,7 @@ class ExecutorPageTests(unittest.IsolatedAsyncioTestCase):
             manager.on_execute()
             forms = [item for item in page.descendants() if isinstance(item, DatabaseListbox)][1]
             await callback(forms)(SimpleNamespace(args=None))
-            ok = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'OK')
+            ok = [item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'Execute'][-1]
             await callback(ok)()
         self.assertEqual(service.writes, [])
 
@@ -178,7 +183,7 @@ class ExecutorPageTests(unittest.IsolatedAsyncioTestCase):
             queries = service.queries
             manager.on_execute()
             self.assertEqual(service.queries, queries)
-            ok = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'OK')
+            ok = [item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'Execute'][-1]
             await callback(ok)()
             report = manager.execution_report
             self.assertEqual(report.status, 'success', report.messages)
@@ -192,7 +197,7 @@ class ExecutorPageTests(unittest.IsolatedAsyncioTestCase):
         service.schemas['a']['label'] = 'Changed remotely'
         with self.client:
             manager.on_execute()
-            ok = next(item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'OK')
+            ok = [item for item in self.client.layout.descendants() if isinstance(item, ui.button) and item.text == 'Execute'][-1]
             await callback(ok)()
             report = manager.execution_report
             self.assertEqual(report.status, 'preflight_failed')

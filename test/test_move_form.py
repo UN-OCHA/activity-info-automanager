@@ -370,9 +370,9 @@ class MoveFormPageTests(unittest.IsolatedAsyncioTestCase):
             commands._evaluate_commands()
             await commands._evaluation_task
             commands.on_execute()
-            self.assertTrue(any(isinstance(item, ui.label) and 'a -> north' in item.text
+            self.assertTrue(any(isinstance(item, ui.label) and 'Move forms — A → North' in item.text
                                 for item in page.client.elements.values()))
-            ok = next(item for item in page.client.elements.values() if isinstance(item, ui.button) and item.text == 'OK')
+            ok = [item for item in page.client.elements.values() if isinstance(item, ui.button) and item.text == 'Execute'][-1]
             execute = next(iter(ok._event_listeners.values())).handler.__closure__[0].cell_contents
             await execute()
             await commands._evaluation_task

@@ -36,7 +36,7 @@ Intentional changes needing explicit behavioral tests:
 - Failed resolution publishes neither candidate state nor plan/variable changes.
   Rejected candidate data and paths are diagnostic attachments only.
 - Each action-start field deletion has its own action. Later edits start a new
-  schema action; schema-only recovery does not establish record-data restoration.
+  schema action. User testing subsequently confirmed deleted-field data restoration.
 - RollbackLast skips attempts proven unchanged. Divergent outcomes block automatic
   recovery unless a handler establishes a safe partial-outcome contract.
 - Historical displays retain their related schema/name/annotation context and
@@ -211,7 +211,8 @@ Deliverables:
   divergent postimage does not establish ownership; initially block its compensation.
 - Leave/RollbackLast/RollbackAll, reverse verified compensation, reconciliation of
   unknown results, stop on unsafe/failed recovery, and truthful partial reports.
-- Preserve schema-only persisted-field recovery with explicit data-unverified limits.
+- Preserve persisted-field recovery using the immediate schema preimage. User testing
+  subsequently confirmed data restoration; the former limitation notices are removed.
   Clear stale caches without altering the retained plan, journal or report.
 
 Checks: stale preflight before any write; revisits; timeouts before/after commit;
@@ -275,9 +276,8 @@ reported. Do not call the full migration complete with rename execution unresolv
    creator-before-use prerequisites, schema/resource verification and conditional
    compensation. Optional create/delete elimination may be omitted; no general
    cross-form analyzer is implied.
-2. Recovery investigation: in a separately authorized test environment, establish
-   field recovery and database-version revert semantics, record-data restoration,
-   supported client endpoints and concurrency limits.
+2. Recovery investigation: user testing has since confirmed field and form deletion
+   rollback with their data. Retain supported endpoints and concurrency checks.
 3. DeleteForm/richer field recovery: make the product/recovery decision using that
    evidence, then implement lifecycle/UI behavior, truthful capabilities and tested
    compensation. Empty schema recreation is not accepted form recovery.

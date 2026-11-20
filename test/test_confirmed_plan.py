@@ -38,7 +38,7 @@ class ConfirmationTests(unittest.TestCase):
         self.assertEqual(plan.actions[-1].action.before.payload.schema['elements'][0]['id'], created)
         self.assertEqual(plan.candidate.member_provenance[0].member.member_id, created)
         self.assertEqual(preview.actions[0].after.payload.schema['elements'][0]['id'], 'pending-field:x')
-        self.assertEqual(plan.actions[-1].recovery_limit, 'schema_only_data_unverified')
+        self.assertEqual(plan.actions[-1].recovery_limit, 'field_restoration_compensation')
 
     def test_record_label_and_formula_literals_keep_their_meaning(self):
         builder = PlanBuilder()

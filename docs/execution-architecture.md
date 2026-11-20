@@ -138,7 +138,7 @@ cross-endpoint transaction.
 | ModifyForm record label, including clear and pending field IDs | Supported. |
 | MoveForm within its database, top-level forms | Supported with resource snapshots and owned-property compensation. |
 | ModifyForm name | Supported for forms/subforms using one schema write and verification/recovery of both representations of the shared label. |
-| Persisted-field compensation | Schema-only; record-data restoration unverified. |
+| Persisted-field compensation | Supported; user confirmed that rollback restores the deleted field with its data. |
 | AddForm | Supported with full-schema batching, resource placement verification and verified deletion compensation. |
 | Arbitrary resource property clearing, richer recovery | Not enabled; separate feature/evidence work. |
 
@@ -188,5 +188,37 @@ Recovery verifies resource entries and restored schemas. Missing deletion receip
 block automatic recovery: resource absence cannot identify the responsible audit
 version. Partial batches and concurrent target changes also block recovery. A lost
 revert response counts as restored only when read-back verifies the complete
-preimage. Record-data restoration has not been established by the live experiment,
-whose forms were empty. Unit tests mock all API writes.
+preimage. The user subsequently confirmed that both form deletion and field deletion
+rollback restore the deleted resources with their data. Automated read-back checks
+verify schemas/resources; data restoration was confirmed by user testing. Unit tests
+mock all API writes.
+
+
+### Interactive execution
+
+The persisted `execute_step_by_step` preference enables a modal around the same
+Executor. Async gates pause before forward writes, after verified results, before
+compensation, and after verified compensation or a proven unchanged attempt.
+Execute includes immediate predecessor checks, write and read-back. Continue only
+advances the gate; End releases the existing finalization path. Forced rollback
+uses the existing rollback-all journal traversal and permanently leaves forward
+execution. Unresolved, divergent or concurrent outcomes retain existing recovery
+blocks. After a rollback pause, state is checked again before compensation.
+Stop closes the modal immediately and stops at the next safe boundary; an in-flight
+write completes its read-back. The page then flushes cached reads and reloads the
+form list and selected schema. No independent execution or recovery loop lives in
+the modal. Rollback request previews use handler builders; deletion revert URLs
+require an attributed receipt and cannot be known before the deletion is executed.
+
+
+Execution confirmation lists numbered API actions with standard labels (Create
+form, Update form structure, Delete field, Move forms, Delete forms) and named
+resource scopes. Renames show old and new names; moves show destination names.
+Confirmation has no JSON payload, resource IDs or authored-command indexes. The
+step-by-step request inspector retains URLs and payloads.
+
+Executor publishes one ordered console history alongside the structured journal.
+Both modes retain HTTP details, recovery requests, reconciliation, verification,
+failures and completion messages in `ExecutionReport.console_messages`. The modal
+shows incremental portions of that history and clears only its visible text on
+action transitions. The main console shows the complete history after execution.

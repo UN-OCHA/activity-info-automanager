@@ -75,7 +75,7 @@ class PlanBuilderTests(unittest.TestCase):
                               if row.member == MemberRef(initial.key, 'pending-field:x')), creator)
         self.assertIn(creator, plan.actions[-1].dependency_ids)
         self.assertEqual(plan.actions[-1].before, add_y.after)
-        self.assertEqual(plan.actions[-1].recovery_capability, 'schema_only_data_unverified')
+        self.assertEqual(plan.actions[-1].recovery_capability, 'field_restoration_compensation')
 
     def test_pending_prefix_in_a_baseline_does_not_prove_same_action_creation(self):
         initial = schema_state(fields=[field('pending-field:persisted')])

@@ -454,10 +454,10 @@ class PlanBuilder:
             start_member_ids=_members(effect.before), deleted_member_id=deleted,
             prerequisites=effect.prerequisites,
             recovery_capability=('form_deletion_compensation' if kind == ActionKind.FORM_CREATE else
-                                 'schema_only_data_unverified' if deleted else
+                                 'field_restoration_compensation' if deleted else
                                  'owned_properties_compensation' if kind == ActionKind.DATABASE_RESOURCE_PATCH else
                                  'metadata_compensation'),
-            warnings=('Record-data restoration is unverified.',) if deleted else ())
+            warnings=())
         self._actions.append(action)
         return action
 

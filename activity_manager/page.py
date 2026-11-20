@@ -20,6 +20,8 @@ from .commands import COMMAND_CREATORS
 from .listbox import DatabaseListbox
 from .confirmed_plan import AttemptBinding, ConfirmationAttempt
 from .executor import Executor
+from .execution_presentation import confirmation_summary
+from .step_execution import StepExecutionDialog
 from .application_results import DisplayResource, DisplayState, DisplayTab, display_payload
 from .resource_state import ResourceKey, ResourceKind, Lifecycle, Existence
 
@@ -51,6 +53,7 @@ def connection_page():
         try:
             state_store.save(api_token=token.value or '', dbid=databases.value,
                              formid=forms.value,
+                             execute_step_by_step=command_list.step_checkbox.value,
                              commands='\n'.join(command.to_syntax() for command in command_list.commands))
         except (OSError, ValueError):
             console_message.set_text('Application state could not be saved.')
@@ -576,30 +579,7 @@ def connection_page():
                              'database_names': deepcopy(command_list.database_names),
                              'record_labels': {key: value for result in command_list.results if result.display_state
                                                for key, value in result.display_state.record_labels.items()}}
-        applications = {item.command.application_id: item.command for result in command_list.results
-                        for item in result.applications}
-        lines = ['Apply these updates in order:']
-        for index, reviewed in enumerate(attempt.plan.actions, 1):
-            action = reviewed.action
-            label = (action.after.payload.schema.get('label') if hasattr(action.after.payload, 'schema')
-                     else 'Database resources') or action.key.identity
-            contributors = sorted({applications[identity].authored_index + 1 for identity in action.application_ids
-                                   if identity in applications})
-            detail = f'; delete field {action.deleted_member_id}' if action.deleted_member_id else ''
-            if action.deleted_forms:
-                detail += '; delete forms: ' + ', '.join(state.payload.schema.get('label') or state.key.identity for state in action.deleted_forms)
-            if (hasattr(action.after.payload, 'schema')
-                    and action.before.payload.schema.get('label') != action.after.payload.schema.get('label')):
-                detail += f'; rename {action.before.payload.schema.get("label")} -> {action.after.payload.schema.get("label")}'
-            if reviewed.destinations:
-                detail += '; destinations: ' + ', '.join(f'{identity} -> {parent}' for identity, parent in reviewed.destinations)
-            lines.append(f'{index}. {label} ({action.key.identity}){detail}; commands {contributors}')
-            if reviewed.recovery_limit == 'schema_only_data_unverified':
-                lines.append('Schema-only compensation; record-data restoration is unverified.')
-        if not attempt.plan.actions:
-            lines.append('No updates required.')
-        confirmation_message.set_text('\n'.join(lines))
-        confirmation_payload.set_content(json.dumps([thaw(item.request.schema) for item in attempt.plan.actions], indent=2))
+        confirmation_message.set_text(confirmation_summary(attempt.plan, command_list.database_names))
         confirmation_dialog.open()
 
     def cancel_execute_confirmation():
@@ -634,16 +614,20 @@ def connection_page():
         if execution is None:
             return
         set_write_busy(True)
+        step_dialog = (StepExecutionDialog(base_url.value, database_names=execution['database_names'])
+                       if command_list.step_checkbox.value else None)
         outcome = None
         unexpected_message = None
         try:
             binding, candidate = execution_context()
             attempt = execution['attempt']
             attempt.confirm(attempt.plan.attempt_id, binding, candidate)
-            executor = Executor(execution['service'])
+            executor = Executor(execution['service'], step_control=step_dialog)
             command_list.execution_executor = executor
             outcome = await executor.execute(
                 attempt, binding, candidate, choose_recovery, current_context=execution_context)
+            if step_dialog is not None:
+                await step_dialog.finish(executor, outcome)
             command_list.execution_report = outcome
             # All cached reads belong to the pre-execution state.
             record_cache = {}
@@ -678,13 +662,21 @@ def connection_page():
             command_list.related_schemas = {}
             command_list.clear_selection()
             if outcome is not None:
-                console_message.set_text('\n'.join(outcome.messages))
+                console_message.set_text('\n'.join(outcome.console_messages))
                 show_results(list(outcome.actual_schemas.values()), related=report_context, snapshot=report_display)
             elif unexpected_message is not None:
                 console_message.set_text(unexpected_message)
                 show_result(None)
             pending_execution = None
             set_write_busy(False)
+            if step_dialog is not None:
+                step_dialog.dialog.close()
+                if step_dialog.stopped:
+                    selected_form = forms.value
+                    await load_forms()
+                    if selected_form in forms.options:
+                        forms.set_value(selected_form)
+                        await load_schema()
 
     def clear_schema():
         nonlocal schema_request, source_schema, record_cache
@@ -872,6 +864,8 @@ def connection_page():
                 on_text_mode_change=text_mode_changed,
             )
 
+        command_list.step_checkbox.on_value_change(lambda _: save_state())
+
         with ui.card().classes('workbench-panel console-panel w-full no-shadow flex flex-col'):
             with ui.row().classes('w-full items-center justify-between'):
                 ui.label('Console').classes('text-lg font-medium')
@@ -885,10 +879,9 @@ def connection_page():
     with ui.dialog() as confirmation_dialog, ui.card().classes('w-full max-w-lg'):
         confirmation_dialog.props('persistent')
         confirmation_message = ui.label().classes('text-base whitespace-pre-wrap')
-        confirmation_payload = ui.code('', language='json').classes('w-full max-h-80 overflow-auto')
         with ui.row().classes('w-full justify-end gap-2'):
             ui.button('Cancel', on_click=cancel_execute_confirmation).props('flat')
-            ui.button('OK', on_click=execute_confirmed).props('color=primary')
+            ui.button('Execute', on_click=execute_confirmed).props('color=primary')
 
     context.client.on_delete(close_service)
 
@@ -904,6 +897,7 @@ def connection_page():
             if saved is None:
                 return
             try:
+                command_list.step_checkbox.set_value(saved.get('execute_step_by_step') is True)
                 token.set_value(saved['api_token'])
                 await asyncio.sleep(0)
                 if saved['api_token']:

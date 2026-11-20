@@ -61,9 +61,10 @@ class AppStateStore:
             warning = 'Saved API token could not be decrypted. Enter it again.'
         return data, warning
 
-    def save(self, *, api_token, dbid, formid, commands):
+    def save(self, *, api_token, dbid, formid, commands, execute_step_by_step=False):
         data = dict(version=1, api_token_dpapi=(base64.b64encode(_crypt(api_token.encode('utf-8'))).decode('ascii') if api_token else ''),
-                    dbid=dbid, formid=formid, commands=commands)
+                    dbid=dbid, formid=formid, commands=commands,
+                    execute_step_by_step=bool(execute_step_by_step))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         name = None
         try:
