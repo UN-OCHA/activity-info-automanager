@@ -23,10 +23,18 @@ class CachedResolutionService:
         self.cache = cache
 
     async def _read(self, method, *args):
+        deleted = self.cache.get('deleted_form_ids', set())
+        if method in ('get_form_schema', 'get_form_tree') and args[0] in deleted:
+            raise ValueError('Form has been deleted in this application.')
         key = (method, json.dumps(args, sort_keys=True, ensure_ascii=False))
         if key not in self.cache:
             self.cache[key] = await getattr(self.service, method)(*args)
-        return deepcopy(self.cache[key])
+        value = deepcopy(self.cache[key])
+        if method == 'get_form_names':
+            value = {i: n for i, n in value.items() if i not in deleted}
+        if method == 'get_form_tree':
+            value = {i: v for i, v in value.items() if i not in deleted}
+        return value
 
     async def get_form_names(self, database_id):
         return await self._read('get_form_names', database_id)

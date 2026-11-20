@@ -11,6 +11,8 @@ from .with_form import WITH_FORM, WithFormCommand
 from .add_form import ADD_FORM, AddFormCommand
 
 __all__ = [
+    'DELETE_FORM',
+    'DeleteFormCommand',
     'ADD_FORM',
     'AddFormCommand',
     'MODIFY_FORM',
@@ -37,3 +39,5 @@ __all__ = [
 
 from .modify_form import MODIFY_FORM, ModifyFormCommand
 from .move_form import MOVE_FORM, MoveFormCommand
+
+from .delete_form import DELETE_FORM, DeleteFormCommand

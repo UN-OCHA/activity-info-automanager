@@ -16,6 +16,7 @@ class PlanError(ValueError):
 
 
 class ActionKind(StrEnum):
+    FORM_DELETE = 'form_delete'
     FORM_CREATE = 'form_create'
     FORM_SCHEMA_UPDATE = 'form_schema_update'
     PERSISTED_FIELD_DELETE = 'persisted_field_delete'
@@ -99,6 +100,16 @@ class ResourcePatchEffect:
 
 
 @dataclass(frozen=True)
+class FormDeleteEffect:
+    effect_id: str
+    application_id: str
+    key: ResourceKey
+    before: ResourceState
+    after: ResourceState
+    subjects: tuple[ResourceKey, ...]
+
+
+@dataclass(frozen=True)
 class PropertyPatch:
     member_id: str
     property_name: str
@@ -141,11 +152,12 @@ class ApiAction:
     recovery_capability: str = 'metadata_compensation'
     warnings: tuple[str, ...] = ()
     projections: tuple[ResourceProjection, ...] = ()
+    deleted_forms: tuple[ResourceState, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, 'kind', ActionKind(self.kind))
         for name in ('application_ids', 'effect_ids', 'dependency_ids', 'subjects', 'start_member_ids',
-                     'created_member_ids', 'prerequisites', 'read_set', 'write_set', 'patches', 'warnings', 'projections'):
+                     'created_member_ids', 'prerequisites', 'read_set', 'write_set', 'patches', 'warnings', 'projections', 'deleted_forms'):
             object.__setattr__(self, name, tuple(getattr(self, name)))
 
     @property
@@ -213,6 +225,7 @@ class PlanBuilder:
     def __init__(self, *, active_form=None, plan_id=None):
         self.plan_id = plan_id or uuid4().hex
         self._actions = []
+        self._action_sequence = 0
         self._candidates = {}
         self._groups = {}
         self._sealed = set()
@@ -431,7 +444,8 @@ class PlanBuilder:
     def _new_action(self, effect, kind, *, deleted=None, dependencies=()):
         predecessor = self._last_action(effect.key)
         dependencies = _unique((*((predecessor,) if predecessor else ()), *dependencies))
-        action_id = f'{self.plan_id}:a{len(self._actions) + 1}'
+        self._action_sequence += 1
+        action_id = f'{self.plan_id}:a{self._action_sequence}'
         group_id = self._group_id()
         self._groups.setdefault(group_id, (self._reason, self._scope_id))
         action = ApiAction(action_id, kind, group_id, effect.key, effect.before, effect.after,
@@ -565,3 +579,65 @@ class PlanBuilder:
             read_set=(*reads, *existence, *self._requirement_footprints(action)),
             write_set=tuple(replace(footprint, phase='after') for footprint in reads))
         self._replace_action(action)
+
+    def delete_form(self, application_id, effect_id, before_db, after_db, form):
+        """Discard only the current open edit, then batch adjacent database deletions."""
+        candidate = deepcopy(self)
+        candidate._delete_form(application_id, effect_id, before_db, after_db, form)
+        self.__dict__.update(candidate.__dict__)
+
+    def _delete_form(self, application_id, effect_id, before_db, after_db, form):
+        open_action = self._candidate(form.key, ActionKind.FORM_CREATE) or self._candidate(form.key, ActionKind.FORM_SCHEMA_UPDATE)
+        # An open candidate can coexist with other form candidates in an iterator.
+        # Remove only its contribution and leave all other actions intact.
+        if open_action is not None:
+            self._actions.remove(open_action)
+            self._candidates = {(a.key, a.kind): i for i, a in enumerate(self._actions)
+                                if a.group_id == self._group_id() and a.group_id not in self._sealed}
+            self._origins = {ref: row for ref, row in self._origins.items()
+                             if row.creator_action_id != open_action.action_id}
+            for i, action in enumerate(self._actions):
+                self._actions[i] = replace(action, dependency_ids=tuple(d for d in action.dependency_ids if d != open_action.action_id))
+            entries = dict(before_db.payload.entries)
+            for projection in open_action.projections:
+                if projection.before.key == before_db.key:
+                    old = projection.before.payload.entries.get(form.key.identity)
+                    if old is None:
+                        entries.pop(form.key.identity, None)
+                    else:
+                        entries[form.key.identity] = old
+            before_db = replace(before_db, payload=DatabaseResourcesPayload(entries))
+            form = open_action.before
+            if open_action.kind == ActionKind.FORM_CREATE:
+                self._projected[before_db.key] = after_db
+                self._projected[form.key] = replace(form, lifecycle=Lifecycle.DELETED)
+                self.record_application(application_id)
+                self._effect_order += (effect_id,)
+                return
+        if self._actions and self._actions[-1].kind == ActionKind.FORM_DELETE and self._actions[-1].key != before_db.key:
+            self._seal('deletion_database_boundary')
+        self._prepare_endpoint('form_deletion')
+        action = self._candidate(before_db.key, ActionKind.FORM_DELETE)
+        effect = ResourcePatchEffect(effect_id, application_id, before_db.key, before_db, after_db, (), subjects=(form.key,))
+        if action is None:
+            action = self._new_action(effect, ActionKind.FORM_DELETE)
+        else:
+            action = self._contribute(action, effect, ())
+        forms = (*action.deleted_forms, form)
+        # Include descendants already represented in the database tree.
+        removed = tuple(i for i in action.before.payload.entries if i not in after_db.payload.entries)
+        footprints = tuple(Footprint(before_db.key, i, whole_resource=True) for i in removed)
+        action = replace(action, after=after_db, deleted_forms=forms, recovery_capability='database_version_revert',
+                         read_set=(*footprints, *(Footprint(state.key, whole_resource=True) for state in forms)), write_set=tuple(replace(f, phase='after') for f in footprints))
+        self._replace_action(action)
+        self._projected[before_db.key] = after_db
+        self._projected[form.key] = replace(form, lifecycle=Lifecycle.DELETED)
+        self.record_application(application_id)
+        self._effect_order += (effect_id,)
+
+    def exit_deleted_scope(self):
+        self._scope_id, self._scope_keys = None, ()
+
+    def finish_deletions(self):
+        if self._endpoint == 'form_deletion':
+            self._seal('after_form_deletion')

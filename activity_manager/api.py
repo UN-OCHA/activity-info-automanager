@@ -291,3 +291,24 @@ class ActivityInfoService:
             return WriteEvidence(failure=EndpointFailure(FailureKind.INVALID, str(exc)))
         receipt, failure = await self._endpoint_evidence(add_form, AddUpdateFormResponse, database_id=database_id, body=body)
         return WriteEvidence(receipt if failure is None else failure.receipt, failure)
+
+    async def revert_database_update_evidence(self, database_id, version):
+        from urllib.parse import quote
+        from .endpoint_evidence import EndpointReceipt
+        try:
+            response = await self._http_client.post('/databases/' + quote(database_id, safe='') +
+                '/versions/' + quote(str(version), safe='') + '/revert')
+        except httpx.HTTPError as exc:
+            return WriteEvidence(failure=EndpointFailure(FailureKind.UNAVAILABLE, f'{type(exc).__name__}: {exc}'))
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        receipt = EndpointReceipt(response.status_code, dict(response.headers), response.text, body,
+                                  body.get('version') if isinstance(body, dict) else None)
+        if not response.is_success:
+            return WriteEvidence(receipt, EndpointFailure(FailureKind.REJECTED,
+                f'HTTP {response.status_code}: {response.text[:1000]}', receipt))
+        if not isinstance(body, dict) or not body.get('version'):
+            return WriteEvidence(receipt, EndpointFailure(FailureKind.INVALID, 'Invalid database revert response.', receipt))
+        return WriteEvidence(receipt)

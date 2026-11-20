@@ -140,9 +140,9 @@ cross-endpoint transaction.
 | ModifyForm name | Supported for forms/subforms using one schema write and verification/recovery of both representations of the shared label. |
 | Persisted-field compensation | Schema-only; record-data restoration unverified. |
 | AddForm | Supported with full-schema batching, resource placement verification and verified deletion compensation. |
-| Arbitrary resource property clearing, DeleteForm, richer recovery | Not enabled; separate feature/evidence work. |
+| Arbitrary resource property clearing, richer recovery | Not enabled; separate feature/evidence work. |
 
-No live recovery experiment or dependency upgrade was part of stages 0–7.
+No live recovery experiment or dependency upgrade was part of stages 0â€“7.
 
 ## Regression fixture construction
 
@@ -154,3 +154,39 @@ the actual report statuses, immediate-read behavior and conservative recovery ru
 `test/form_command_runtime.py` similarly adapts the preserved form-command mocks.
 UI workflow tests use the real Applier, confirmation gate and Executor with mocked
 services. These test construction helpers are not imported by application modules.
+
+
+## Form deletion
+
+DeleteForm supports currentForm, a single form selector, or a whole-name pattern in
+only the active database. Explicit selectors exit iteration; currentForm preserves
+its frozen form iterator. Later commands skip deleted members with a warning.
+Deleting another form preserves active context; deleting the active form clears
+only the active form. Missing targets warn and skip. Direct subform selection is
+currently skipped; parent deletion removes descendant database entries locally.
+
+Deleted forms retain display tombstones, but disappear from live name resolution,
+reference context, resource lists and selector suggestions. Result tabs use red,
+struck-through labels and show ?Form deleted?. Dependency warnings inspect only
+schemas already held locally and do not claim complete coverage.
+
+An open creation or schema update for the target is removed from the queue. Open
+creation followed by deletion cancels both actions. Closed actions remain, as do
+unrelated actions. Deletion has its own endpoint boundary; consecutive deletions
+in the same database batch into one resourceDeletions request. Other commands and
+other database targets close the deletion batch.
+
+Forward verification reads GetDatabaseTree; schema predecessors are also checked
+before deletion. Recovery reverts the exact deletion receipt version via
+POST /databases/{databaseId}/versions/{version}/revert. The numeric component of
+versions such as 28#1 identifies the database audit event. Live investigation on
+two test forms confirmed that separate deletions revert separately, a batched
+deletion reverts together, and repeating a completed revert returns HTTP 400 EMPTY.
+This undoes the deletion event rather than restoring a database snapshot.
+
+Recovery verifies resource entries and restored schemas. Missing deletion receipts
+block automatic recovery: resource absence cannot identify the responsible audit
+version. Partial batches and concurrent target changes also block recovery. A lost
+revert response counts as restored only when read-back verifies the complete
+preimage. Record-data restoration has not been established by the live experiment,
+whose forms were empty. Unit tests mock all API writes.

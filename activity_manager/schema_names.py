@@ -384,6 +384,9 @@ async def resolve_form_names(service, schema, related_schemas=None, *, known_for
         nonlocal databases
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f'Invalid referenced form {value!r}.')
+        cache = getattr(service, 'cache', None)
+        if isinstance(cache, dict) and value in cache.get('deleted_form_ids', set()):
+            raise ValueError('Referenced form has been deleted in this application.')
         if value in forms or value in known_form_ids or value.endswith('@users'):
             return value
         # Older service implementations can still write canonical schemas.

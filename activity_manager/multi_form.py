@@ -61,6 +61,8 @@ class FormWorkspace:
         database_id = self.state.active_database_id
         if not database_id and '/' not in form:
             raise FormSelectionError('An active database or a database-qualified form name is required.')
+        from .schema_resolution import CachedResolutionService
+        service = CachedResolutionService(service, {'deleted_form_ids': {k.identity for k, v in self.state.resources.items() if v.lifecycle == Lifecycle.DELETED}})
         probe = {**(current or {}), 'databaseId': database_id, 'elements': [{'type': 'reference', 'typeParameters': {
             'range': [{'formId': form}]}}]}
         try:
@@ -68,8 +70,13 @@ class FormWorkspace:
         except ValueError as exc:
             raise FormSelectionError(str(exc)) from exc
         identity = resolved['elements'][0]['typeParameters']['range'][0]['formId']
+        if self.state.resources.get(ResourceKey.form(identity)) is not None and self.state.resources[ResourceKey.form(identity)].lifecycle == Lifecycle.DELETED:
+            raise FormSelectionError('Form deleted. Command skipped.')
         if current is not None and identity == current.get('id'):
             return deepcopy(current)
+        local = self.state.resources.get(ResourceKey.form(identity))
+        if local is not None and local.lifecycle == Lifecycle.DELETED:
+            raise FormSelectionError('Form deleted. Command skipped.')
         schema = self.latest.get(identity)
         if schema is None:
             schema = await service.get_form_schema(identity)
@@ -82,6 +89,9 @@ class FormWorkspace:
 
     async def select(self, identity, service):
         """Select a frozen scope member by identity, loading it once."""
+        local = self.state.resources.get(ResourceKey.form(identity))
+        if local is not None and local.lifecycle == Lifecycle.DELETED:
+            raise FormSelectionError('Form deleted. Command skipped.')
         schema = self.latest.get(identity)
         if schema is None:
             schema = await service.get_form_schema(identity)

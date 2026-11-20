@@ -17,7 +17,7 @@ from .command_iteration import IterativeCommand, PreparedCommand
 from .immutable import freeze, command_parameters_snapshot
 from .multi_form import FormWorkspace, FormSelectionError
 from .resource_state import ResourceKey, ResourceState, DatabaseResourcesPayload, BaselineEvidence, Existence, LoadStatus, Lifecycle, FormPayload
-from .planning import PlanBuilder, SchemaEffect, ResourcePatchEffect, MemberRef, ResourceProjection, Footprint
+from .planning import PlanBuilder, SchemaEffect, ResourcePatchEffect, FormDeleteEffect, MemberRef, ResourceProjection, Footprint
 from .schema_names import readable_schema, load_default_record_labels
 
 ACTIVE_DRAFT = ContextVar('activity_manager_application_draft', default=None)
@@ -61,6 +61,7 @@ class Applier:
         self._database_names = deepcopy(database_names or {})
         self._reference_defaults = deepcopy(reference_defaults or {})
         self._resolution_cache = deepcopy(resolution_cache or {})
+        self._resolution_cache.pop('deleted_form_ids', None)
         self._snapshot_builder = DisplaySnapshotBuilder(generation)
         self._effects = ()
         self._plan_builder = PlanBuilder(active_form=self._workspace.state.active_form_key)
@@ -341,6 +342,7 @@ class Applier:
         from .commands.with_form import WithFormCommand
         from .commands.modify_form import ModifyFormCommand
         from .commands.move_form import MoveFormCommand
+        from .commands.delete_form import DeleteFormCommand
         from .commands.set_variable import SetVariableCommand
         command = getattr(command, 'command', command)
         if isinstance(command, AddFormCommand):
@@ -348,7 +350,7 @@ class Applier:
                 return ExecutionResult.warning(current, 'An active database is required. Command skipped.', 'missing_database', skipped=True)
             return None
         if isinstance(command, WithFormCommand) or (
-                isinstance(command, (ModifyFormCommand, MoveFormCommand)) and not command.current_form):
+                isinstance(command, (ModifyFormCommand, MoveFormCommand, DeleteFormCommand)) and not command.current_form):
             return None
         if isinstance(command, SetVariableCommand):
             from .command_templates import command_parameters
@@ -456,7 +458,10 @@ class Applier:
             identity = result.schema.get('id')
             key = self.workspace.key_for(result.schema)
             before = self.workspace.state.resources.get(key)
-            self.workspace.update(result.schema)
+            deletion = any(isinstance(effect, FormDeleteEffect) and effect.application_id == self._attempt_id
+                           for effect in self.effects)
+            if not deletion:
+                self.workspace.update(result.schema)
             after = self.workspace.state.resources[key]
             if before is not None and (before.payload, before.lifecycle) != (after.payload, after.lifecycle):
                 effect = SchemaEffect(self._attempt_id + ':schema', self._attempt_id, key, before, after,
@@ -489,11 +494,16 @@ class Applier:
         from .commands.with_form import WithFormCommand
         from .commands.modify_form import ModifyFormCommand
         from .commands.move_form import MoveFormCommand
+        from .commands.delete_form import DeleteFormCommand
         from .commands.set_variable import SetVariableCommand
         from .command_templates import command_parameters
         from .command_iteration import PreparedCommand
         try:
             prepared = application.command if isinstance(application, PreparedCommand) else command_parameters(application, variables)
+            if not isinstance(prepared, DeleteFormCommand):
+                self.plan_builder.finish_deletions()
+            if isinstance(prepared, DeleteFormCommand):
+                return await self._delete_form(prepared, current, scope_member=scope_member)
             if isinstance(prepared, AddFormCommand):
                 return await self._add_form(prepared, current)
             if isinstance(prepared, MoveFormCommand) and prepared.current_form:
@@ -560,14 +570,15 @@ class Applier:
         from .commands.with_form import WithFormCommand
         from .commands.modify_form import ModifyFormCommand
         from .commands.move_form import MoveFormCommand
+        from .commands.delete_form import DeleteFormCommand
         for index, command in enumerate(commands):
             if not self.is_current():
                 return
             self._index, self._position = index, 0
             self.executions[index] = CommandExecution('resolving', None, 'Resolving names...')
             self._publish_evaluation()
-            if (isinstance(command, (AddFormCommand, WithFormCommand, ModifyFormCommand, MoveFormCommand))
-                    and not (isinstance(command, (ModifyFormCommand, MoveFormCommand)) and command.current_form)):
+            if (isinstance(command, (AddFormCommand, WithFormCommand, ModifyFormCommand, MoveFormCommand, DeleteFormCommand))
+                    and not (isinstance(command, (ModifyFormCommand, MoveFormCommand, DeleteFormCommand)) and command.current_form)):
                 next_variables = deepcopy(self.variables)
                 for name in self.assigned:
                     next_variables.pop(name, None)
@@ -581,7 +592,10 @@ class Applier:
                         self.assigned.clear()
                         transitioned = True
                 if getattr(command, 'form_pattern', None) is not None:
-                    _, execution = await self._start_form_scope(command, current, next_variables, version, commit_scope)
+                    if isinstance(command, DeleteFormCommand):
+                        _, execution = await self._start_form_scope(command, current, next_variables, version, lambda _: commit_scope(None))
+                    else:
+                        _, execution = await self._start_form_scope(command, current, next_variables, version, commit_scope)
                 else:
                     execution = await self._run_connected_command(index, current, next_variables, version,
                         on_success=lambda: commit_scope(None))
@@ -637,6 +651,8 @@ class Applier:
             names = dict(await self.form_service.get_form_names(database_id))
             if not self.is_current():
                 return scope, None
+            deleted = {key.identity for key, state in self.workspace.state.resources.items() if state.lifecycle == Lifecycle.DELETED}
+            names = {identity: name for identity, name in names.items() if identity not in deleted}
             names.update({identity: schema.get('label') or identity
                           for identity, schema in self.workspace.latest.items()
                           if schema.get('databaseId') == database_id})
@@ -658,7 +674,11 @@ class Applier:
         scope_keys = tuple(ResourceKey.form(target['identity']) for target in scope)
         if not scope:
             builder = deepcopy(self.plan_builder)
-            builder.begin_scope(scope_id, scope_keys)
+            from .commands.delete_form import DeleteFormCommand
+            if isinstance(command, DeleteFormCommand):
+                builder.exit_deleted_scope()
+            else:
+                builder.begin_scope(scope_id, scope_keys)
             self.plan_builder = builder
             commit_scope(scope)
             self._sync_context()
@@ -672,7 +692,7 @@ class Applier:
             if result is None or not self.is_current():
                 return scope, None
             if not result.application_failed:
-                target['form_key'] = self.workspace.state.active_form_key
+                target['form_key'] = ResourceKey.form(target['identity'])
             children[i] = replace(CommandExecution.from_result(result), field_code=target['name'],
                                   target_keys=(ResourceKey.form(target['identity']),))
             current = result.schema
@@ -733,7 +753,12 @@ class Applier:
         self.executions[index] = self._form_summary(children, current)
         self._publish_evaluation()
         for i, target in enumerate(scope):
-            current = deepcopy(self.workspace.state.resources[target['form_key']].payload.to_dict())
+            state = self.workspace.state.resources.get(target['form_key'])
+            if state is None or state.lifecycle == Lifecycle.DELETED:
+                children[i] = self._snapshot_execution(CommandExecution.from_result(ExecutionResult.warning(
+                    self.workspace.active_schema, 'Form deleted. Command skipped.', 'deleted_form', skipped=True)))
+                continue
+            current = deepcopy(state.payload.to_dict())
             execution = await self._run_connected_command(index, current, target['variables'], version,
                                                           publish=False, targets=plans[i], form_key=target['form_key'],
                 on_success=(lambda: self.assigned.add(f'vars.{command.name}'))
@@ -848,3 +873,62 @@ class Applier:
         self.plan_builder.add(effect)
         self.effects += (effect,)
         return with_prepared_command(ExecutionResult(schema, success_message=f'Moved form to {path}'), command)
+
+    async def _delete_form(self, command, current, *, scope_member=False):
+        from .schema_names import referenced_form_ids
+        active_key = self.workspace.state.active_form_key
+        active_db = self.workspace.state.active_database_id
+        try:
+            if command.current_form:
+                schema = current
+            elif scope_member:
+                schema = await self.workspace.select(command.form, self.form_service)
+            else:
+                schema = await self.workspace.switch(command.form, self.form_service, current, self.related_schemas)
+        except ValueError as exc:
+            return ExecutionResult.warning(current, str(exc), 'form_selector_failed', skipped=True)
+        finally:
+            self.workspace.state.active_form_key = active_key
+            self.workspace.state.active_database_id = active_db
+        if schema is None:
+            return ExecutionResult.warning(current, 'An active form is required. Command skipped.', 'missing_form', skipped=True)
+        key = ResourceKey.form(schema['id'])
+        before = await self._database(schema['databaseId'])
+        if key.identity not in before.payload.entries:
+            return ExecutionResult.warning(current, 'Form is unavailable. Command skipped.', 'missing_form', skipped=True)
+        if before.payload.entries[key.identity].get('type') != 'FORM':
+            return ExecutionResult.warning(current, 'Direct subform deletion is not supported. Command skipped.', 'subform_unsupported', skipped=True)
+        removed = {key.identity}
+        while True:
+            children = {i for i, e in before.payload.entries.items() if e.get('parentId') in removed}
+            if children <= removed:
+                break
+            removed.update(children)
+        entries = {i: e for i, e in before.payload.entries.items() if i not in removed}
+        after = self.workspace.state.put(before.key, DatabaseResourcesPayload(entries))
+        form = self.workspace.state.resources[key]
+        effect_id = self._attempt_id + ':delete_form'
+        self.plan_builder.delete_form(self._attempt_id, effect_id, before, after, form)
+        if not command.current_form:
+            self.plan_builder.exit_deleted_scope()
+        effect = FormDeleteEffect(effect_id, self._attempt_id, before.key, before, after, (key,))
+        self.effects += (effect,)
+        diagnostics = []
+        for identity, candidate in {**self.related_schemas, **self.workspace.latest}.items():
+            if identity not in removed and removed.intersection(referenced_form_ids(candidate)):
+                diagnostics.append(Diagnostic('warning',
+                    f'{candidate.get("label") or identity}: deletion breaks a reference to {schema.get("label") or key.identity}.',
+                    code='deleted_form_dependency'))
+        for identity in removed:
+            local_key = ResourceKey.form(identity)
+            local = self.workspace.state.resources.get(local_key)
+            if local is not None and local.payload is not None:
+                self.workspace.state.put(local_key, local.payload, lifecycle=Lifecycle.DELETED)
+            self.related_schemas.pop(identity, None)
+        self.resolution_cache = deepcopy(self.resolution_cache)
+        self.resolution_cache.setdefault('deleted_form_ids', set()).update(removed)
+        if active_key is not None and active_key.identity in removed:
+            self.workspace.state.active_form_key = None
+            current = None
+        return with_prepared_command(ExecutionResult(current, tuple(diagnostics),
+            success_message=f'Deleted form: {schema.get("label") or key.identity}'), command)

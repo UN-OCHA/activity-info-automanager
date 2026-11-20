@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from uuid import uuid4
 
 from .immutable import FrozenMap, freeze, thaw
-from .resource_state import ResourceKey, ResourceKind, ResourceState
+from .resource_state import ResourceKey, ResourceKind, ResourceState, Lifecycle
 from .schema_names import readable_resource, unresolved_formula_references
 
 
@@ -25,6 +25,7 @@ class DisplayTab:
     payload: object
     names: object = None
     annotations: tuple = ()
+    deleted: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, 'payload', freeze(self.payload))
@@ -136,7 +137,7 @@ class DisplayState:
                 label = payload.get('label') or payload.get('id') or 'Initial form'
             else:
                 label = self.database_names.get(item.key.identity) or item.key.identity
-            tabs.append(DisplayTab(item.key, label, payload, item.names, item.annotations))
+            tabs.append(DisplayTab(item.key, label, payload, item.names, item.annotations, item.state.lifecycle == Lifecycle.DELETED))
         return tuple(tabs)
 
     def tab_metadata(self):
@@ -200,7 +201,8 @@ class DisplaySnapshotBuilder:
         if labels:
             self._labels.update({key: value for key, value in thaw(freeze(labels)).items()
                                  if value != key[1]})
-        context = {**related, **state.forms}
+        deleted = {k.identity for k, v in state.resources.items() if v.lifecycle == Lifecycle.DELETED}
+        context = {i: s for i, s in {**related, **state.forms}.items() if i not in deleted}
         resources = []
         for key in state.affected_keys:
             resource = state.resources[key]
@@ -224,7 +226,7 @@ def adapt_authored_result(authored, execution, generation, *, plan=None):
     """Build immutable authored and actual results from an execution summary."""
     if execution.iterations:
         leaves = execution.iterations
-    elif execution.field_iterations or execution.form_iterations or execution.schema is None:
+    elif execution.field_iterations or execution.form_iterations or (execution.schema is None and not execution.effect_ids):
         leaves = ()
     else:
         leaves = (execution,)

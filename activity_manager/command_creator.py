@@ -400,7 +400,7 @@ class CommandCreatorRenderer:
         return self.command_select.value in ITERABLE_CREATORS and self.target_mode.value == 'Multiple'
 
     def _multiple_forms(self):
-        return (self.command_select.value in ('with_form', 'modify_form', 'move_form')
+        return (self.command_select.value in ('with_form', 'modify_form', 'move_form', 'delete_form')
                 and not self._current_form() and self.target_mode.value == 'Multiple')
 
     def _current_form(self):
@@ -417,7 +417,7 @@ class CommandCreatorRenderer:
             self.parameter_containers.clear()
             definition = self.definitions.get(self.command_select.value)
             from .command_iteration import ITERABLE_CREATORS
-            supports_multiple = self.command_select.value in ITERABLE_CREATORS or self.command_select.value in ('with_form', 'modify_form', 'move_form')
+            supports_multiple = self.command_select.value in ITERABLE_CREATORS or self.command_select.value in ('with_form', 'modify_form', 'move_form', 'delete_form')
             self.target_mode.set_visibility(supports_multiple)
             self.target_label.set_visibility(supports_multiple)
             with self.parameters:
@@ -443,7 +443,7 @@ class CommandCreatorRenderer:
         events.handle_event(self.on_parameter_change, self)
 
     def _update_target_controls(self):
-        if self.command_select.value in ('modify_form', 'move_form'):
+        if self.command_select.value in ('modify_form', 'move_form', 'delete_form'):
             self.target_mode.set_visibility(not self._current_form())
             self.target_label.set_visibility(not self._current_form())
         self.target_help.set_visibility(self._multiple_fields() or self._multiple_forms())

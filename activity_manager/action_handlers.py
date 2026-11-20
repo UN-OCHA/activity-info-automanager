@@ -159,3 +159,28 @@ class AddFormHandler(SchemaHandler):
 
     def recovery_request(self, action, preimage):
         return ResourceRequest(action.after.payload.schema['databaseId'], {'resourceDeletions': [action.key.identity]})
+
+
+@dataclass(frozen=True)
+class RevertDatabaseRequest:
+    database_id: str
+    version: str
+
+
+class DeleteFormHandler(ResourceHandler):
+    def compare(self, expected, observed):
+        return compare_resource_footprints(expected, observed, tuple(f for f in self.action.read_set if f.key == expected.key))
+
+    def encode_write(self, action):
+        return ResourceRequest(action.key.identity, {'resourceDeletions': [key.identity for key in action.subjects]})
+
+    async def write(self, request):
+        if isinstance(request, RevertDatabaseRequest):
+            return await self.service.revert_database_update_evidence(request.database_id, request.version)
+        return await super().write(request)
+
+    def recovery_request(self, action, preimage, evidence=None):
+        version = evidence.receipt.version if evidence is not None and evidence.receipt else None
+        if not isinstance(version, (str, int)) or isinstance(version, bool) or not str(version).split('#')[0].isdigit():
+            raise PlanError('Deletion version is unavailable; automatic revert cannot be attributed safely.')
+        return RevertDatabaseRequest(action.key.identity, str(version).split('#')[0])

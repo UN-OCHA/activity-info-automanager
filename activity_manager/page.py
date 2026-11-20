@@ -11,7 +11,7 @@ from .app_state import AppStateStore
 from .api import DEFAULT_BASE_URL, ActivityInfoService
 from .command_creator import CommandCreatorRenderer, field_codes_from_schema
 from .schema_names import readable_resource, load_default_record_labels, unresolved_formula_references
-from .command_execution import Diagnostic
+from .command_execution import Diagnostic, EXECUTABLE_STATUSES
 from .immutable import thaw
 from .schema_display import underline_substitutions
 from .schema_resolution import resolve_command_schema
@@ -21,7 +21,7 @@ from .listbox import DatabaseListbox
 from .confirmed_plan import AttemptBinding, ConfirmationAttempt
 from .executor import Executor
 from .application_results import DisplayResource, DisplayState, DisplayTab, display_payload
-from .resource_state import ResourceKey, ResourceKind
+from .resource_state import ResourceKey, ResourceKind, Lifecycle, Existence
 
 
 def ordered_result_tabs(tabs):
@@ -341,6 +341,7 @@ def connection_page():
     result_database_names = {}
     result_historical = False
     displayed_result = None
+    displayed_empty_message = 'No result'
     displayed_names = None
     record_cache = {}
     result_request = 0
@@ -371,7 +372,7 @@ def connection_page():
     def select_result_resource(identity):
         if identity in result_resources:
             tab = result_resources[identity]
-            show_result(thaw(tab.payload), names=thaw(tab.names), issues=tab.annotations,
+            show_result(None if tab.deleted else thaw(tab.payload), 'Form deleted' if tab.deleted else 'No result', names=None if tab.deleted else thaw(tab.names), issues=tab.annotations,
                         kind=tab.key.kind, database_id=tab.key.identity)
 
     def show_results(snapshots, active=None, empty_message='No result', related=None, snapshot=None):
@@ -398,7 +399,7 @@ def connection_page():
                 with ui.tab(tab.identity, label=tab.label).classes('result-tab-child' if child else ''):
                     ui.label('Database' if tab.key.kind == ResourceKind.DATABASE_RESOURCES else 'Form').classes(
                         'text-xs text-blue-700 normal-case')
-                    ui.label(tab.label).classes('result-tab-name text-sm normal-case')
+                    ui.label(tab.label).classes('result-tab-name text-sm normal-case' + (' text-red-600 line-through' if tab.deleted else ''))
         result_tabs.set_visibility(bool(result_resources))
         identity = active if active in result_resources else next(iter(result_resources), None)
         result_tabs.set_value(identity)
@@ -409,7 +410,8 @@ def connection_page():
 
     def show_result(data: dict | list | None, empty_message='No result', names=None, issues=(),
                     kind=ResourceKind.FORM_SCHEMA, database_id=None):
-        nonlocal displayed_result, displayed_names, result_request, displayed_issues
+        nonlocal displayed_result, displayed_names, result_request, displayed_issues, displayed_empty_message
+        displayed_empty_message = empty_message
         # Loaded schemas and form switches may have no command diagnostics.
         # Detect formula failures from the displayed snapshot's own context,
         # preserving other annotations and avoiding duplicate formula warnings.
@@ -448,7 +450,8 @@ def connection_page():
         displayed_names = readable_resource(ResourceKind.FORM_SCHEMA, data, related, databases, record_labels=labels)
         render_result()
 
-    def render_result(empty_message='No result'):
+    def render_result(empty_message=None):
+        empty_message = displayed_empty_message if empty_message is None else empty_message
         unresolved_badge.set_text(f'Unresolved: {len(displayed_issues)}')
         unresolved_badge.set_visibility(bool(displayed_issues))
         data = displayed_names if result_toggle.value == 'names' else displayed_result
@@ -493,16 +496,19 @@ def connection_page():
             rejected_code.markdown._handle_content_change(rejected_code._render_markdown())
         active = command_list.workspace.active_schema if command_list.workspace.form_snapshots else source_schema
         command_creator.set_schema(active)
-        if active:
-            directory = command_list.resolution_cache.get(('get_form_names', json.dumps((active.get('databaseId'),))))
+        active_database = command_list.workspace.state.active_database_id
+        if active_database:
+            directory = command_list.resolution_cache.get(('get_form_names', json.dumps((active_database,))))
             if directory is None:
                 directory = {identity: label.removesuffix(f' ({identity})')
                              for identity, label in forms.options.items()}
-                if active.get('databaseId') != databases.value:
+                if active_database != databases.value:
                     directory = {}
             directory = {**directory, **{
                 identity: data.get('label') or identity for identity, data in command_list.related_schemas.items()
-                if data.get('databaseId') == active.get('databaseId')}}
+                if data.get('databaseId') == active_database}}
+            deleted = {k.identity for k, state in command_list.workspace.state.resources.items() if state.lifecycle == Lifecycle.DELETED}
+            directory = {i: n for i, n in directory.items() if i not in deleted}
             command_creator.set_suggestions('form_names', list(directory.values()))
         if selected_index is None:
             # Background evaluation still refreshes the source display, but its
@@ -551,9 +557,9 @@ def connection_page():
 
     def open_execute_confirmation():
         nonlocal pending_execution
-        target_schema = command_list.target_schema()
         if (
-            target_schema is None
+            not command_list.executions
+            or not all(e.status in EXECUTABLE_STATUSES for e in command_list.executions)
             or service is None
         ):
             return
@@ -580,6 +586,8 @@ def connection_page():
             contributors = sorted({applications[identity].authored_index + 1 for identity in action.application_ids
                                    if identity in applications})
             detail = f'; delete field {action.deleted_member_id}' if action.deleted_member_id else ''
+            if action.deleted_forms:
+                detail += '; delete forms: ' + ', '.join(state.payload.schema.get('label') or state.key.identity for state in action.deleted_forms)
             if (hasattr(action.after.payload, 'schema')
                     and action.before.payload.schema.get('label') != action.after.payload.schema.get('label')):
                 detail += f'; rename {action.before.payload.schema.get("label")} -> {action.after.payload.schema.get("label")}'
@@ -655,7 +663,10 @@ def connection_page():
             report_display = DisplayState(tuple(DisplayResource(item.state, readable_resource(
                 item.key.kind, display_payload(item.state), report_context, execution['database_names'],
                 database_id=item.key.identity, record_labels=execution['record_labels']))
-                for item in outcome.observations if item.state is not None),
+                for item in outcome.observations if item.state is not None) + tuple(
+                    DisplayResource(replace(state, lifecycle=Lifecycle.DELETED))
+                    for action in outcome.plan.actions for state in action.action.deleted_forms
+                    if any(o.key == state.key and o.existence == Existence.ABSENT for o in outcome.observations)),
                 report_context, execution['database_names'], execution['record_labels'])
             report_version = command_list._evaluation_version
         except Exception as exc:

@@ -9,7 +9,7 @@ from copy import deepcopy
 from uuid import uuid4
 import secrets
 
-from .action_handlers import PersistedFieldDeleteHandler, SchemaHandler, ResourceHandler, AddFormHandler
+from .action_handlers import PersistedFieldDeleteHandler, SchemaHandler, ResourceHandler, AddFormHandler, DeleteFormHandler
 from .immutable import freeze
 from .planning import ActionKind, PlanError
 from .resource_state import FormPayload, DatabaseResourcesPayload, ResourceKey
@@ -71,7 +71,7 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
                 if isinstance(identity, str):
                     identity_map[(evidence.key.identity, identity)] = identity
     for action in candidate.actions:
-        if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
+        if action.kind in (ActionKind.DATABASE_RESOURCE_PATCH, ActionKind.FORM_DELETE):
             continue
         for phase in ('before', 'after'):
             state = getattr(action, phase)
@@ -110,7 +110,7 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
     readable = {key: readable_schema(data, related, formulas_only=True) for key, data in prepared.items()}
     materialized_related = {identity: remap_schema(dict(schema), identity) for identity, schema in related.items()}
     for action in candidate.actions:
-        if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
+        if action.kind in (ActionKind.DATABASE_RESOURCE_PATCH, ActionKind.FORM_DELETE):
             continue
         materialized_related[action.key.identity] = remap_schema(
             prepared[(action.action_id, 'after')], action.key.identity)
@@ -120,7 +120,7 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
 
     actions = []
     for action in candidate.actions:
-        if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
+        if action.kind in (ActionKind.DATABASE_RESOURCE_PATCH, ActionKind.FORM_DELETE):
             actions.append(action)
             continue
         owner = action.key.identity
@@ -175,7 +175,7 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
 
     def state_ids(state):
         if isinstance(state.payload, FormPayload):
-            payload = FormPayload(form_schema(state.payload.to_dict()))
+            payload = FormPayload(form_schema(remap_schema(state.payload.to_dict(), state.key.identity)))
         else:
             entries = state.payload.to_list()
             for entry in entries:
@@ -194,6 +194,7 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
 
     actions = [replace(action, key=form_key(action.key), before=state_ids(action.before), after=state_ids(action.after),
         subjects=tuple(form_key(key) for key in action.subjects),
+        deleted_forms=tuple(state_ids(state) for state in action.deleted_forms),
         prerequisites=tuple(ref_ids(ref) for ref in action.prerequisites),
         read_set=tuple(footprint_ids(f) for f in action.read_set), write_set=tuple(footprint_ids(f) for f in action.write_set),
         patches=tuple(replace(patch, member_id=form_ids.get(patch.member_id, patch.member_id),
@@ -211,11 +212,11 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
         member_provenance=tuple(replace(row, member=ref_ids(member(row.member))) for row in candidate.member_provenance))
     reviewed = []
     for action in actions:
-        if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
-            handler = ResourceHandler(None, action)
+        if action.kind in (ActionKind.DATABASE_RESOURCE_PATCH, ActionKind.FORM_DELETE):
+            handler = (DeleteFormHandler if action.kind == ActionKind.FORM_DELETE else ResourceHandler)(None, action)
             reviewed.append(ReviewedAction(action, handler.encode_write(action),
                 tuple((patch.member_id, patch.after_value) for patch in action.patches if patch.property_name == 'parentId'),
-                (), action.recovery_capability))
+                tuple(key.identity for key in action.subjects) if action.kind == ActionKind.FORM_DELETE else (), action.recovery_capability))
             continue
         handler = (AddFormHandler if action.kind == ActionKind.FORM_CREATE else PersistedFieldDeleteHandler if action.kind == ActionKind.PERSISTED_FIELD_DELETE else SchemaHandler)(
             None, related_schemas=related, reference_defaults=reference_defaults)

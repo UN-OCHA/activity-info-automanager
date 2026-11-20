@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime, timezone
 from enum import StrEnum
 
-from .action_handlers import AddFormHandler, SchemaHandler, PersistedFieldDeleteHandler, ResourceHandler, compare_resource_footprints
+from .action_handlers import AddFormHandler, SchemaHandler, PersistedFieldDeleteHandler, ResourceHandler, DeleteFormHandler, compare_resource_footprints
 from .endpoint_evidence import EndpointFailure, FailureKind, Observation, WriteEvidence
 from .immutable import thaw
 from .planning import ActionKind, PlanError
@@ -86,6 +86,8 @@ class Executor:
     def handler(self, action):
         if self.handler_factory:
             return self.handler_factory(action)
+        if action.kind == ActionKind.FORM_DELETE:
+            return DeleteFormHandler(self.service, action)
         if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
             return ResourceHandler(self.service, action)
         cls = AddFormHandler if action.kind == ActionKind.FORM_CREATE else PersistedFieldDeleteHandler if action.kind == ActionKind.PERSISTED_FIELD_DELETE else SchemaHandler
@@ -98,12 +100,15 @@ class Executor:
             label = action.after.payload.schema.get('label') or action.key.identity
             operation = 'Add form' if action.kind == ActionKind.FORM_CREATE else 'Update form'
             return f'{operation} "{label}" ({action.key.identity})'
+        if action.kind == ActionKind.FORM_DELETE:
+            return 'Delete forms: ' + ', '.join(state.payload.schema.get('label') or state.key.identity for state in action.deleted_forms)
         return f'Update database resources ({action.key.identity})'
 
     @staticmethod
     def outcome_message(action, outcome):
         if outcome == Outcome.INTENDED:
             return {
+                ActionKind.FORM_DELETE: 'Deleted and verified',
                 ActionKind.FORM_CREATE: 'Created and verified',
                 ActionKind.FORM_SCHEMA_UPDATE: 'Updated and verified',
                 ActionKind.PERSISTED_FIELD_DELETE: 'Field deletion verified',
@@ -130,6 +135,11 @@ class Executor:
 
     async def observe_action(self, action):
         primary = await self.observe(action.key)
+        if action.kind == ActionKind.FORM_DELETE and primary.existence == Existence.PRESENT:
+            for state in action.deleted_forms:
+                if state.key.identity not in primary.state.payload.entries:
+                    self._observations[state.key] = Observation(state.key, Existence.ABSENT,
+                        failure=EndpointFailure(FailureKind.MISSING, 'Form absent from database tree.'))
         related = tuple([await self.observe(projection.before.key) for projection in action.projections])
         return replace(primary, related=related)
 
@@ -195,7 +205,8 @@ class Executor:
         baselines = {item.key: item for item in self.plan.candidate.baselines}
         actions = self.plan.actions
         required = tuple(dict.fromkeys(key for item in actions for key in (
-            item.action.key, *(f.key for f in item.action.read_set if f.phase == 'before'))))
+            item.action.key, *(f.key for f in item.action.read_set if f.phase == 'before'),
+            *(state.key for state in item.action.deleted_forms))))
         # Read every required baseline before considering a write, including
         # resources first touched by later actions. Keep all observations on failure.
         invalid = False
@@ -210,7 +221,7 @@ class Executor:
             elif baseline is None or baseline.existence != Existence.PRESENT:
                 invalid = True
             elif key.kind == ResourceKind.FORM_SCHEMA:
-                handler = self.handler(owner or actions[0].action)
+                handler = self.handler(owner) if owner else SchemaHandler(self.service, related_schemas=thaw(self.plan.related_schemas))
                 invalid |= not self.matches(handler, baseline.state, observed)
             else:
                 footprints = tuple(f for item in actions for f in item.action.read_set if f.key == key)
@@ -231,6 +242,15 @@ class Executor:
                 self._messages.append(f'{self.action_label(action)}: immediate predecessor is unavailable or stale.')
                 failed = True
                 break
+            if action.kind == ActionKind.FORM_DELETE:
+                schema_handler = SchemaHandler(self.service, related_schemas=thaw(self.plan.related_schemas))
+                schemas_match = True
+                for state in action.deleted_forms:
+                    schemas_match &= self.matches(schema_handler, state, await self.observe(state.key))
+                if not schemas_match:
+                    self._messages.append('Deletion stopped: a target schema changed since application.')
+                    failed = True
+                    break
             # Prerequisites explicitly declared by the planner only. No inferred
             # cross-form dependency scan or execution-time command reevaluation.
             prerequisites_ok = True
@@ -332,15 +352,25 @@ class Executor:
                 self._messages.append(reason)
                 return self.report('recovery_blocked')
             # Restore the immediate observed preimage, never a stale plan baseline.
-            request = handler.recovery_request(action, entry.preimage.state)
+            try:
+                request = (handler.recovery_request(action, entry.preimage.state, entry.evidence)
+                           if action.kind == ActionKind.FORM_DELETE else handler.recovery_request(action, entry.preimage.state))
+            except PlanError as exc:
+                self.record_recovery(index, 'blocked', current, message=str(exc))
+                self._messages.append(str(exc))
+                return self.report('recovery_blocked')
             self.record_recovery(index, 'attempted', current, request=request)
             evidence = await self.write(handler, request)
             actual = await self.observe_action(action)
             verified = self.matches_observation(handler, action, entry.preimage, actual)
+            if verified and action.kind == ActionKind.FORM_DELETE:
+                schema_handler = SchemaHandler(self.service, related_schemas=thaw(self.plan.related_schemas))
+                for state in action.deleted_forms:
+                    verified &= self.matches(schema_handler, state, await self.observe(state.key))
             status = 'verified_restored' if verified else (
                 'unknown' if not actual.complete else 'failed')
             self.record_recovery(index, status, actual, evidence, request=request)
-            if evidence.failure or not verified:
+            if (evidence.failure and action.kind != ActionKind.FORM_DELETE) or not verified:
                 self._messages.append('Recovery stopped after an API error or unverified restoration; read-back evidence retained.')
                 return self.report('recovery_failed')
             restored += 1
