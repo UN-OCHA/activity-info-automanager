@@ -75,10 +75,10 @@ class RenameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared[1].resources['db']['a']['label'], 'Renamed')
 
     async def test_move_rename_edit_move_recover_in_actual_reverse_order(self):
-        prepared = await self.prepare('''MoveForm(form="A", folder="North")
+        prepared = await self.prepare('''MoveForm(currentForm=False, form="A", folder="North")
 ModifyForm(form="A", name="Renamed")
 AddField(fieldCode="NEW", label="New")
-MoveForm(form="Renamed", folder="South")''')
+MoveForm(currentForm=False, form="Renamed", folder="South")''')
         manager, service, _, _, attempt = prepared
         self.assertEqual([item.action.kind for item in attempt.plan.actions], [
             ActionKind.DATABASE_RESOURCE_PATCH, ActionKind.FORM_SCHEMA_UPDATE,
@@ -296,7 +296,7 @@ MoveForm(form="Renamed", folder="South")''')
                 tabs = next(item for item in page.descendants() if isinstance(item, ui.tabs))
                 tabs.set_value('database:db')
                 code = next(item for item in page.descendants() if isinstance(item, ui.code))
-                self.assertEqual(next(item for item in json.loads(code.content)['resources'] if item['id'] == 'a')['label'], 'Renamed')
+                self.assertEqual(next(item for item in json.loads(code.content) if item['id'] == 'a')['label'], 'Renamed')
 
     async def test_rename_and_pending_record_label_share_the_existing_allocation(self):
         prepared = await self.prepare('AddField(fieldCode="NEW", label="New")\nModifyForm(form="A", name="Renamed", recordLabelFieldId="NEW")')

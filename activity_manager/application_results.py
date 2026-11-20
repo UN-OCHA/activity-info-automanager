@@ -5,14 +5,35 @@ from uuid import uuid4
 
 from .immutable import FrozenMap, freeze, thaw
 from .resource_state import ResourceKey, ResourceKind, ResourceState
-from .schema_names import readable_schema, unresolved_formula_references
+from .schema_names import readable_resource, unresolved_formula_references
 
 
 def display_payload(state):
     if state.key.kind == ResourceKind.FORM_SCHEMA:
         return state.payload.to_dict()
-    return {'id': 'database:' + state.key.identity, 'label': 'Database resources (' + state.key.identity + ')',
-            'databaseId': state.key.identity, 'resources': state.payload.to_list()}
+    if state.key.kind == ResourceKind.DATABASE_RESOURCES:
+        return state.payload.to_list()
+    raise ValueError(f'Unsupported display resource kind: {state.key.kind}')
+
+
+@dataclass(frozen=True)
+class DisplayTab:
+    """A typed tab with presentation metadata separate from its JSON payload."""
+
+    key: ResourceKey
+    label: str
+    payload: object
+    names: object = None
+    annotations: tuple = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, 'payload', freeze(self.payload))
+        object.__setattr__(self, 'names', freeze(self.names))
+        object.__setattr__(self, 'annotations', tuple(self.annotations))
+
+    @property
+    def identity(self):
+        return ('database:' if self.key.kind == ResourceKind.DATABASE_RESOURCES else '') + self.key.identity
 
 
 @dataclass(frozen=True)
@@ -61,7 +82,7 @@ class DiagnosticAttachment:
 @dataclass(frozen=True)
 class DisplayResource:
     state: ResourceState
-    names: FrozenMap | None = None
+    names: FrozenMap | tuple | None = None
     annotations: tuple = ()
 
     def __post_init__(self):
@@ -103,23 +124,33 @@ class DisplayState:
 
     def tab_payloads(self):
         """Return detached form and database payloads keyed by display tab identity."""
-        return {(('database:' if item.key.kind == ResourceKind.DATABASE_RESOURCES else '') + item.key.identity):
-                display_payload(item.state) for item in self.resources
-                if item.state.payload is not None}
+        return {tab.identity: thaw(tab.payload) for tab in self.tabs()}
+
+    def tabs(self):
+        tabs = []
+        for item in self.resources:
+            if item.state.payload is None:
+                continue
+            payload = display_payload(item.state)
+            if item.key.kind == ResourceKind.FORM_SCHEMA:
+                label = payload.get('label') or payload.get('id') or 'Initial form'
+            else:
+                label = self.database_names.get(item.key.identity) or item.key.identity
+            tabs.append(DisplayTab(item.key, label, payload, item.names, item.annotations))
+        return tuple(tabs)
 
     def tab_metadata(self):
         """Return detached names and immutable annotations keyed by display tab identity."""
-        return {(('database:' if item.key.kind == ResourceKind.DATABASE_RESOURCES else '') + item.key.identity):
-                (thaw(item.names), item.annotations) for item in self.resources
-                if item.state.payload is not None}
+        return {tab.identity: (thaw(tab.names), tab.annotations) for tab in self.tabs()}
 
     def enrich(self, labels):
         # Existing labels are pinned. Only the owner may publish this replacement.
         merged = {**thaw(freeze(labels)), **thaw(self.record_labels)}
         related, databases = thaw(self.related_schemas), thaw(self.database_names)
-        resources = tuple(replace(item, names=freeze(readable_schema(
-            item.state.payload.to_dict(), related, databases, record_labels=merged)))
-            if item.key.kind == ResourceKind.FORM_SCHEMA and item.state.payload is not None
+        resources = tuple(replace(item, names=freeze(readable_resource(
+            item.key.kind, display_payload(item.state), related, databases,
+            database_id=item.key.identity, record_labels=merged)))
+            if item.state.payload is not None
             else item for item in self.resources)
         return replace(self, resources=resources, record_labels=freeze(merged),
                        revision=self.revision + 1, snapshot_id=uuid4().hex)
@@ -181,7 +212,9 @@ class DisplaySnapshotBuilder:
                 annotations += tuple(Diagnostic('warning', f'Unresolved formula reference {token!r}.',
                     path, 'unresolved_formula_reference')
                     for path, token, _ in unresolved_formula_references(schema, context) if path not in paths)
-                rendered = readable_schema(schema, context, databases, record_labels=self._labels)
+            if resource.payload is not None:
+                rendered = readable_resource(key.kind, display_payload(resource), context, databases,
+                                             database_id=key.identity, record_labels=self._labels)
             resources.append(DisplayResource(resource, rendered, annotations))
         preferred = active if active in state.affected_keys else next(iter(state.affected_keys), None)
         return DisplayState(tuple(resources), context, databases, self._labels, preferred, self.generation)

@@ -400,7 +400,12 @@ class CommandCreatorRenderer:
         return self.command_select.value in ITERABLE_CREATORS and self.target_mode.value == 'Multiple'
 
     def _multiple_forms(self):
-        return self.command_select.value in ('with_form', 'modify_form', 'move_form') and self.target_mode.value == 'Multiple'
+        return (self.command_select.value in ('with_form', 'modify_form', 'move_form')
+                and not self._current_form() and self.target_mode.value == 'Multiple')
+
+    def _current_form(self):
+        control = self.controls.get('current_form')
+        return control is not None and control.value is True
 
     def _render_selected_command(self):
         self._updating = True
@@ -438,6 +443,9 @@ class CommandCreatorRenderer:
         events.handle_event(self.on_parameter_change, self)
 
     def _update_target_controls(self):
+        if self.command_select.value == 'move_form':
+            self.target_mode.set_visibility(not self._current_form())
+            self.target_label.set_visibility(not self._current_form())
         self.target_help.set_visibility(self._multiple_fields() or self._multiple_forms())
         self.target_help.set_text(
             'Whole-name regex; captures: (?P<year>...). Values: ${form.year}. Literal escape: $${'

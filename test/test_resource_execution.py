@@ -11,7 +11,7 @@ class ResourceExecutionTests(unittest.IsolatedAsyncioTestCase):
     evaluate = fixtures.MoveFormTests.evaluate
 
     async def test_adjacent_moves_batch_before_schema_actions_without_schema_metadata(self):
-        manager, service = await self.evaluate('MoveForm(formPattern="A|B", folder="North")\nAddField(fieldCode="NEW", label="New")')
+        manager, service = await self.evaluate('MoveForm(currentForm=False, formPattern="A|B", folder="North")\nAddField(fieldCode="NEW", label="New")')
         plan = materialize_plan(manager.candidate_plan, AttemptBinding('evaluation', {}, 'session'))
         self.assertEqual([item.action.kind for item in plan.actions], [ActionKind.DATABASE_RESOURCE_PATCH,
             ActionKind.FORM_SCHEMA_UPDATE, ActionKind.FORM_SCHEMA_UPDATE])
@@ -23,7 +23,7 @@ class ResourceExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(report.journal), 3)
 
     async def test_partial_batch_is_divergent_and_not_owned_for_compensation(self):
-        manager, service = await self.evaluate('MoveForm(formPattern="A|B", folder="North")')
+        manager, service = await self.evaluate('MoveForm(currentForm=False, formPattern="A|B", folder="North")')
         service.reject_move = 2
         report = await execute(manager, service)
         self.assertEqual(report.status, 'recovery_blocked')
@@ -32,7 +32,7 @@ class ResourceExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(service.moves), 2)
 
     async def test_owned_property_compensation_preserves_unrelated_concurrent_labels(self):
-        manager, service = await self.evaluate('MoveForm(form="A", folder="North")')
+        manager, service = await self.evaluate('MoveForm(currentForm=False, form="A", folder="North")')
         original = service.move_form
         async def change_label(database, identity, parent):
             await original(database, identity, parent)
@@ -48,14 +48,14 @@ class ResourceExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(request['resourceUpdates'][0]), {'id', 'parentId'})
 
     async def test_destination_type_changes_block_preflight(self):
-        manager, service = await self.evaluate('MoveForm(form="A", folder="North")')
+        manager, service = await self.evaluate('MoveForm(currentForm=False, form="A", folder="North")')
         service.resources['db']['north']['type'] = 'FORM'
         report = await execute(manager, service)
         self.assertEqual(report.status, 'preflight_failed')
         self.assertEqual(service.moves, [])
 
     async def test_unrelated_resource_edits_do_not_invalidate_owned_preflight(self):
-        manager, service = await self.evaluate('MoveForm(form="A", folder="North")')
+        manager, service = await self.evaluate('MoveForm(currentForm=False, form="A", folder="North")')
         service.resources['db']['b']['label'] = 'Concurrent B'
         report = await execute(manager, service)
         self.assertEqual(report.status, 'success')

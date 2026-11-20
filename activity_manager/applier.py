@@ -419,6 +419,10 @@ class Applier:
         from .command_iteration import PreparedCommand
         try:
             prepared = application.command if isinstance(application, PreparedCommand) else command_parameters(application, variables)
+            if isinstance(prepared, MoveFormCommand) and prepared.current_form:
+                if self.form_service is None:
+                    return prepared.execute(current)
+                return await self._move_form(prepared, current)
             if isinstance(prepared, (WithFormCommand, ModifyFormCommand, MoveFormCommand)):
                 if self.form_service is None:
                     return prepared.execute(current)
@@ -473,7 +477,8 @@ class Applier:
             self._index, self._position = index, 0
             self.executions[index] = CommandExecution('resolving', None, 'Resolving names...')
             self._publish_evaluation()
-            if isinstance(command, (WithFormCommand, ModifyFormCommand, MoveFormCommand)):
+            if (isinstance(command, (WithFormCommand, ModifyFormCommand, MoveFormCommand))
+                    and not (isinstance(command, MoveFormCommand) and command.current_form)):
                 next_variables = deepcopy(self.variables)
                 for name in self.assigned:
                     next_variables.pop(name, None)

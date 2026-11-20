@@ -9,7 +9,7 @@ from nicegui import context
 
 from .api import DEFAULT_BASE_URL, ActivityInfoService
 from .command_creator import CommandCreatorRenderer, field_codes_from_schema
-from .schema_names import readable_schema, load_default_record_labels, unresolved_formula_references
+from .schema_names import readable_resource, load_default_record_labels, unresolved_formula_references
 from .command_execution import Diagnostic
 from .immutable import thaw
 from .schema_display import underline_substitutions
@@ -19,7 +19,8 @@ from .commands import COMMAND_CREATORS
 from .listbox import DatabaseListbox
 from .confirmed_plan import AttemptBinding, ConfirmationAttempt
 from .executor import Executor
-from .application_results import DisplayResource, DisplayState, display_payload
+from .application_results import DisplayResource, DisplayState, DisplayTab, display_payload
+from .resource_state import ResourceKey, ResourceKind
 
 
 def connection_page():
@@ -190,7 +191,8 @@ def connection_page():
         creator.set_suggestions(source, [])
         if (multiple and not moving) or not active:
             return
-        selected = creator.controls['form'].value
+        current_form = moving and creator._current_form()
+        selected = None if current_form else creator.controls['form'].value
         source_request = schema_request
         evaluation = command_list._evaluation_version
         if (not moving and not selected) or (not multiple and selected and '${' in selected):
@@ -215,7 +217,8 @@ def connection_page():
             if (request == form_field_request and source_request == schema_request
                     and evaluation == command_list._evaluation_version
                     and creator.command_select.value == command_key and creator._multiple_forms() == multiple
-                    and creator.controls['form'].value == selected):
+                    and (moving and creator._current_form()) == current_form
+                    and (None if current_form else creator.controls['form'].value) == selected):
                 creator.set_suggestions(source, suggestions)
         except (ValueError, KeyError, TypeError, AttributeError):
             # Suggestions are optional; application reports invalid selectors.
@@ -232,8 +235,7 @@ def connection_page():
     report_version = None
     report_context = {}
     report_display = None
-    result_forms = {}
-    result_metadata = {}
+    result_resources = {}
     result_context = {}
     result_database_names = {}
     result_historical = False
@@ -265,42 +267,44 @@ def connection_page():
         return await query_variable(CachedResolutionService(service, command_list.resolution_cache),
                                     command, schema, command_list.related_schemas)
 
-    def select_result_form(identity):
-        if identity in result_forms:
-            data = result_forms[identity]
-            names, issues = result_metadata.get(identity, (None, ()))
-            show_result(data, names=names, issues=issues)
+    def select_result_resource(identity):
+        if identity in result_resources:
+            tab = result_resources[identity]
+            show_result(thaw(tab.payload), names=thaw(tab.names), issues=tab.annotations,
+                        kind=tab.key.kind, database_id=tab.key.identity)
 
     def show_results(snapshots, active=None, empty_message='No result', related=None, snapshot=None):
-        nonlocal result_forms, result_metadata, result_context, result_database_names, result_historical
+        nonlocal result_resources, result_context, result_database_names, result_historical
         result_historical = snapshot is not None
         if snapshot is not None:
             active = (('database:' if snapshot.preferred_key.kind.value == 'database_resources' else '') +
                       snapshot.preferred_key.identity) if snapshot.preferred_key is not None else None
-            result_forms = snapshot.tab_payloads()
-            result_metadata = snapshot.tab_metadata()
+            result_resources = {tab.identity: tab for tab in snapshot.tabs()}
             result_context = thaw(snapshot.related_schemas)
             result_database_names = thaw(snapshot.database_names)
         else:
             result_database_names = deepcopy(command_list.database_names)
-            result_forms = {data.get('id', '__initial__'): data for data in snapshots}
+            result_resources = {data.get('id', '__initial__'): DisplayTab(
+                ResourceKey.form(data.get('id') or '__initial__'),
+                data.get('label') or data.get('id') or 'Initial form', data) for data in snapshots}
             result_context = {**{identity: data for identity, data in command_list.related_schemas.items()
                                   if identity not in command_list.workspace.baseline_forms},
-                              **command_list._base_related, **(related or {}), **result_forms}
-            result_metadata = {}
+                              **command_list._base_related, **(related or {}),
+                              **{identity: thaw(tab.payload) for identity, tab in result_resources.items()}}
         result_tabs.clear()
         with result_tabs:
-            for identity, data in result_forms.items():
-                ui.tab(identity, label=data.get('label') or data.get('id') or 'Initial form')
-        result_tabs.set_visibility(bool(result_forms))
-        identity = active if active in result_forms else next(iter(result_forms), None)
+            for identity, tab in result_resources.items():
+                ui.tab(identity, label=tab.label)
+        result_tabs.set_visibility(bool(result_resources))
+        identity = active if active in result_resources else next(iter(result_resources), None)
         result_tabs.set_value(identity)
         if identity is None:
             show_result(None, empty_message)
         else:
-            select_result_form(identity)
+            select_result_resource(identity)
 
-    def show_result(data: dict | None, empty_message='No result', names=None, issues=()):
+    def show_result(data: dict | list | None, empty_message='No result', names=None, issues=(),
+                    kind=ResourceKind.FORM_SCHEMA, database_id=None):
         nonlocal displayed_result, displayed_names, result_request, displayed_issues
         # Loaded schemas and form switches may have no command diagnostics.
         # Detect formula failures from the displayed snapshot's own context,
@@ -311,18 +315,19 @@ def connection_page():
                        code='unresolved_formula_reference')
             for path, token, _ in unresolved_formula_references(data, result_context)
             if path not in annotated_paths
-        ) if data is not None else ()
+        ) if data is not None and kind == ResourceKind.FORM_SCHEMA else ()
         displayed_issues = tuple(issues) + formula_issues
         result_request += 1
         displayed_result = data
         displayed_names = names if names is not None else (
-            readable_schema(data, result_context, result_database_names)
+            readable_resource(kind, data, result_context, result_database_names, database_id=database_id)
             if data is not None else None)
         render_result(empty_message)
-        if not result_historical and names is None and data is not None and service is not None and any(
+        if (kind == ResourceKind.FORM_SCHEMA and not result_historical and names is None
+                and data is not None and service is not None and any(
             field.get('type') in ('reference', 'multiselectreference') and field.get('defaultValue')
             for field in data.get('elements', [])
-        ):
+        )):
             asyncio.create_task(refresh_record_names(data, service, result_request, schema_request))
 
     async def refresh_record_names(data, current_service, request, source_request):
@@ -336,7 +341,7 @@ def connection_page():
         if (request != result_request or source_request != schema_request or service is not current_service
                 or generation != command_list._evaluation_version or result_historical):
             return
-        displayed_names = readable_schema(data, related, databases, record_labels=labels)
+        displayed_names = readable_resource(ResourceKind.FORM_SCHEMA, data, related, databases, record_labels=labels)
         render_result()
 
     def render_result(empty_message='No result'):
@@ -542,9 +547,10 @@ def connection_page():
                               if identity not in observed_ids}
             report_context.update(outcome.actual_schemas)
             report_schemas = list(outcome.actual_schemas.values())
-            report_display = DisplayState(tuple(DisplayResource(item.state, readable_schema(
-                display_payload(item.state), report_context, execution['database_names'],
-                record_labels=execution['record_labels'])) for item in outcome.observations if item.state is not None),
+            report_display = DisplayState(tuple(DisplayResource(item.state, readable_resource(
+                item.key.kind, display_payload(item.state), report_context, execution['database_names'],
+                database_id=item.key.identity, record_labels=execution['record_labels']))
+                for item in outcome.observations if item.state is not None),
                 report_context, execution['database_names'], execution['record_labels'])
             report_version = command_list._evaluation_version
         except Exception as exc:
@@ -717,7 +723,7 @@ def connection_page():
             ui.separator()
             schema_status = ui.label('').classes('text-sm text-red-700')
             with ui.row().classes('result-body flex-nowrap gap-2'):
-                result_tabs = ui.tabs(on_change=lambda event: select_result_form(event.value)).props('vertical dense').classes('shrink-0 max-w-40 h-full overflow-auto')
+                result_tabs = ui.tabs(on_change=lambda event: select_result_resource(event.value)).props('vertical dense').classes('shrink-0 max-w-40 h-full overflow-auto')
                 with ui.element('div').classes('relative grow min-w-0 h-full'):
                     schema_placeholder = ui.label(
                         'Select a form to load its schema.'

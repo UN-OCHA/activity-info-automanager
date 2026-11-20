@@ -96,6 +96,12 @@ update for the shared form label. Verification and recovery check both its schem
 and database-tree representations; no separate resource-label write is sent.
 `MoveForm` accepts folder ID, unique name or path;
 `/` selects the database root. Subforms cannot move independently.
+Its first parameter, `currentForm`, is a required boolean. With
+`MoveForm(currentForm=True, folder="North")`, it moves the form current at that
+command point, preserving an existing multiple-form scope. With `currentForm=False`,
+specify `form` or `formPattern` instead. The creator defaults Current Form to checked
+and hides the form selector until it is unchecked. Existing command text must add
+`currentForm=False` to keep explicit form selection.
 
 See [execution architecture and capability limits](docs/execution-architecture.md)
 for the current module boundaries and supported recovery limits.

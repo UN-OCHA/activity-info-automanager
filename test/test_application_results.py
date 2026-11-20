@@ -12,13 +12,42 @@ from activity_manager.application_results import (
 from activity_manager.command_execution import Diagnostic, ExecutionResult
 from activity_manager.command_list import CommandListManager
 from activity_manager.command_parser import parse_command_text
-from activity_manager.immutable import freeze
+from activity_manager.immutable import freeze, thaw
 from activity_manager.page import connection_page
-from activity_manager.resource_state import ApplicationState, ResourceKey
+from activity_manager.resource_state import ApplicationState, DatabaseResourcesPayload, ResourceKey
 from test.test_multi_form import MemoryService, form
 
 
 class DisplaySnapshotTests(unittest.TestCase):
+    def test_database_tabs_keep_array_payload_and_pinned_names_separate(self):
+        state = ApplicationState()
+        state.load_form(form('db', 'Form sharing database ID'), affected=True)
+        entries = {'a': {'id': 'a', 'parentId': 'db', 'label': 'A', 'type': 'FORM'}}
+        state.put(ResourceKey.database('db'), DatabaseResourcesPayload(entries))
+        databases = {'db': 'Local'}
+        snapshot = DisplaySnapshotBuilder(1).capture(state, {}, databases, {})
+        databases['db'] = 'Renamed'
+        tabs = {tab.identity: tab for tab in snapshot.tabs()}
+        self.assertEqual(tabs['db'].label, 'Form sharing database ID')
+        self.assertEqual(tabs['database:db'].label, 'Local')
+        self.assertEqual(thaw(tabs['database:db'].payload), list(entries.values()))
+        self.assertEqual(thaw(tabs['database:db'].names)[0]['parentId'], 'Local')
+        state.put(ResourceKey.database('db'), DatabaseResourcesPayload({}))
+        enriched = snapshot.enrich({})
+        self.assertEqual(enriched.tab_metadata()['database:db'][0][0]['parentId'], 'Local')
+        detached = snapshot.tab_payloads()
+        detached['database:db'][0]['parentId'] = 'elsewhere'
+        self.assertEqual(snapshot.tab_payloads()['database:db'][0]['parentId'], 'db')
+        self.assertEqual(snapshot.resources[1].state.payload.to_list(), list(entries.values()))
+
+    def test_empty_database_array_and_missing_name(self):
+        state = ApplicationState()
+        state.put(ResourceKey.database('db'), DatabaseResourcesPayload({}))
+        snapshot = DisplaySnapshotBuilder(1).capture(state, {}, {}, {})
+        self.assertEqual(snapshot.tabs()[0].label, 'db')
+        self.assertEqual(snapshot.tab_payloads(), {'database:db': []})
+        self.assertEqual(snapshot.tab_metadata()['database:db'][0], [])
+
     def test_related_names_labels_and_annotations_are_captured_independently(self):
         source = form('a', 'A', elements=[
             {'id': 'ref', 'code': 'REF', 'type': 'reference', 'defaultValue': 'people:r',

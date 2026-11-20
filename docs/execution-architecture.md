@@ -42,12 +42,26 @@ Historical display context is pinned; inspecting a tab changes no application st
 DisplayState.form_payloads() returns detached form-schema dictionaries;
 tab_payloads() includes database-resource tabs, and tab_metadata() supplies their
 pinned names and annotations. Mutating returned payloads cannot change the snapshot.
+DisplayState.tabs() provides typed DisplayTab values with labels separate from JSON
+payloads. Form tabs show schema objects; database-resource tabs use the pinned
+database name (falling back to its ID) and show the resource array directly.
+Database resources bypass form name/formula processing in previews and execution
+reports.
+Both resource types use schema_names.readable_resource() for Names mode. Form
+schemas retain their existing substitution rules; database-resource parentId
+references use labels from that resource array, or the pinned database name for
+the root. Unknown names retain IDs. Both use the same substitution spans and
+underlining, without changing canonical payloads or IDs mode.
 
 Apply is command-first across forms. Compatible schema effects may accumulate as
 form-first writes. This accepted batching limitation does not imply arbitrary
 cross-form read/write consistency. Explicit prerequisites, endpoint/scope boundaries
 and deletion boundaries constrain grouping; there is no general dependency graph.
 Resource moves precede later schema edits and may batch compatible entries.
+MoveForm requires currentForm: true uses the current application form and retains
+the existing form scope and variables; false selects form/formPattern and establishes
+a scope as before. The creator declares this required boolean first and conditionally
+shows the form selector using ParameterDefinition.visible_when.
 
 Rename is one schema action with a ResourceProjection for the same label's
 database-tree representation. The projection changes canonical/display state and

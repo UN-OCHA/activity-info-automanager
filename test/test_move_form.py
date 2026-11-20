@@ -87,27 +87,53 @@ class FolderTests(unittest.TestCase):
             resolve_folder('db', resources, choice)
 
     def test_command_parser_and_creator(self):
-        for text in ('MoveForm(form="A", folder="/")',
-                     'moveform(FORMPATTERN="(?P<region>.*)", FOLDER="${form.region}/Archive")'):
+        for text in ('MoveForm(currentForm=False, form="A", folder="/")',
+                     'moveform(currentForm=False, FORMPATTERN="(?P<region>.*)", FOLDER="${form.region}/Archive")'):
             command = parse_command_text(text)[0]
             self.assertEqual(parse_command_text(command.to_syntax()), [command])
         for args in ('form="A"', 'folder="North"', 'form="A", folder=" "',
                      'form="A", formPattern=".*", folder="North"', 'formPattern="[", folder="North"'):
             with self.subTest(args=args), self.assertRaises(CommandTextError):
-                parse_command_text(f'MoveForm({args})')
+                parse_command_text(f'MoveForm(currentForm=False, {args})')
         added = []
         with Client(ui.page('/')), ui.column():
             creator = CommandCreatorRenderer((MOVE_FORM,), on_add=added.append)
+            self.assertEqual(creator.editors[0].definition.key, 'current_form')
+            self.assertFalse(creator.activations['current_form'].visible)
+            self.assertFalse(creator.parameter_containers['form'].visible)
+            creator.controls['folder'].set_value('North')
+            creator._add_command()
+            self.assertEqual(added[-1], MoveFormCommand(current_form=True, folder='North'))
+            creator.controls['current_form'].set_value(False)
+            self.assertTrue(creator.parameter_containers['form'].visible)
             creator.controls['form'].set_value('A')
             creator.set_suggestions('folder_paths', ['/', 'North', 'North/Archive'])
             creator.controls['folder'].set_value('North')
             creator._add_command()
-            self.assertEqual(added[-1], MoveFormCommand(form='A', folder='North'))
+            self.assertEqual(added[-1], MoveFormCommand(current_form=False, form='A', folder='North'))
             creator.target_mode.set_value('Multiple')
             creator.controls['form'].set_value('.*')
             creator._add_command()
             self.assertEqual(added[-1].form_pattern, '.*')
             self.assertIn('North/Archive', creator.controls['folder'].options)
+            creator.controls['current_form'].set_value(True)
+            self.assertFalse(creator.target_mode.visible)
+            self.assertFalse(creator.parameter_containers['form'].visible)
+            creator._add_command()
+            self.assertTrue(added[-1].current_form)
+            self.assertIsNone(added[-1].form_pattern)
+
+    def test_current_form_is_required_boolean_and_excludes_selectors(self):
+        text = 'MoveForm(currentForm=True, folder="North")'
+        command = parse_command_text(text)[0]
+        self.assertEqual(parse_command_text(command.to_syntax()), [command])
+        self.assertTrue(command.to_syntax().startswith('MoveForm(currentForm=True,'))
+        for args in ('folder="North"', 'currentForm="true", folder="North"',
+                     'currentForm=1, folder="North"', 'currentForm=False, folder="North"',
+                     'currentForm=True, form="A", folder="North"',
+                     'currentForm=True, formPattern=".*", folder="North"'):
+            with self.subTest(args=args), self.assertRaises(CommandTextError):
+                parse_command_text(f'MoveForm({args})')
 
 
 class MoveFormTests(unittest.IsolatedAsyncioTestCase):
@@ -120,9 +146,51 @@ class MoveFormTests(unittest.IsolatedAsyncioTestCase):
     async def execute(self, manager, service, choice='rollback_all'):
         return await execute_runtime(manager, service, choice)
 
+    async def test_current_form_follows_command_position_and_preserves_schema(self):
+        manager, service = await self.evaluate('''
+WithForm(form="B")
+MoveForm(currentForm=True, folder="North")
+WithForm(form="A")
+MoveForm(currentForm=True, folder="South")
+''')
+        self.assertTrue(all(item.status == 'applied' for item in manager.executions))
+        self.assertEqual(locations(manager.executions[1])['b']['parentId'], 'north')
+        self.assertEqual(locations(manager.executions[3])['a']['parentId'], 'south')
+        outcome = await self.execute(manager, service)
+        self.assertEqual(outcome.status, 'success', outcome.messages)
+        self.assertEqual(service.moves, [('db', 'b', 'north'), ('db', 'a', 'south')])
+        self.assertEqual(service.writes, [])
+
+    async def test_current_form_uses_initial_form_and_retains_variables(self):
+        manager, service = await self.evaluate('''
+SetVariable(name="destination", method="literal", value="North")
+MoveForm(currentForm=True, folder="${vars.destination}")
+AddField(fieldCode="new", label="${vars.destination}")
+''')
+        self.assertTrue(all(item.status == 'applied' for item in manager.executions),
+                        [item.message for item in manager.executions])
+        outcome = await self.execute(manager, service)
+        self.assertEqual(outcome.status, 'success', outcome.messages)
+        self.assertEqual(service.moves, [('db', 'a', 'north')])
+        self.assertEqual(service.schemas['a']['elements'][0]['label'], 'North')
+
+    async def test_current_form_preserves_multiple_form_scope_and_captures(self):
+        manager, service = await self.evaluate('''
+WithForm(formPattern="(?P<side>North|South)")
+MoveForm(currentForm=True, folder="${form.side}/Shared")
+AddField(fieldCode="new", label="${form.name}")
+''', [fixtures.form('a', 'North'), fixtures.form('b', 'South')])
+        self.assertTrue(all(item.status == 'applied' for item in manager.executions),
+                        [item.message for item in manager.executions])
+        self.assertEqual(len(manager.executions[1].iterations), 2)
+        self.assertEqual(len(manager.executions[2].iterations), 2)
+        outcome = await self.execute(manager, service)
+        self.assertEqual(outcome.status, 'success', outcome.messages)
+        self.assertEqual(service.moves, [('db', 'a', 'shared1'), ('db', 'b', 'shared2')])
+
     async def test_single_move_switches_context_and_keeps_schema_clean(self):
         manager, service = await self.evaluate('''
-MoveForm(form="B", folder="North/Archive")
+MoveForm(currentForm=False, form="B", folder="North/Archive")
 AddField(fieldCode="new", label="New")
 ''')
         self.assertEqual([e.status for e in manager.executions], ['applied', 'applied'])
@@ -140,7 +208,7 @@ AddField(fieldCode="new", label="New")
 
     async def test_multiple_moves_expand_and_establish_scope_with_capture_destinations(self):
         manager, service = await self.evaluate('''
-MoveForm(formPattern="(?P<side>North|South)", folder="${form.side}/Shared")
+MoveForm(currentForm=False, formPattern="(?P<side>North|South)", folder="${form.side}/Shared")
 AddField(fieldCode="new", label="${form.name}")
 ''', [fixtures.form('a', 'North'), fixtures.form('b', 'South')])
         self.assertEqual([e.status for e in manager.executions], ['applied', 'applied'],
@@ -155,10 +223,10 @@ AddField(fieldCode="new", label="${form.name}")
 
     async def test_revisits_preserve_locations_and_return_to_root(self):
         manager, service = await self.evaluate('''
-MoveForm(form="A", folder="North")
+MoveForm(currentForm=False, form="A", folder="North")
 WithForm(form="B")
 WithForm(form="A")
-MoveForm(form="A", folder="/")
+MoveForm(currentForm=False, form="A", folder="/")
 ''')
         self.assertEqual(locations(manager.executions[0])['a']['path'], 'North')
         self.assertEqual(locations(manager.executions[2])['a']['path'], 'North')
@@ -168,14 +236,14 @@ MoveForm(form="A", folder="/")
         self.assertEqual(service.moves, [('db', 'a', 'north'), ('db', 'a', 'db')])
 
     async def test_root_noop_does_not_write(self):
-        manager, service = await self.evaluate('MoveForm(form="A", folder="/")')
+        manager, service = await self.evaluate('MoveForm(currentForm=False, form="A", folder="/")')
         outcome = await self.execute(manager, service)
         self.assertEqual(outcome.status, 'success', outcome.messages)
         self.assertEqual(service.timeline, [])
 
     async def test_ambiguous_folder_and_subform_stop_without_moves(self):
         for target, schemas in [('Shared', None), ('North', [dict(fixtures.form('a', 'A'), parentFormId='parent')])]:
-            manager, service = await self.evaluate(f'MoveForm(formPattern="A|B", folder="{target}")\nAddField(fieldCode="later", label="Later")', schemas)
+            manager, service = await self.evaluate(f'MoveForm(currentForm=False, formPattern="A|B", folder="{target}")\nAddField(fieldCode="later", label="Later")', schemas)
             self.assertEqual(manager.executions[0].status, 'error')
             self.assertEqual(manager.executions[1].status, 'not_executed')
             self.assertEqual({key: value for key, value in manager.workspace.state.baselines.entries.items() if key.kind == ResourceKind.DATABASE_RESOURCES}, {})
@@ -185,7 +253,7 @@ MoveForm(form="A", folder="/")
         manager, service = await self.evaluate('''
 WithForm(formPattern="A")
 SetVariable(name="local", method="literal", value="Inside")
-MoveForm(form="Remote/B", folder="North")
+MoveForm(currentForm=False, form="Remote/B", folder="North")
 AddField(fieldCode="bad", label="${vars.local}")
 ''', [fixtures.form('a', 'A'), fixtures.form('b', 'B', 'remote')])
         self.assertEqual(manager.executions[2].status, 'applied')
@@ -194,14 +262,14 @@ AddField(fieldCode="bad", label="${vars.local}")
         self.assertEqual(service.moves, [])
 
     async def test_external_move_is_stale_before_any_writes(self):
-        manager, service = await self.evaluate('MoveForm(form="A", folder="North")')
+        manager, service = await self.evaluate('MoveForm(currentForm=False, form="A", folder="North")')
         service.resources['db']['a']['parentId'] = 'south'
         outcome = await self.execute(manager, service)
         self.assertEqual(outcome.status, 'preflight_failed', outcome.messages)
         self.assertEqual(service.timeline, [])
 
     async def test_removed_destination_stops_with_no_move(self):
-        manager, service = await self.evaluate('MoveForm(form="A", folder="North")')
+        manager, service = await self.evaluate('MoveForm(currentForm=False, form="A", folder="North")')
         # Remove the whole subtree so the remaining hierarchy is valid.
         for identity in ('north', 'archive', 'shared1'):
             del service.resources['db'][identity]
@@ -211,7 +279,7 @@ AddField(fieldCode="bad", label="${vars.local}")
 
     async def test_mixed_failure_rolls_back_schema_and_move_in_reverse_order(self):
         manager, service = await self.evaluate('''
-MoveForm(formPattern="A|B", folder="North")
+MoveForm(currentForm=False, formPattern="A|B", folder="North")
 ModifyField(fieldPattern="missing", fieldType="quantity", label="Ignored")
 AddField(fieldCode="new", label="New")
 ''')
@@ -233,7 +301,7 @@ AddField(fieldCode="new", label="New")
 
     async def test_rollback_last_restores_move_before_subsequent_schema_edit_starts(self):
         manager, service = await self.evaluate('''
-MoveForm(form="A", folder="North")
+MoveForm(currentForm=False, form="A", folder="North")
 AddField(fieldCode="new", label="New")
 ''')
         service.error_after_move = 1
@@ -244,14 +312,14 @@ AddField(fieldCode="new", label="New")
         self.assertEqual(service.schemas['a']['elements'], [])
 
     async def test_move_verification_failure_and_leave(self):
-        manager, service = await self.evaluate('MoveForm(form="A", folder="North")')
+        manager, service = await self.evaluate('MoveForm(currentForm=False, form="A", folder="North")')
         service.lie_move = 1
         outcome = await self.execute(manager, service, 'leave')
         self.assertEqual(outcome.status, 'left', outcome.messages)
         self.assertEqual(service.resources['db']['a']['parentId'], 'db')
 
     async def test_concurrent_move_of_later_form_is_preserved_during_rollback(self):
-        manager, service = await self.evaluate('MoveForm(form="A", folder="North")\nAddField(fieldCode="new", label="New")\nMoveForm(form="B", folder="North")')
+        manager, service = await self.evaluate('MoveForm(currentForm=False, form="A", folder="North")\nAddField(fieldCode="new", label="New")\nMoveForm(currentForm=False, form="B", folder="North")')
         original = service.move_form
         async def move(database, identity, parent):
             await original(database, identity, parent)
@@ -265,7 +333,7 @@ AddField(fieldCode="new", label="New")
 
     async def test_zero_match_scope_skips_moves_and_following_applications(self):
         manager, service = await self.evaluate('''
-MoveForm(formPattern="Missing", folder="North")
+MoveForm(currentForm=False, formPattern="Missing", folder="North")
 AddField(fieldCode="skip", label="Skip")
 WithForm(form="A")
 ''')
@@ -298,7 +366,7 @@ class MoveFormPageTests(unittest.IsolatedAsyncioTestCase):
             await next(iter(databases._event_listeners.values())).handler(SimpleNamespace(args='db'))
             await next(iter(forms._event_listeners.values())).handler(SimpleNamespace(args='a'))
             commands = managers[0]
-            commands.commands = parse_command_text('MoveForm(form="A", folder="North")')
+            commands.commands = parse_command_text('MoveForm(currentForm=False, form="A", folder="North")')
             commands._evaluate_commands()
             await commands._evaluation_task
             commands.on_execute()
@@ -314,7 +382,16 @@ class MoveFormPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tabs.value, 'database:db')
             code = next(item for item in page.descendants() if isinstance(item, ui.code))
             shown = json.loads(code.content)
-            self.assertEqual(next(entry for entry in shown['resources'] if entry['id'] == 'a')['parentId'], 'north')
+            self.assertIsInstance(shown, list)
+            self.assertEqual(next(entry for entry in shown if entry['id'] == 'a')['parentId'], 'north')
+            self.assertEqual(next(tab for tab in tabs.default_slot.children
+                                  if tab._props['name'] == 'database:db')._props['label'], 'Local')
+            toggle = next(item for item in page.descendants() if isinstance(item, ui.toggle)
+                          and 'names' in item.options)
+            toggle.set_value('names')
+            self.assertEqual(next(entry for entry in json.loads(code.content) if entry['id'] == 'a')['parentId'], 'North')
+            toggle.set_value('ids')
+            self.assertEqual(json.loads(code.content), shown)
 
     async def make_page(self):
         managers, creators = [], []
@@ -334,12 +411,14 @@ class MoveFormPageTests(unittest.IsolatedAsyncioTestCase):
         service = FolderService([fixtures.form('a', 'A'), fixtures.form('b', 'B'), fixtures.form('c', 'C', 'remote')])
         service.resources['remote']['north']['label'] = 'Remote North'
         manager.form_service = CachedResolutionService(service, manager.resolution_cache)
+        manager.database_names = {'db': 'Local', 'remote': 'Remote'}
         async def resolve(data):
             return await resolve_command_schema(service, data, manager.related_schemas, {}, {}, {},
                                                 source_schema=manager.workspace.baseline_forms[data['id']])
         manager.resolve_schema = resolve
         manager.set_schema(service.schemas['a'])
         creator.command_select.set_value('move_form')
+        creator.controls['current_form'].set_value(False)
         await asyncio.sleep(0)
         return manager, creator, service, page
 
@@ -363,13 +442,26 @@ class MoveFormPageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s['id'] for s in manager.workspace.form_snapshots], ['a'])
         self.assertEqual(service.timeline, [])
 
+    async def test_current_form_folder_choices_use_active_database_after_remote_selection(self):
+        manager, creator, service, _ = await self.make_page()
+        self.set_target(creator, 'Remote/C')
+        await creator.on_parameter_change(creator)
+        self.assertIn('/Remote North/Archive', creator.controls['folder'].options)
+        creator.controls['current_form'].set_value(True)
+        await creator.on_parameter_change(creator)
+        self.assertFalse(creator.parameter_containers['form'].visible)
+        self.assertIn('/North/Archive', creator.controls['folder'].options)
+        self.assertNotIn('/Remote North/Archive', creator.controls['folder'].options)
+        self.assertEqual(manager.workspace.active_schema['id'], 'a')
+        self.assertEqual(service.moves, [])
+
     async def test_folder_preview_tracks_selected_form_and_leaf_history(self):
         manager, _, service, page = await self.make_page()
         manager.commands = parse_command_text('''
-MoveForm(formPattern="A|B", folder="North")
+MoveForm(currentForm=False, formPattern="A|B", folder="North")
 AddField(fieldCode="new", label="New")
 ModifyField(fieldPattern="new", fieldType="FREE_TEXT", fieldVariant="text", label="Modified")
-MoveForm(form="A", folder="South")
+MoveForm(currentForm=False, form="A", folder="South")
 ''')
         manager._evaluate_commands()
         await manager._evaluation_task
@@ -383,12 +475,28 @@ MoveForm(form="A", folder="South")
         manager.select_iteration(2, 0)
         self.assertEqual(tabs.value, 'a')
         tabs.set_value('database:db')
-        self.assertEqual(next(entry for entry in json.loads(code.content)['resources'] if entry['id'] == 'a')['parentId'], 'north')
+        shown = json.loads(code.content)
+        self.assertIsInstance(shown, list)
+        self.assertEqual(next(entry for entry in shown if entry['id'] == 'a')['parentId'], 'north')
+        self.assertEqual(next(tab for tab in tabs.default_slot.children
+                              if tab._props['name'] == 'database:db')._props['label'], 'Local')
+        toggle = next(item for item in page.descendants() if isinstance(item, ui.toggle)
+                      and 'names' in item.options)
+        toggle.set_value('names')
+        self.assertEqual(next(entry for entry in json.loads(code.content) if entry['id'] == 'a')['parentId'], 'North')
+        toggle.set_value('ids')
+        self.assertEqual(json.loads(code.content), shown)
+        tabs.set_value('a')
+        self.assertEqual(json.loads(code.content)['label'], 'A')
         manager.select_command(3)
         self.assertEqual(tabs.value, 'database:db')
         self.assertEqual(locations(manager.executions[3])['a']['parentId'], 'south')
+        toggle.set_value('names')
+        self.assertEqual(next(entry for entry in json.loads(code.content) if entry['id'] == 'a')['parentId'], 'South')
         manager.select_iteration(2, 1)
         self.assertEqual(locations(manager.executions[2].iterations[1])['a']['parentId'], 'north')
+        tabs.set_value('database:db')
+        self.assertEqual(next(entry for entry in json.loads(code.content) if entry['id'] == 'a')['parentId'], 'North')
         self.assertEqual(service.moves, [])
 
     async def test_late_folder_response_does_not_replace_new_database_choices(self):

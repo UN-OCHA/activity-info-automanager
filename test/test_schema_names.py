@@ -7,12 +7,48 @@ from nicegui.elements.markdown import prepare_content
 from activity_info_api_client.models.form_schema import FormSchema
 from activity_manager.schema_change import compare_schemas
 from activity_manager.schema_names import (
-    readable_schema, schemas_from_tree, substitute_record_id,
+    readable_resource, readable_schema, schemas_from_tree, substitute_record_id,
     load_default_record_labels,
     schema_with_ids, unresolved_formula_references,
 )
 from activity_manager.schema_display import underline_substitutions
+from activity_manager.resource_state import ResourceKind
 import json
+
+
+class ResourceNamesTests(unittest.TestCase):
+    def test_database_parent_references_and_substitution_markers(self):
+        resources = [
+            {'id': 'folder', 'label': 'Archive', 'parentId': 'db'},
+            {'id': 'form', 'label': 'Form', 'parentId': 'folder'},
+            {'id': 'unknown', 'parentId': 'missing'},
+            {'id': 'no_parent'},
+            {'id': 'null_parent', 'parentId': None},
+            {'id': 'blank', 'label': ''},
+            {'id': 'blank_child', 'parentId': 'blank'},
+        ]
+        original = deepcopy(resources)
+        names = readable_resource(ResourceKind.DATABASE_RESOURCES, resources,
+                                  database_names={'db': 'Local'}, database_id='db')
+        self.assertEqual(names[0]['parentId'], 'Local')
+        self.assertEqual(names[1]['parentId'], 'Archive')
+        self.assertEqual(names[0]['parentId'].spans, ((0, 5, 'db'),))
+        self.assertEqual(names[1]['parentId'].spans, ((0, 7, 'folder'),))
+        self.assertEqual(names[2:], resources[2:])
+        self.assertEqual(resources, original)
+        self.assertEqual(names[1]['id'], 'form')
+        html = prepare_content('```json\n' + json.dumps(names, indent=2) + '\n```', extras='fenced-code-blocks')
+        self.assertIn('<u>Archive</u>', underline_substitutions(html, names))
+        missing = readable_resource(ResourceKind.DATABASE_RESOURCES, resources, database_id='db')
+        self.assertEqual(missing[0]['parentId'], 'db')
+
+    def test_form_resource_uses_existing_schema_rules(self):
+        schema = {'id': 'a', 'databaseId': 'db',
+                  'elements': [{'id': 'field', 'code': 'NAME', 'type': 'FREE_TEXT'},
+                               {'id': 'calc', 'type': 'calculated', 'typeParameters': {'formula': 'field'}}]}
+        names = readable_resource(ResourceKind.FORM_SCHEMA, schema, database_names={'db': 'Local'})
+        self.assertEqual(names, readable_schema(schema, database_names={'db': 'Local'}))
+        self.assertEqual(names['elements'][1]['typeParameters']['formula'].spans, ((0, 4, 'field'),))
 
 
 class SchemaNamesTests(unittest.TestCase):

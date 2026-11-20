@@ -4,6 +4,8 @@ from copy import deepcopy
 import json
 import re
 
+from .resource_state import ResourceKind
+
 
 FORMULA_KEYS = {'formula', 'prefixFormula', 'defaultValueFormula',
                 'relevanceCondition', 'requiredCondition', 'validationCondition'}
@@ -22,6 +24,27 @@ class SubstitutedText(str):
 
 def substitution(value, identity):
     return SubstitutedText(value, [(0, len(value), identity)]) if value != identity else value
+
+
+def readable_resource(kind, payload, related_schemas=None, database_names=None, *,
+                      database_id=None, record_labels=None):
+    """Return a display-only copy with references resolved in the supplied snapshot."""
+    kind = ResourceKind(kind)
+    if kind == ResourceKind.FORM_SCHEMA:
+        return readable_schema(payload, related_schemas, database_names, record_labels=record_labels)
+    if kind == ResourceKind.DATABASE_RESOURCES:
+        labels = {entry['id']: entry.get('label') for entry in payload}
+        result = deepcopy(payload)
+        for entry in result:
+            parent = entry.get('parentId')
+            if not isinstance(parent, str):
+                continue
+            label = ((database_names or {}).get(parent) if parent == database_id
+                     else labels.get(parent))
+            if isinstance(label, str) and label:
+                entry['parentId'] = substitution(label, parent)
+        return result
+    raise ValueError(f'Unsupported display resource kind: {kind}')
 
 
 def join_text(parts):
