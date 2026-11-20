@@ -64,6 +64,11 @@ class ExecutionResult:
     rejected_candidate: DiagnosticAttachment | None = None
     effect_ids: tuple[str, ...] = ()
     resource_projections: tuple = ()
+    skipped: bool = False
+
+    @property
+    def application_failed(self):
+        return self.has_errors or self.skipped
 
     @property
     def has_errors(self):
@@ -90,8 +95,8 @@ class ExecutionResult:
         return cls(deepcopy(schema), (Diagnostic('error', message, code=code),))
 
     @classmethod
-    def warning(cls, schema, message, code=None):
-        return cls(deepcopy(schema), (Diagnostic('warning', message, code=code),))
+    def warning(cls, schema, message, code=None, *, skipped=False):
+        return cls(deepcopy(schema), (Diagnostic('warning', message, code=code),), skipped=skipped)
 
 
 @dataclass(frozen=True)
@@ -173,7 +178,7 @@ def transform_command(command, schema, context=None):
 def apply_command_locally(command, schema, related_schemas=None, database_names=None, *, variables=None, reserved_identities=None):
     """Application without a connected resolver still uses the same contract."""
     result = transform_command(command, schema, CommandContext(related_schemas, database_names, variables if variables is not None else {}, reserved_identities))
-    if result.has_errors:
+    if result.application_failed or result.schema is None:
         return result
     diagnostics = tuple(Diagnostic('warning', f'Unresolved formula reference {token!r}.', path)
         for path, token, _ in unresolved_formula_references(result.schema, related_schemas))
@@ -198,7 +203,7 @@ async def apply_command(command, schema, resolver, *, related_schemas=None, data
             result = (await prepared.execute_lookup(schema, context, lookup_variable)
                       if prepared.method == 'lookup' else prepared.execute(schema, context=context))
             return with_prepared_command(replace(result,
-                names_schema=readable_schema(result.schema, related_schemas, database_names)), prepared)
+                names_schema=readable_schema(result.schema, related_schemas, database_names) if result.schema is not None else None), prepared)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -54,6 +54,7 @@ class CommandListManager:
         self.commands: list[Command] = []
         self.executions: list[CommandExecution] = []
         self.source_schema: dict[str, Any] | None = None
+        self.initial_database_id = None
         self.selected_index: int | None = None
         self.selected_iteration: int | None = None
         self.expanded_commands: set[int] = set()
@@ -308,9 +309,10 @@ class CommandListManager:
             reference_defaults=self.reference_defaults, resolution_cache=self.resolution_cache,
             resolve_schema=self.resolve_schema, lookup_variable=self.lookup_variable,
             form_service=self.form_service, generation=self._evaluation_version,
-            owner=self._context_owner, on_progress=self._evaluation_updated)
+            owner=self._context_owner, on_progress=self._evaluation_updated,
+            initial_database_id=self.initial_database_id)
         self.applier = engine
-        if self.resolve_schema is not None and self.source_schema is not None and self.commands:
+        if self.resolve_schema is not None:
             self._publish_evaluation()
             self._evaluation_task = asyncio.create_task(engine.evaluate())
         else:

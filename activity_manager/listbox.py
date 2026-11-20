@@ -31,7 +31,7 @@ class DatabaseListbox(ui.element):
         self.props['disabled'] = not bool(options)
         with self:
             placeholder = TextElement(tag='option', text=self.placeholder if options else '')
-            placeholder.props.update(value='', disabled=True, selected=True)
+            placeholder.props.update(value='', selected=True)
             for database_id, name in options.items():
                 TextElement(tag='option', text=name).props['value'] = database_id
 

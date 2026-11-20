@@ -372,7 +372,7 @@ class PlanApplierTests(unittest.IsolatedAsyncioTestCase):
                 saved.append(engine.candidate_plan)
         engine = await self.evaluate(source, 'AddField(fieldCode="x", label="X")\nWithForm(form="Missing")',
             service=MemoryService([source]), progress=progress)
-        self.assertEqual(engine.results[-1].status, 'error')
+        self.assertEqual(engine.results[-1].status, 'warning')
         self.assertEqual(engine.candidate_plan, saved[0])
         self.assertFalse(engine.candidate_plan.groups[0].sealed)
 

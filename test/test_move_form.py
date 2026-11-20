@@ -18,7 +18,7 @@ from activity_manager.form_folders import resolve_folder, folder_paths, folder_c
 from activity_manager.schema_resolution import CachedResolutionService, resolve_command_schema
 from test.form_command_runtime import execute as execute_runtime, locations, install
 from activity_manager.confirmed_plan import ConfirmationAttempt, AttemptBinding
-from activity_manager.resource_state import ResourceKind
+from activity_manager.resource_state import ResourceKind, ResourceKey
 from activity_manager.listbox import DatabaseListbox
 from test import test_multi_form as fixtures
 
@@ -244,9 +244,9 @@ MoveForm(currentForm=False, form="A", folder="/")
     async def test_ambiguous_folder_and_subform_stop_without_moves(self):
         for target, schemas in [('Shared', None), ('North', [dict(fixtures.form('a', 'A'), parentFormId='parent')])]:
             manager, service = await self.evaluate(f'MoveForm(currentForm=False, formPattern="A|B", folder="{target}")\nAddField(fieldCode="later", label="Later")', schemas)
-            self.assertEqual(manager.executions[0].status, 'error')
-            self.assertEqual(manager.executions[1].status, 'not_executed')
-            self.assertEqual({key: value for key, value in manager.workspace.state.baselines.entries.items() if key.kind == ResourceKind.DATABASE_RESOURCES}, {})
+            self.assertEqual(manager.executions[0].status, 'warning' if target == 'Shared' else 'error')
+            self.assertEqual(manager.executions[1].status, 'applied' if target == 'Shared' else 'not_executed')
+            self.assertEqual({key for key in manager.workspace.state.baselines.entries if key.kind == ResourceKind.DATABASE_RESOURCES}, {ResourceKey.database('db')})
             self.assertEqual(service.moves, [])
 
     async def test_remote_single_target_and_scope_replacement(self):
@@ -338,7 +338,7 @@ AddField(fieldCode="skip", label="Skip")
 WithForm(form="A")
 ''')
         self.assertEqual([e.status for e in manager.executions], ['warning', 'warning', 'applied'])
-        self.assertEqual({key: value for key, value in manager.workspace.state.baselines.entries.items() if key.kind == ResourceKind.DATABASE_RESOURCES}, {})
+        self.assertEqual({key for key in manager.workspace.state.baselines.entries if key.kind == ResourceKind.DATABASE_RESOURCES}, {ResourceKey.database('db')})
         self.assertEqual(service.timeline, [])
 
 
@@ -428,7 +428,7 @@ class MoveFormPageTests(unittest.IsolatedAsyncioTestCase):
         creator.controls['form'].set_value(name)
         creator._updating = False
 
-    async def test_folder_selector_uses_selected_database_and_active_database_in_multiple_mode(self):
+    async def test_folder_selector_uses_qualified_database_or_active_database(self):
         manager, creator, service, _ = await self.make_page()
         await creator.on_parameter_change(creator)
         self.assertIn('/North/Archive', creator.controls['folder'].options)
@@ -500,7 +500,7 @@ MoveForm(currentForm=False, form="A", folder="South")
         self.assertEqual(service.moves, [])
 
     async def test_late_folder_response_does_not_replace_new_database_choices(self):
-        _, creator, service, _ = await self.make_page()
+        manager, creator, service, _ = await self.make_page()
         started, release = asyncio.Event(), asyncio.Event()
         original = service.get_database_resources
         async def delayed(database):
@@ -509,10 +509,11 @@ MoveForm(currentForm=False, form="A", folder="South")
                 await release.wait()
             return await original(database)
         service.get_database_resources = delayed
-        self.set_target(creator, 'Remote/C')
+        manager.workspace.state.load_form(service.schemas['c'])
+        manager.workspace.state.activate(manager.workspace.key_for(service.schemas['c']))
         previous = asyncio.create_task(creator.on_parameter_change(creator))
-        await started.wait()
-        self.set_target(creator, 'A')
+        await asyncio.wait_for(started.wait(), timeout=2)
+        manager.workspace.state.activate(manager.workspace.key_for(service.schemas['a']))
         await creator.on_parameter_change(creator)
         release.set()
         await previous
@@ -545,3 +546,100 @@ class MoveFormApiTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await service.aclose()
         self.assertEqual([call.method for call in calls], ['GET', 'POST'])
+
+
+class FolderSuggestionContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_destination_options_follow_active_database_without_requiring_a_form(self):
+        from unittest.mock import Mock
+        from activity_manager.command_execution import ExecutionResult
+        from activity_manager.page import connection_page
+        service = AsyncMock(spec=ActivityInfoService)
+        service.get_databases.return_value = {'db': 'Local', 'remote': 'Remote'}
+        service.get_database_names.return_value = {'db': 'Local', 'remote': 'Remote'}
+        service.get_forms.return_value = {'a': 'A'}
+        service.get_form_names.return_value = {'b': 'B'}
+        service.get_form_schema.return_value = fixtures.form('b', 'B', 'remote')
+        service.get_database_resources.side_effect = lambda db: {
+            'folder': dict(id='folder', type='FOLDER', label='LocalFolder' if db == 'db' else 'RemoteFolder', parentId=db)}
+        creators, managers = [], []
+        def create_renderer(*args, **kwargs):
+            creator = CommandCreatorRenderer(*args, **kwargs)
+            creators.append(creator)
+            return creator
+        def create_manager(*args, **kwargs):
+            manager = CommandListManager(*args, **kwargs)
+            managers.append(manager)
+            return manager
+        store = Mock()
+        store.load.return_value = (None, '')
+        with patch('activity_manager.page.ActivityInfoService', return_value=service), \
+             patch('activity_manager.page.AppStateStore', return_value=store), \
+             patch('activity_manager.page.ui.timer'), \
+             patch('activity_manager.page.CommandCreatorRenderer', side_effect=create_renderer), \
+             patch('activity_manager.page.CommandListManager', side_effect=create_manager), \
+             patch('activity_manager.command_creator.events.handle_event'):
+            with Client(ui.page('/')), ui.column() as page:
+                connection_page()
+                button = next(e for e in page.descendants() if isinstance(e, ui.button) and e.text == 'Connect')
+                connect = next(iter(button._event_listeners.values())).handler.__closure__[0].cell_contents
+                await connect()
+                database = next(e for e in page.descendants() if isinstance(e, DatabaseListbox))
+                await next(iter(database._event_listeners.values())).handler(SimpleNamespace(args='db'))
+                creator, manager = creators[0], managers[0]
+                self.assertIsNone(manager.workspace.active_schema)
+                creator.command_select.set_value('move_form')
+                creator._command_changed(None)
+                await creator.on_parameter_change(creator)
+                self.assertIn('/LocalFolder', creator.controls['folder'].options)
+                creator.controls['current_form'].set_value(False)
+                creator.controls['form'].set_value('Remote/B')
+                await creator.on_parameter_change(creator)
+                self.assertIn('/RemoteFolder', creator.controls['folder'].options)
+                self.assertNotIn('/LocalFolder', creator.controls['folder'].options)
+                for selector in ('Missing', '${vars.target}'):
+                    creator.controls['form'].set_value(selector)
+                    await creator.on_parameter_change(creator)
+                    self.assertIn('/LocalFolder', creator.controls['folder'].options)
+                    self.assertNotIn('/RemoteFolder', creator.controls['folder'].options)
+                service.get_form_schema.assert_not_awaited()
+                manager.resolve_schema = AsyncMock(side_effect=lambda data: ExecutionResult(data))
+                manager.commands = parse_command_text('WithForm(form="Remote/B")')
+                manager._evaluate_commands()
+                await manager._evaluation_task
+                await creator.on_parameter_change(creator)
+                self.assertIn('/RemoteFolder', creator.controls['folder'].options)
+                self.assertNotIn('/LocalFolder', creator.controls['folder'].options)
+                manager.commands = []
+                await next(iter(database._event_listeners.values())).handler(SimpleNamespace(args=''))
+                await creator.on_parameter_change(creator)
+                self.assertEqual(creator.controls['folder'].options, [])
+                creator.controls['form'].set_value('Remote/B')
+                await creator.on_parameter_change(creator)
+                self.assertIn('/RemoteFolder', creator.controls['folder'].options)
+                creator.controls['form'].set_value('Unknown/B')
+                await creator.on_parameter_change(creator)
+                self.assertEqual(creator.controls['folder'].options, [])
+
+
+class MoveFormDestinationScopeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_destination_is_resolved_only_within_selected_forms_database(self):
+        from activity_manager.applier import Applier
+        from activity_manager.command_execution import ExecutionResult
+        for selector, destination, expected in [('Remote/B', 'remoteonly', 'applied'),
+                                                 ('Remote/B', 'localonly', 'warning'),
+                                                 ('A', 'remoteonly', 'warning'),
+                                                 ('Remote/B', 'Missing', 'warning')]:
+            with self.subTest(selector=selector, destination=destination):
+                a, b = fixtures.form('a', 'A'), fixtures.form('b', 'B', 'remote')
+                service = FolderService([a, b])
+                service.resources['db']['localonly'] = dict(id='localonly', type='FOLDER', label='Local Only', parentId='db')
+                service.resources['remote']['remoteonly'] = dict(id='remoteonly', type='FOLDER', label='Remote Only', parentId='remote')
+                engine = Applier(a, parse_command_text(f'MoveForm(currentForm=False, form="{selector}", folder="{destination}")\nAddField(fieldCode="after", label="After")'),
+                                 form_service=service, resolve_schema=AsyncMock(side_effect=lambda data: ExecutionResult(data)))
+                await engine.evaluate()
+                self.assertEqual([e.status for e in engine.executions], [expected, 'applied'])
+                active = engine.workspace.active_schema
+                self.assertEqual(active['id'], 'b' if expected == 'applied' else 'a')
+                self.assertEqual(engine.workspace.state.active_database_id, 'remote' if expected == 'applied' else 'db')
+                self.assertEqual(len(engine.effects), 2 if expected == 'applied' else 1)
+                self.assertEqual(service.moves, [])

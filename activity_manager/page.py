@@ -203,36 +203,59 @@ def connection_page():
         multiple = creator._multiple_forms()
         source = 'folder_paths' if moving else 'form_field_codes'
         creator.set_suggestions(source, [])
-        if (multiple and not moving) or not active:
-            return
-        current_form = moving and creator._current_form()
-        selected = None if current_form else creator.controls['form'].value
         source_request = schema_request
         evaluation = command_list._evaluation_version
-        if (not moving and not selected) or (not multiple and selected and '${' in selected):
+        if moving:
+            active_database_id = command_list.workspace.state.active_database_id
+            current_form = creator._current_form()
+            selected = None if current_form else creator.controls['form'].value
+            database_id = active_database_id
+            try:
+                from .form_folders import folder_choices
+                if not multiple and selected and '/' in selected:
+                    database_name = selected.split('/', 1)[0]
+                    if '${' in database_name:
+                        return
+                    names = await command_list.form_service.get_database_names()
+                    matches = [identity for identity, name in names.items() if name == database_name]
+                    if len(matches) != 1:
+                        return
+                    database_id = matches[0]
+                if not database_id:
+                    return
+                resources = await command_list.form_service.get_database_resources(database_id)
+                suggestions = folder_choices(database_id, resources)
+                if (request == form_field_request and source_request == schema_request
+                        and evaluation == command_list._evaluation_version
+                        and creator.command_select.value == command_key
+                        and creator._multiple_forms() == multiple
+                        and creator._current_form() == current_form
+                        and (None if current_form else creator.controls['form'].value) == selected
+                        and command_list.workspace.state.active_database_id == active_database_id):
+                    creator.set_suggestions(source, suggestions)
+            except (ValueError, KeyError, TypeError, AttributeError):
+                pass  # Suggestions are optional; application validates the destination.
+            return
+        if multiple or not active:
+            return
+        selected = creator.controls['form'].value
+        if not selected or '${' in selected:
             return
         try:
             from .schema_names import resolve_form_names
-            data = active
-            if selected and not multiple:
-                probe = {**active, 'elements': [{'type': 'reference', 'typeParameters': {
-                    'range': [{'formId': selected}]}}]}
-                resolved = await resolve_form_names(command_list.form_service, probe,
-                                                    dict(command_list.related_schemas), load_related=False)
-                identity = resolved['elements'][0]['typeParameters']['range'][0]['formId']
-                data = command_list.workspace.latest.get(identity) or command_list.related_schemas.get(identity)
-                if data is None:
-                    data = await command_list.form_service.get_form_schema(identity)
+            probe = {**active, 'elements': [{'type': 'reference', 'typeParameters': {
+                'range': [{'formId': selected}]}}]}
+            resolved = await resolve_form_names(command_list.form_service, probe,
+                                                dict(command_list.related_schemas), load_related=False)
+            identity = resolved['elements'][0]['typeParameters']['range'][0]['formId']
+            data = command_list.workspace.latest.get(identity) or command_list.related_schemas.get(identity)
+            if data is None:
+                data = await command_list.form_service.get_form_schema(identity)
             suggestions = field_codes_from_schema(data)
-            if moving:
-                from .form_folders import folder_choices
-                resources = await command_list.form_service.get_database_resources(data['databaseId'])
-                suggestions = folder_choices(data['databaseId'], resources)
             if (request == form_field_request and source_request == schema_request
                     and evaluation == command_list._evaluation_version
                     and creator.command_select.value == command_key and creator._multiple_forms() == multiple
-                    and (moving and creator._current_form()) == current_form
-                    and (None if current_form else creator.controls['form'].value) == selected):
+                    and creator.controls['form'].value == selected):
                 creator.set_suggestions(source, suggestions)
         except (ValueError, KeyError, TypeError, AttributeError):
             # Suggestions are optional; application reports invalid selectors.
@@ -420,7 +443,9 @@ def connection_page():
             snapshots = report_schemas if report_version == command_list._evaluation_version else ([source_schema] if source_schema else [])
             show_results(snapshots or [], empty_message='Select a form to load its schema.',
                          related=report_context if report_version == command_list._evaluation_version else None,
-                         snapshot=report_display if report_version == command_list._evaluation_version else None)
+                         snapshot=report_display if report_version == command_list._evaluation_version else command_list.applier.initial_display_state)
+            if command_list.applier.initial_diagnostics:
+                console_message.set_text('\n'.join(item.console_line() for item in command_list.applier.initial_diagnostics))
             return
         if view is None:
             console_message.set_text('Did not execute.')
@@ -462,9 +487,7 @@ def connection_page():
         target_schema = command_list.target_schema()
         if (
             target_schema is None
-            or source_schema is None
             or service is None
-            or not forms.value
         ):
             return
         cancel_execute_confirmation()
@@ -592,10 +615,12 @@ def connection_page():
         source_schema = None
         command_creator.set_schema(None)
         command_list.related_schemas = {}
-        command_list.database_names = {}
+        command_list.database_names = {identity: label.removesuffix(f' ({identity})')
+                                       for identity, label in databases.options.items()}
         command_list.reference_defaults = {}
         command_list.resolution_cache = {}
         command_list.clear_selection()
+        command_list.initial_database_id = databases.value
         command_list.set_schema(None)
         schema_status.set_text('')
 
@@ -662,8 +687,8 @@ def connection_page():
                 console_message.set_text(f'Form list error:\n{exc}')
 
     def clear_databases():
-        clear_forms()
         databases.set_options({})
+        clear_forms()
         status.set_text('Connect to load databases.')
 
     async def credentials_changed():
@@ -684,6 +709,7 @@ def connection_page():
             service = ActivityInfoService(base_url.value, token.value)
             options = await service.get_databases()
             databases.set_options(options)
+            command_list.set_schema(None)
             status.set_text(f'{len(options)} databases loaded.' if options else 'No databases available.')
         except ValueError as exc:
             await close_service()

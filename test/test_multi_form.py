@@ -31,6 +31,12 @@ class MemoryService:
         self.fail_at = None
         self.reject_at = None
 
+    async def get_database_resources(self, database):
+        return {identity: dict(id=identity, label=schema['label'],
+                               type='SUB_FORM' if schema.get('parentFormId') else 'FORM',
+                               parentId=schema.get('parentFormId') or database)
+                for identity, schema in self.schemas.items() if schema['databaseId'] == database}
+
     async def get_form_names(self, database):
         return {key: s['label'] for key, s in self.schemas.items() if s['databaseId'] == database}
 
@@ -109,13 +115,14 @@ WithForm(form="Three")
         self.assertEqual(manager.executions[-1].schema['databaseId'], 'remote')
         self.assertEqual(service.reads, ['two', 'three'])
 
-    async def test_failed_switch_preserves_state_and_blocks_later_commands(self):
+    async def test_failed_switch_preserves_state_and_allows_later_commands(self):
         manager, service = await self.evaluate([form('one', 'One')], '''
 WithForm(form="Missing")
 AddField(fieldCode="new", label="New")
 ''')
-        self.assertEqual(manager.executions[0].status, 'error')
-        self.assertEqual(manager.executions[1].status, 'not_executed')
+        self.assertEqual(manager.executions[0].status, 'warning')
+        self.assertEqual(manager.executions[1].status, 'applied')
+        self.assertEqual(manager.executions[1].schema['elements'][0]['code'], 'new')
         self.assertEqual(manager.executions[0].schema['id'], 'one')
         self.assertEqual(len(manager.workspace.form_snapshots), 1)
 
@@ -166,7 +173,7 @@ WithForm(form="Missing")
                 self.assertEqual(len(manager.executions[index].issues), 1)
                 self.assertEqual(manager.executions[index].issues[0].path,
                                  ('elements', 0, 'validationCondition'))
-        self.assertEqual(manager.executions[5].status, 'error')
+        self.assertEqual(manager.executions[5].status, 'warning')
 
     async def test_result_tabs_show_history_and_reuse_revisited_form(self):
         managers = []
@@ -193,19 +200,19 @@ DeleteField(fieldCode="first")
         tabs = next(element for element in page.descendants() if isinstance(element, ui.tabs))
         code = next(element for element in page.descendants() if isinstance(element, ui.code))
         manager.select_command(0)
-        self.assertEqual(len(list(tabs)), 1)
-        manager.select_command(2)
         self.assertEqual(len(list(tabs)), 2)
+        manager.select_command(2)
+        self.assertEqual(len(list(tabs)), 3)
         self.assertEqual(tabs.value, 'two')
         manager.select_command(4)
-        self.assertEqual(len(list(tabs)), 2)
+        self.assertEqual(len(list(tabs)), 3)
         self.assertEqual(tabs.value, 'one')
         import json
         self.assertEqual(json.loads(code.content)['elements'], [])
         tabs.set_value('two')
         self.assertEqual(json.loads(code.content)['elements'][0]['code'], 'second')
         manager.select_command(0)
-        self.assertEqual(len(list(tabs)), 1)
+        self.assertEqual(len(list(tabs)), 2)
         self.assertEqual(json.loads(code.content)['elements'][0]['code'], 'first')
 
     async def test_unresolved_highlighting_survives_tabs_revisits_and_history(self):

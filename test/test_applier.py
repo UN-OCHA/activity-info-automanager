@@ -190,7 +190,7 @@ class AsyncApplierTests(unittest.IsolatedAsyncioTestCase):
             'WithForm(form="Missing")'), form_service=service,
             resolve_schema=AsyncMock(side_effect=lambda schema: ExecutionResult(schema)))
         await engine.evaluate()
-        self.assertEqual(engine.results[-1].status, 'error')
+        self.assertEqual(engine.results[-1].status, 'warning')
         self.assertEqual(engine.variables, {'vars.x': 'Outer'})
         self.assertEqual([target['variables']['vars.x'] for target in engine.scope], ['Scoped', 'Scoped'])
         state = engine.workspace.state

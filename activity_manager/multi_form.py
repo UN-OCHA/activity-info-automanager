@@ -8,9 +8,14 @@ from .schema_names import resolve_form_names
 from .schema_identity import schema_identities
 
 
+class FormSelectionError(ValueError):
+    """A selector could not establish context; the command may be skipped."""
+
+
 class FormWorkspace:
-    def __init__(self, initial):
+    def __init__(self, initial, initial_database_id=None):
         self.state = ApplicationState()
+        self.state.active_database_id = initial_database_id
         if initial is not None:
             if initial.get('id'):
                 self.state.load_form(initial, affected=True)
@@ -53,11 +58,17 @@ class FormWorkspace:
         self.reserved.setdefault(schema.get("id"), set()).update(schema_identities(schema))
 
     async def switch(self, form, service, current, related):
-        probe = {**current, 'elements': [{'type': 'reference', 'typeParameters': {
+        database_id = self.state.active_database_id
+        if not database_id and '/' not in form:
+            raise FormSelectionError('An active database or a database-qualified form name is required.')
+        probe = {**(current or {}), 'databaseId': database_id, 'elements': [{'type': 'reference', 'typeParameters': {
             'range': [{'formId': form}]}}]}
-        resolved = await resolve_form_names(service, probe, related, load_related=False)
+        try:
+            resolved = await resolve_form_names(service, probe, related, load_related=False)
+        except ValueError as exc:
+            raise FormSelectionError(str(exc)) from exc
         identity = resolved['elements'][0]['typeParameters']['range'][0]['formId']
-        if identity == current['id']:
+        if current is not None and identity == current.get('id'):
             return deepcopy(current)
         schema = self.latest.get(identity)
         if schema is None:

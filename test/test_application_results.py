@@ -168,7 +168,7 @@ class ResultIntegrationTests(unittest.IsolatedAsyncioTestCase):
             forms)
         self.assertEqual(manager.results[1].applications, ())
         self.assertEqual(manager.results[1].status, 'warning')
-        self.assertEqual(len(manager.results[1].display_state.resources), 3)
+        self.assertEqual(len(manager.results[1].display_state.resources), 4)
         applications = manager.results[2].applications
         self.assertEqual([item.status for item in applications], ['applied', 'error', 'not_executed'])
         self.assertIsNone(applications[-1].display_state)
@@ -213,7 +213,7 @@ class ResultIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('REF.OLD', code.content)
         self.assertNotIn('Renamed', code.content)
         tabs = next(item for item in container.descendants() if isinstance(item, ui.tabs))
-        self.assertEqual(len(list(tabs)), 1)
+        self.assertEqual(len(list(tabs)), 2)
         self.assertEqual(manager.workspace.state.active_form_key, active)
 
     async def test_record_labels_survive_context_only_commands_without_queries(self):

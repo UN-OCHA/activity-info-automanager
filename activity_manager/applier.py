@@ -15,10 +15,10 @@ from .command_execution import (
 )
 from .command_iteration import IterativeCommand, PreparedCommand
 from .immutable import freeze, command_parameters_snapshot
-from .multi_form import FormWorkspace
+from .multi_form import FormWorkspace, FormSelectionError
 from .resource_state import ResourceKey, ResourceState, DatabaseResourcesPayload, BaselineEvidence, Existence, LoadStatus
 from .planning import PlanBuilder, SchemaEffect, ResourcePatchEffect, MemberRef, ResourceProjection, Footprint
-from .schema_names import readable_schema
+from .schema_names import readable_schema, load_default_record_labels
 
 ACTIVE_DRAFT = ContextVar('activity_manager_application_draft', default=None)
 
@@ -48,9 +48,9 @@ class Applier:
                  related_schemas=None, database_names=None, reference_defaults=None,
                  resolution_cache=None, resolve_schema=None, lookup_variable=None,
                  form_service=None, generation=0, owner=None, on_progress=None,
-                 is_current=None):
+                 is_current=None, initial_database_id=None):
         self.owner = owner if owner is not None else object()
-        self._workspace = FormWorkspace(source_schema)
+        self._workspace = FormWorkspace(source_schema, initial_database_id)
         self.source_schema = deepcopy(source_schema)
         self.commands = deepcopy(tuple(commands))
         self.authored_commands = tuple(authored_commands) or tuple(
@@ -77,10 +77,47 @@ class Applier:
         self._cancelled = False
         self._position = 0
         self._index = 0
+        self.initial_diagnostics = ()
+        self._initial_context_loaded = False
+        self.initial_display_state = self._capture_context()
         self.executions = [CommandExecution('not_executed', None, 'Waiting for the previous command.')
                            for _ in self.commands]
         if self.executions and resolve_schema is not None and source_schema is not None:
             self.executions[0] = CommandExecution('resolving', None, 'Resolving names...')
+
+    def _capture_context(self, labels=None):
+        return self.snapshot_builder.capture(self.workspace.state, self.related_schemas,
+            self.database_names, self.workspace.issues, active=self.workspace.state.active_form_key, labels=labels)
+
+    async def _load_initial_context(self):
+        if self._initial_context_loaded:
+            return
+        self._initial_context_loaded = True
+        self.initial_diagnostics = await self._load_context_database(self.workspace.state.active_database_id)
+        labels = {}
+        if self.source_schema is not None and self.form_service is not None:
+            labels = await load_default_record_labels(self.form_service, self.source_schema, self.related_schemas, {})
+        if self.is_current():
+            self.initial_display_state = self._capture_context(labels)
+            self._publish_evaluation()
+
+    async def _load_context_database(self, identity):
+        if not identity or self.form_service is None:
+            return ()
+        key = ResourceKey.database(identity)
+        try:
+            await self._database(identity)
+            self.workspace.issues.pop(identity, None)
+            return ()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            warning = Diagnostic('warning', f'Database {identity!r}: resources could not be loaded. {exc}',
+                                 code='database_context_unavailable')
+            self.workspace.state.note_unavailable(key)
+            self.workspace.state.mark_affected(key)
+            self.workspace.issues[identity] = (warning,)
+            return (warning,)
 
     def _get(self, name):
         draft = ACTIVE_DRAFT.get()
@@ -146,7 +183,7 @@ class Applier:
     def _commit(self, draft, result, current, variables, on_success):
         if not self.is_current():
             return None
-        if result.has_errors:
+        if result.application_failed:
             return self._save_result(self._failed_result(result, current))
         try:
             publication = {name: deepcopy(getattr(draft, name)) for name in self._CONTEXT_FIELDS
@@ -166,7 +203,7 @@ class Applier:
         return result
 
     def _stage_result(self, result, current):
-        if result.has_errors:
+        if result.application_failed:
             return self._failed_result(result, current)
         freeze(self.variables)
         self.plan_builder.observe(self.workspace.state.baselines.entries.values())
@@ -217,7 +254,7 @@ class Applier:
 
     def evaluate_local(self):
         current = deepcopy(self.source_schema)
-        stopped = current is None
+        stopped = False
         for index, command in enumerate(self.commands):
             if not self.is_current():
                 break
@@ -244,6 +281,9 @@ class Applier:
         return self.executions
 
     async def evaluate(self):
+        await self._load_initial_context()
+        if not self.is_current():
+            return
         if self.resolve_schema is None:
             return self.evaluate_local()
         await self._resolve_commands(self._evaluation_version, deepcopy(self.source_schema), self.commands)
@@ -296,13 +336,42 @@ class Applier:
         return enriched
 
 
+    def _context_warning(self, command, current, variables):
+        from .commands.with_form import WithFormCommand
+        from .commands.modify_form import ModifyFormCommand
+        from .commands.move_form import MoveFormCommand
+        from .commands.set_variable import SetVariableCommand
+        command = getattr(command, 'command', command)
+        if isinstance(command, (WithFormCommand, ModifyFormCommand)) or (
+                isinstance(command, MoveFormCommand) and not command.current_form):
+            return None
+        if isinstance(command, SetVariableCommand):
+            from .command_templates import command_parameters
+            try:
+                command = command_parameters(command, variables or {})
+            except ValueError:
+                return None  # Normal parameter validation reports this failure.
+            if command.method == 'literal' or current is not None:
+                return None
+            if self.workspace.state.active_database_id or '/' in (command.referenced_form or ''):
+                return None
+            return ExecutionResult.warning(current, 'An active database or a database-qualified referenced form is required.',
+                                           'missing_database', skipped=True)
+        if current is None:
+            return ExecutionResult.warning(current, 'An active form is required. Command skipped.',
+                                           'missing_form', skipped=True)
+        return None
+
     def _application_steps(self, index, current, variables=None, targets=None, *, record_progress=True):
         """One orchestration path shared by synchronous and connected evaluation.
 
         Yield concrete applications; callers send back their normal results.
         """
         command = self.commands[index]
-        target_key = self.workspace.key_for(current)
+        missing = self._context_warning(command, current, variables)
+        if missing is not None:
+            return self._snapshot_execution(CommandExecution.from_result(missing))
+        target_key = self.workspace.key_for(current) if current is not None else None
         if not isinstance(command, IterativeCommand):
             result = yield command
             return CommandExecution.from_result(result)
@@ -378,7 +447,7 @@ class Applier:
 
     def _save_result(self, result):
         effects = tuple(effect.effect_id for effect in self.effects if effect.application_id == self._attempt_id)
-        if result.schema is not None and not result.has_errors:
+        if result.schema is not None and not result.application_failed:
             identity = result.schema.get('id')
             key = self.workspace.key_for(result.schema)
             before = self.workspace.state.resources.get(key)
@@ -422,12 +491,18 @@ class Applier:
             if isinstance(prepared, MoveFormCommand) and prepared.current_form:
                 if self.form_service is None:
                     return prepared.execute(current)
+                warnings = await self._load_context_database(current['databaseId'])
+                if warnings:
+                    return ExecutionResult(current, warnings, skipped=True)
                 return await self._move_form(prepared, current)
             if isinstance(prepared, (WithFormCommand, ModifyFormCommand, MoveFormCommand)):
                 if self.form_service is None:
                     return prepared.execute(current)
-                schema = (await self.workspace.select(prepared.form, self.form_service) if scope_member else
-                          await self.workspace.switch(prepared.form, self.form_service, current, self.related_schemas))
+                try:
+                    schema = (await self.workspace.select(prepared.form, self.form_service) if scope_member else
+                              await self.workspace.switch(prepared.form, self.form_service, current, self.related_schemas))
+                except FormSelectionError as exc:
+                    return ExecutionResult.warning(current, str(exc), 'form_switch_failed', skipped=True)
                 self.related_schemas.update(self.workspace.latest)
                 if scope_context is not None:
                     scope_id, keys = scope_context
@@ -435,16 +510,20 @@ class Applier:
                     self.plan_builder.select_form(self.workspace.key_for(schema), scope_id=scope_id)
                 else:
                     self.plan_builder.select_form(self.workspace.key_for(schema))
+                context_warnings = await self._load_context_database(schema['databaseId'])
                 if isinstance(prepared, MoveFormCommand):
-                    return await self._move_form(replace(prepared, form=schema['id']), schema)
+                    if context_warnings:
+                        return ExecutionResult(current, context_warnings, skipped=True)
+                    result = await self._move_form(replace(prepared, form=schema['id']), schema)
+                    return replace(result, diagnostics=context_warnings + result.diagnostics)
                 if isinstance(prepared, ModifyFormCommand):
                     result = apply_command_locally(PreparedCommand(replace(prepared, form=schema['id'])), schema,
                         self.related_schemas, self.database_names, variables=variables)
                     if not result.has_errors and prepared.new_name is not None:
                         projection = await self._project_resource_label(schema, result.schema)
                         result = replace(result, resource_projections=(projection,) if projection is not None else ())
-                    return result
-                return with_prepared_command(ExecutionResult(schema, names_schema=readable_schema(
+                    return replace(result, diagnostics=context_warnings + result.diagnostics)
+                return with_prepared_command(ExecutionResult(schema, context_warnings, names_schema=readable_schema(
                         schema, self.related_schemas, self.database_names),
                     snapshot_issues=self.workspace.issues.get(schema.get('id'), ()),
                     success_message=f'Active form: {schema.get("label") or schema["id"]}'), prepared)
@@ -454,13 +533,16 @@ class Applier:
             self.related_schemas.update(self.workspace.latest)
             self.related_schemas[schema.get('id')] = schema
             return await self.resolve_schema(schema)
+        async def lookup(command, schema):
+            return await self.lookup_variable(command, schema if schema is not None else
+                                              {'databaseId': self.workspace.state.active_database_id})
         result = await apply_command(PreparedCommand(prepared), current, resolve,
             related_schemas=self.related_schemas, database_names=self.database_names,
-            variables=variables, lookup_variable=self.lookup_variable,
-            reserved_identities=self.workspace.reserved.get(current.get("id")))
+            variables=variables, lookup_variable=lookup if self.lookup_variable is not None else None,
+            reserved_identities=self.workspace.reserved.get((current or {}).get("id")))
         if isinstance(prepared, SetVariableCommand):
             # Variables do not run the schema resolver or change the schema.
-            result = replace(result, snapshot_issues=self.workspace.issues.get(current.get('id'), ()))
+            result = replace(result, snapshot_issues=self.workspace.issues.get((current or {}).get('id'), ()))
         return result
 
 
@@ -468,9 +550,6 @@ class Applier:
         from .commands.with_form import WithFormCommand
         from .commands.modify_form import ModifyFormCommand
         from .commands.move_form import MoveFormCommand
-        if current is None:
-            self.evaluate_local()
-            return
         for index, command in enumerate(commands):
             if not self.is_current():
                 return
@@ -536,15 +615,21 @@ class Applier:
         failure = None
         token = ACTIVE_DRAFT.set(draft)
         try:
+            database_id = self.workspace.state.active_database_id
+            if not database_id:
+                failure = ExecutionResult.warning(current, 'An active database is required for a form pattern.',
+                                                  'missing_database', skipped=True)
+            if failure is not None:
+                return scope, self._snapshot_execution(CommandExecution.from_result(failure))
             if self.form_service is None:
                 raise ValueError('WithForm requires a connected form loader.')
             pattern = compile_pattern(substitute_text(command.form_pattern, variables, namespaces={'vars'}), kind='form')
-            names = dict(await self.form_service.get_form_names(current['databaseId']))
+            names = dict(await self.form_service.get_form_names(database_id))
             if not self.is_current():
                 return scope, None
             names.update({identity: schema.get('label') or identity
                           for identity, schema in self.workspace.latest.items()
-                          if schema.get('databaseId') == current['databaseId']})
+                          if schema.get('databaseId') == database_id})
             for identity, name in sorted(names.items(), key=lambda item: (item[1].casefold(), item[0])):
                 match = pattern.fullmatch(name)
                 if match is None:
@@ -558,8 +643,7 @@ class Applier:
         finally:
             ACTIVE_DRAFT.reset(token)
         if failure is not None:
-            return scope, self._snapshot_execution(CommandExecution.from_result(
-                self._save_result(self._failed_result(failure, current))))
+            return scope, self._snapshot_execution(CommandExecution.from_result(failure))
         scope_id = self.authored_commands[self._index].authored_id
         scope_keys = tuple(ResourceKey.form(target['identity']) for target in scope)
         if not scope:
@@ -577,12 +661,12 @@ class Applier:
                                              scope_context=(scope_id, scope_keys))
             if result is None or not self.is_current():
                 return scope, None
-            if not result.has_errors:
+            if not result.application_failed:
                 target['form_key'] = self.workspace.state.active_form_key
             children[i] = replace(CommandExecution.from_result(result), field_code=target['name'],
                                   target_keys=(ResourceKey.form(target['identity']),))
             current = result.schema
-            if result.has_errors:
+            if result.application_failed:
                 break
         return scope, self._form_summary(children, current)
 
@@ -658,13 +742,18 @@ class Applier:
 
     async def _database(self, identity):
         key = ResourceKey.database(identity)
-        if key not in self.workspace.state.resources:
+        existing = self.workspace.state.resources.get(key)
+        if existing is None or existing.load_status != LoadStatus.LOADED:
             try:
                 state = await self.form_service.get_database_state(identity)
             except AttributeError:
                 entries = await self.form_service.get_database_resources(identity)
                 state = ResourceState(key, DatabaseResourcesPayload(entries), load_status=LoadStatus.LOADED)
+            if not isinstance(state, ResourceState) or state.key != key or state.load_status != LoadStatus.LOADED:
+                raise ValueError('The database resource loader returned an invalid state.')
             self.workspace.state.load(BaselineEvidence(key, Existence.PRESENT, state, state.server_version))
+        self.workspace.state.mark_affected(key)
+        self.plan_builder.observe(self.workspace.state.baselines.entries.values())
         return self.workspace.state.resources[key]
 
     async def _project_resource_label(self, original, schema):
@@ -691,7 +780,10 @@ class Applier:
         before = await self._database(schema['databaseId'])
         entries = {identity: dict(entry) for identity, entry in before.payload.entries.items()}
         location = form_location(schema['databaseId'], entries, schema['id'])
-        parent, path = resolve_folder(schema['databaseId'], entries, command.folder)
+        try:
+            parent, path = resolve_folder(schema['databaseId'], entries, command.folder)
+        except ValueError as exc:
+            return ExecutionResult.warning(schema, str(exc), 'folder_selector_failed', skipped=True)
         # Normalize an omitted parent to the documented database-root identity.
         if location['parentId'] == parent:
             return with_prepared_command(ExecutionResult(schema, success_message='Form already in destination folder.'), command)
