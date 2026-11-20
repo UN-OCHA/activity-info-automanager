@@ -299,6 +299,9 @@ def connection_page():
             return
         if multiple or not active:
             return
+        if creator._current_form():
+            creator.set_suggestions(source, field_codes_from_schema(active))
+            return
         selected = creator.controls['form'].value
         if not selected or '${' in selected:
             return
@@ -577,7 +580,8 @@ def connection_page():
             contributors = sorted({applications[identity].authored_index + 1 for identity in action.application_ids
                                    if identity in applications})
             detail = f'; delete field {action.deleted_member_id}' if action.deleted_member_id else ''
-            if action.projections and hasattr(action.after.payload, 'schema'):
+            if (hasattr(action.after.payload, 'schema')
+                    and action.before.payload.schema.get('label') != action.after.payload.schema.get('label')):
                 detail += f'; rename {action.before.payload.schema.get("label")} -> {action.after.payload.schema.get("label")}'
             if reviewed.destinations:
                 detail += '; destinations: ' + ', '.join(f'{identity} -> {parent}' for identity, parent in reviewed.destinations)

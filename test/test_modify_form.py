@@ -23,12 +23,21 @@ def form(identity, label, database='db', code='NAME'):
 
 class ModifyFormTests(unittest.TestCase):
     def test_parser_roundtrip_optional_edits_and_case_insensitivity(self):
-        for text in ('ModifyForm(form="A")', 'ModifyForm(form="A", name="New")',
-                     'ModifyForm(form="A", recordLabelFieldId="")',
-                     'modifyform(FORMPATTERN="(?P<region>.*)", NAME="${form.region}", RECORDLABELFIELDID="NAME")'):
+        for text in ('ModifyForm(currentForm=False, form="A")', 'ModifyForm(currentForm=False, form="A", name="New")',
+                     'ModifyForm(currentForm=False, form="A", recordLabelFieldId="")',
+                     'modifyform(CURRENTFORM=False, FORMPATTERN="(?P<region>.*)", NAME="${form.region}", RECORDLABELFIELDID="NAME")'):
             with self.subTest(text=text):
                 commands = parse_command_text(text)
                 self.assertEqual(parse_command_text(commands[0].to_syntax()), commands)
+
+    def test_current_form_validation_and_direct_edit(self):
+        command = parse_command_text('ModifyForm(currentForm=True, name="New")')[0]
+        self.assertEqual(parse_command_text(command.to_syntax()), [command])
+        self.assertEqual(command.execute(form('a', 'A')).schema['label'], 'New')
+        for text in ('ModifyForm(form="A")', 'ModifyForm(currentForm=True, form="A")',
+                     'ModifyForm(currentForm=False)', 'ModifyForm(currentForm=1)'):
+            with self.subTest(text=text), self.assertRaises(CommandTextError):
+                parse_command_text(text)
 
     def test_invalid_parameters_and_selectors(self):
         for args in ('', 'form="A", formPattern=".*"', 'formPattern="["',
@@ -42,41 +51,52 @@ class ModifyFormTests(unittest.TestCase):
         original = form('a', 'A')
         original['other'] = {'unchanged': True}
         before = deepcopy(original)
-        result = ModifyFormCommand(form='a', new_name='Renamed', record_label_field_id='NAME').execute(original)
+        result = ModifyFormCommand(current_form=False, form='a', new_name='Renamed', record_label_field_id='NAME').execute(original)
         self.assertEqual(result.status, 'applied')
         self.assertEqual(result.schema, {**original, 'label': 'Renamed', 'recordLabelFieldId': 'a-name'})
         self.assertEqual(original, before)
-        failed = ModifyFormCommand(form='a', new_name='Bad rename', record_label_field_id='missing').execute(original)
+        failed = ModifyFormCommand(current_form=False, form='a', new_name='Bad rename', record_label_field_id='missing').execute(original)
         self.assertEqual(failed.status, 'error')
         self.assertEqual(failed.schema, before)
 
     def test_record_label_id_priority_ambiguity_and_clear(self):
         original = form('a', 'A')
         original['elements'].append({'id': 'other', 'code': 'a-name'})
-        result = ModifyFormCommand(form='a', record_label_field_id='a-name').execute(original)
+        result = ModifyFormCommand(current_form=False, form='a', record_label_field_id='a-name').execute(original)
         self.assertEqual(result.schema['recordLabelFieldId'], 'a-name')
         original['elements'].append({'id': 'third', 'code': 'NAME'})
-        self.assertEqual(ModifyFormCommand(form='a', record_label_field_id='NAME').execute(original).status, 'error')
+        self.assertEqual(ModifyFormCommand(current_form=False, form='a', record_label_field_id='NAME').execute(original).status, 'error')
         original['recordLabelFieldId'] = 'a-name'
-        self.assertNotIn('recordLabelFieldId', ModifyFormCommand(form='a', record_label_field_id='').execute(original).schema)
-        self.assertEqual(ModifyFormCommand(form='a').execute(original).schema, original)
+        self.assertNotIn('recordLabelFieldId', ModifyFormCommand(current_form=False, form='a', record_label_field_id='').execute(original).schema)
+        self.assertEqual(ModifyFormCommand(current_form=False, form='a').execute(original).schema, original)
+
+    def test_creator_defaults_to_current_form(self):
+        added = []
+        with Client(ui.page('/')), ui.column():
+            creator = CommandCreatorRenderer((MODIFY_FORM,), on_add=added.append)
+            self.assertTrue(creator.controls['current_form'].value)
+            self.assertFalse(creator.parameter_containers['form'].visible)
+            self.assertFalse(creator.target_mode.visible)
+            creator._add_command()
+            self.assertEqual(added, [ModifyFormCommand(current_form=True)])
 
     def test_creator_optional_inclusion_and_multiple_targeting(self):
         added = []
         with Client(ui.page('/')), ui.column():
             creator = CommandCreatorRenderer((MODIFY_FORM,), on_add=added.append)
+            creator.controls['current_form'].set_value(False)
             creator.controls['form'].set_value('A')
             self.assertFalse(creator.activations['new_name'].value)
             self.assertFalse(creator.activations['record_label_field_id'].value)
             creator.controls['new_name'].set_value('Ignored')
             creator._add_command()
-            self.assertEqual(added[-1], ModifyFormCommand(form='A'))
+            self.assertEqual(added[-1], ModifyFormCommand(current_form=False, form='A'))
             creator.activations['new_name'].set_value(True)
             creator.controls['new_name'].set_value('New')
             creator.activations['record_label_field_id'].set_value(True)
             creator.controls['record_label_field_id'].set_value('NAME')
             creator._add_command()
-            self.assertEqual(added[-1], ModifyFormCommand(form='A', new_name='New', record_label_field_id='NAME'))
+            self.assertEqual(added[-1], ModifyFormCommand(current_form=False, form='A', new_name='New', record_label_field_id='NAME'))
             creator.set_suggestions('form_field_codes', ['NAME'])
             creator.target_mode.set_value('Multiple')
             creator.controls['form'].set_value('A|B')
@@ -93,7 +113,7 @@ class ModifyFormPreviewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_single_edits_switch_context_and_local_rename_resolves(self):
         manager, _ = await self.evaluate([form('a', 'A'), form('b', 'B')], '''
-ModifyForm(form="B", name="Renamed", recordLabelFieldId="NAME")
+ModifyForm(currentForm=False, form="B", name="Renamed", recordLabelFieldId="NAME")
 AddField(fieldCode="new", label="New")
 WithForm(form="A")
 WithForm(form="Renamed")
@@ -107,9 +127,20 @@ WithForm(form="Renamed")
         self.assertEqual(manager.executions[0].form_snapshots[0]['label'], 'A')
         self.assertEqual(len(manager.executions[0].schema['elements']), 1)
 
+    async def test_current_form_preserves_scope_captures_and_variables(self):
+        manager, _ = await self.evaluate([form('a', 'Site A'), form('b', 'Site B')], '\n'.join([
+            'WithForm(formPattern="Site (?P<region>.)")',
+            'SetVariable(name="local", method="literal", value="${form.region}")',
+            'ModifyForm(currentForm=True, name="New ${vars.local}", recordLabelFieldId="NAME")',
+            'AddField(fieldCode="new", label="${vars.local}")']))
+        self.assertEqual([e.status for e in manager.executions], ['applied'] * 4,
+                         [e.message for e in manager.executions])
+        self.assertEqual([s['label'] for s in manager.target_forms()], ['New A', 'New B'])
+        self.assertEqual([s['elements'][-1]['label'] for s in manager.target_forms()], ['A', 'B'])
+
     async def test_multiple_renames_keep_frozen_captures_and_active_scope(self):
         manager, _ = await self.evaluate([form('root', 'Root'), form('a', 'Site A'), form('b', 'Site B')], '''
-ModifyForm(formPattern="Site (?P<region>.)", name="New ${form.region}", recordLabelFieldId="NAME")
+ModifyForm(currentForm=False, formPattern="Site (?P<region>.)", name="New ${form.region}", recordLabelFieldId="NAME")
 AddField(fieldCode="new", label="${form.name}/${form.1}/${form.index}")
 ''')
         self.assertEqual([e.status for e in manager.executions], ['applied', 'applied'],
@@ -122,7 +153,7 @@ AddField(fieldCode="new", label="${form.name}/${form.1}/${form.index}")
 
     async def test_multiple_error_is_atomic_and_stops_remaining_targets(self):
         manager, _ = await self.evaluate([form('root', 'Root'), form('a', 'A', code='OTHER'), form('b', 'B')], '''
-ModifyForm(formPattern="A|B", name="Renamed", recordLabelFieldId="NAME")
+ModifyForm(currentForm=False, formPattern="A|B", name="Renamed", recordLabelFieldId="NAME")
 AddField(fieldCode="later", label="Later")
 ''')
         self.assertEqual([e.status for e in manager.executions[0].iterations], ['error', 'not_executed'])
@@ -136,7 +167,7 @@ AddField(fieldCode="later", label="Later")
         manager, _ = await self.evaluate([form('a', 'A'), form('b', 'B')], '''
 WithForm(formPattern="A|B")
 SetVariable(name="local", method="literal", value="${form.name}")
-ModifyForm(form="A", name="Only A")
+ModifyForm(currentForm=False, form="A", name="Only A")
 AddField(fieldCode="bad", label="${vars.local}")
 ''')
         self.assertEqual([e.status for e in manager.executions], ['applied', 'applied', 'applied', 'error'])
@@ -145,8 +176,8 @@ AddField(fieldCode="bad", label="${vars.local}")
 
     async def test_qualified_selection_switches_database_and_multiple_stays_local(self):
         manager, _ = await self.evaluate([form('a', 'A'), form('b', 'B', 'remote'), form('c', 'C', 'remote')], '''
-ModifyForm(form="Remote/B", name="New B")
-ModifyForm(formPattern=".*", recordLabelFieldId="NAME")
+ModifyForm(currentForm=False, form="Remote/B", name="New B")
+ModifyForm(currentForm=False, formPattern=".*", recordLabelFieldId="NAME")
 ''')
         self.assertEqual([e.status for e in manager.executions], ['applied', 'applied'],
                          [e.message for e in manager.executions])
@@ -155,7 +186,7 @@ ModifyForm(formPattern=".*", recordLabelFieldId="NAME")
 
     async def test_zero_matches_skip_following_commands_until_next_switch(self):
         manager, _ = await self.evaluate([form('a', 'A')], '''
-ModifyForm(formPattern="Missing", name="Unused")
+ModifyForm(currentForm=False, formPattern="Missing", name="Unused")
 AddField(fieldCode="skip", label="Skip")
 WithForm(form="A")
 ''')
@@ -166,7 +197,7 @@ WithForm(form="A")
     async def test_pending_record_label_materializes_and_writes_correct_ids(self):
         manager, service = await self.evaluate([form('a', 'A')], '''
 AddField(fieldCode="new", label="New")
-ModifyForm(form="A", recordLabelFieldId="new")
+ModifyForm(currentForm=False, form="A", recordLabelFieldId="new")
 ''')
         self.assertEqual([e.status for e in manager.executions], ['applied', 'applied'])
         preview = manager.target_forms()[0]
@@ -184,7 +215,7 @@ ModifyForm(form="A", recordLabelFieldId="new")
     async def test_clear_record_label_preserves_name_and_fields(self):
         original = form('a', 'A')
         original['recordLabelFieldId'] = 'a-name'
-        manager, _ = await self.evaluate([original], 'ModifyForm(form="A", recordLabelFieldId="")')
+        manager, _ = await self.evaluate([original], 'ModifyForm(currentForm=False, form="A", recordLabelFieldId="")')
         self.assertEqual(manager.executions[0].status, 'applied')
         self.assertNotIn('recordLabelFieldId', manager.target_schema())
         self.assertEqual(manager.target_schema()['label'], 'A')
@@ -211,6 +242,7 @@ class ModifyFormSuggestionTests(unittest.IsolatedAsyncioTestCase):
         manager.form_service = CachedResolutionService(service, manager.resolution_cache)
         manager.set_schema(service.schemas['a'])
         creator.command_select.set_value('modify_form')
+        creator.controls['current_form'].set_value(False)
         await asyncio.sleep(0)
         return manager, creator, service
 

@@ -120,15 +120,16 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(compare_resource_footprints(
                 left, Observation(before.key, Existence.PRESENT, right), (footprint,)).matches)
 
-    def test_rename_without_resource_verification_projection_is_rejected(self):
+    def test_rename_without_resource_verification_projection_is_schema_only(self):
         builder = PlanBuilder()
         effect = schema_effect(schema_state(), [], 'rename')
         data = effect.after.payload.to_dict()
         data['label'] = 'Renamed'
         effect = replace(effect, after=replace(effect.after, payload=type(effect.after.payload)(data)))
         builder.add(effect)
-        with self.assertRaisesRegex(PlanError, 'projection'):
-            materialize_plan(builder.snapshot(), AttemptBinding('eval', {}, 'session'))
+        plan = materialize_plan(builder.snapshot(), AttemptBinding('eval', {}, 'session'))
+        self.assertEqual(plan.actions[0].request.schema['label'], 'Renamed')
+        self.assertEqual(plan.actions[0].action.projections, ())
 
     def test_missing_resource_property_differs_from_null_and_existence_is_independent(self):
         before = database_state()

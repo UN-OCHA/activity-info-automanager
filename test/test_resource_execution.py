@@ -62,7 +62,7 @@ class ResourceExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.resources['db']['b']['label'], 'Concurrent B')
 
     async def test_local_rename_projects_both_labels_and_emits_one_schema_request(self):
-        manager, service = await self.evaluate('ModifyForm(form="A", name="Renamed")')
+        manager, service = await self.evaluate('ModifyForm(currentForm=False, form="A", name="Renamed")')
         self.assertEqual(manager.executions[0].status, 'applied', manager.executions[0].message)
         snapshot = manager.executions[0].display_state
         resources = next(item for item in snapshot.resources if item.key.kind == ResourceKind.DATABASE_RESOURCES)

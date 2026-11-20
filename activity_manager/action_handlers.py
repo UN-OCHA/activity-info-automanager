@@ -1,4 +1,4 @@
-"""Endpoint preparation, comparisons and verified shared-property projections."""
+"""Endpoint preparation and schema/resource comparisons."""
 
 from dataclasses import dataclass
 from typing import Protocol
@@ -6,7 +6,7 @@ from typing import Protocol
 from .endpoint_evidence import Observation, WriteEvidence
 from .immutable import freeze, thaw
 from .planning import ActionKind, ApiAction, PlanError, Footprint
-from .resource_state import Existence, FormPayload, DatabaseResourcesPayload, ResourceKind, ResourceState
+from .resource_state import Existence, FormPayload, DatabaseResourcesPayload, ResourceState
 from .schema_change import SchemaComparison, compare_schemas, _as_form_schema
 
 
@@ -48,32 +48,6 @@ class SchemaHandler:
             raise PlanError('This handler accepts schema actions only.')
         if not isinstance(action.after.payload, FormPayload):
             raise PlanError('Schema action requires a form payload.')
-        if action.before.payload.schema.get('label') != action.after.payload.schema.get('label'):
-            database = action.after.payload.schema.get('databaseId')
-            projections = [p for p in action.projections if p.before.key.kind == ResourceKind.DATABASE_RESOURCES
-                           and p.before.key.identity == database]
-            if len(projections) != 1 or len(action.projections) != 1:
-                raise PlanError('Rename requires the shared database-label verification projection.')
-            projection = projections[0]
-            required = {Footprint(projection.before.key, action.key.identity, ('label',)),
-                        Footprint(projection.before.key, action.key.identity, existence=True),
-                        Footprint(projection.before.key, action.key.identity, ('type',))}
-            if set(projection.footprints) != required:
-                raise PlanError('Rename verification must cover resource label, existence and type.')
-            for state, schema in ((projection.before, action.before.payload.schema),
-                                  (projection.after, action.after.payload.schema)):
-                if (not isinstance(state.payload, DatabaseResourcesPayload) or schema.get('databaseId') != database
-                        or state.payload.entries.get(action.key.identity, {}).get('label') != schema.get('label')
-                        or state.payload.entries.get(action.key.identity, {}).get('type') not in ('FORM', 'SUB_FORM')):
-                    raise PlanError('Rename schema and resource label projections disagree.')
-            entries = {identity: dict(entry) for identity, entry in projection.before.payload.entries.items()}
-            entries[action.key.identity]['label'] = action.after.payload.schema['label']
-            expected = DatabaseResourcesPayload(entries, projection.before.payload.order,
-                                                projection.before.payload.tombstones)
-            if projection.after.payload != expected:
-                raise PlanError('Rename projection changes properties outside the shared label.')
-        elif action.projections:
-            raise PlanError('A schema action without a label change cannot declare rename projections.')
         schema = action.after.payload.to_dict()
         _as_form_schema(schema, 'target')
         return SchemaRequest(action.key.identity, schema)

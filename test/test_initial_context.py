@@ -52,7 +52,7 @@ class InitialContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_selections_preserve_previous_form_and_do_not_modify_it(self):
         for selector in ('Missing', 'Remote/Missing', 'MissingDatabase/B'):
             with self.subTest(selector=selector):
-                engine, _ = await self.evaluate(f'ModifyForm(form="{selector}", name="Rejected")\nAddField(fieldCode="kept", label="Kept")', initial=form('a', 'A'))
+                engine, _ = await self.evaluate(f'ModifyForm(currentForm=False, form="{selector}", name="Rejected")\nAddField(fieldCode="kept", label="Kept")', initial=form('a', 'A'))
                 self.assertEqual([e.status for e in engine.executions], ['warning', 'applied'])
                 self.assertEqual(engine.workspace.active_schema['label'], 'A')
                 self.assertEqual(engine.workspace.state.active_database_id, 'db')
@@ -68,8 +68,8 @@ class InitialContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([e.status for e in engine.executions], ['warning', 'applied'])
 
     async def test_current_form_move_and_field_iteration_require_form(self):
-        engine, _ = await self.evaluate('MoveForm(currentForm=True, folder="/")\nDeleteField(fieldPattern=".*")')
-        self.assertEqual([e.status for e in engine.executions], ['warning', 'warning'])
+        engine, _ = await self.evaluate('MoveForm(currentForm=True, folder="/")\nModifyForm(currentForm=True, name="New")\nDeleteField(fieldPattern=".*")')
+        self.assertEqual([e.status for e in engine.executions], ['warning', 'warning', 'warning'])
         self.assertIsNone(engine.workspace.state.active_form_key)
 
     def test_local_literal_variables_work_without_schema(self):
@@ -79,7 +79,7 @@ class InitialContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.variables['vars.x'], 'v')
 
     async def test_qualified_modify_and_move_can_establish_context(self):
-        for text in ('ModifyForm(form="Local/A", recordLabelFieldId="")',
+        for text in ('ModifyForm(currentForm=False, form="Local/A", recordLabelFieldId="")',
                      'MoveForm(currentForm=False, form="Local/A", folder="/North")'):
             with self.subTest(text=text):
                 service = FolderService([form('a', 'A')])

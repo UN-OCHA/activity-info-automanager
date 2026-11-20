@@ -443,7 +443,7 @@ class CommandCreatorRenderer:
         events.handle_event(self.on_parameter_change, self)
 
     def _update_target_controls(self):
-        if self.command_select.value == 'move_form':
+        if self.command_select.value in ('modify_form', 'move_form'):
             self.target_mode.set_visibility(not self._current_form())
             self.target_label.set_visibility(not self._current_form())
         self.target_help.set_visibility(self._multiple_fields() or self._multiple_forms())

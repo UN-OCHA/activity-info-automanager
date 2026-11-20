@@ -342,8 +342,8 @@ class Applier:
         from .commands.move_form import MoveFormCommand
         from .commands.set_variable import SetVariableCommand
         command = getattr(command, 'command', command)
-        if isinstance(command, (WithFormCommand, ModifyFormCommand)) or (
-                isinstance(command, MoveFormCommand) and not command.current_form):
+        if isinstance(command, WithFormCommand) or (
+                isinstance(command, (ModifyFormCommand, MoveFormCommand)) and not command.current_form):
             return None
         if isinstance(command, SetVariableCommand):
             from .command_templates import command_parameters
@@ -499,7 +499,8 @@ class Applier:
                 if self.form_service is None:
                     return prepared.execute(current)
                 try:
-                    schema = (await self.workspace.select(prepared.form, self.form_service) if scope_member else
+                    schema = (current if isinstance(prepared, ModifyFormCommand) and prepared.current_form else
+                              await self.workspace.select(prepared.form, self.form_service) if scope_member else
                               await self.workspace.switch(prepared.form, self.form_service, current, self.related_schemas))
                 except FormSelectionError as exc:
                     return ExecutionResult.warning(current, str(exc), 'form_switch_failed', skipped=True)
@@ -508,7 +509,7 @@ class Applier:
                     scope_id, keys = scope_context
                     self.plan_builder.begin_scope(scope_id, keys)
                     self.plan_builder.select_form(self.workspace.key_for(schema), scope_id=scope_id)
-                else:
+                elif not (isinstance(prepared, ModifyFormCommand) and prepared.current_form):
                     self.plan_builder.select_form(self.workspace.key_for(schema))
                 context_warnings = await self._load_context_database(schema['databaseId'])
                 if isinstance(prepared, MoveFormCommand):
@@ -517,7 +518,7 @@ class Applier:
                     result = await self._move_form(replace(prepared, form=schema['id']), schema)
                     return replace(result, diagnostics=context_warnings + result.diagnostics)
                 if isinstance(prepared, ModifyFormCommand):
-                    result = apply_command_locally(PreparedCommand(replace(prepared, form=schema['id'])), schema,
+                    result = apply_command_locally(PreparedCommand(replace(prepared, form=None if prepared.current_form else schema['id'], form_pattern=None)), schema,
                         self.related_schemas, self.database_names, variables=variables)
                     if not result.has_errors and prepared.new_name is not None:
                         projection = await self._project_resource_label(schema, result.schema)
@@ -557,7 +558,7 @@ class Applier:
             self.executions[index] = CommandExecution('resolving', None, 'Resolving names...')
             self._publish_evaluation()
             if (isinstance(command, (WithFormCommand, ModifyFormCommand, MoveFormCommand))
-                    and not (isinstance(command, MoveFormCommand) and command.current_form)):
+                    and not (isinstance(command, (ModifyFormCommand, MoveFormCommand)) and command.current_form)):
                 next_variables = deepcopy(self.variables)
                 for name in self.assigned:
                     next_variables.pop(name, None)
@@ -758,7 +759,7 @@ class Applier:
 
     async def _project_resource_label(self, original, schema):
         # One label is exposed through two API representations. Only the schema
-        # endpoint writes it; the database change is a verified projection.
+        # endpoint writes it; the database change is a local projection.
         # Existing schema-only preview services may not expose database resources.
         if not hasattr(self.form_service, 'get_database_resources'):
             return

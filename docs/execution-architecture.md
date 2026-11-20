@@ -58,16 +58,19 @@ form-first writes. This accepted batching limitation does not imply arbitrary
 cross-form read/write consistency. Explicit prerequisites, endpoint/scope boundaries
 and deletion boundaries constrain grouping; there is no general dependency graph.
 Resource moves precede later schema edits and may batch compatible entries.
-MoveForm requires currentForm: true uses the current application form and retains
+MoveForm and ModifyForm require currentForm: true uses the current application form and retains
 the existing form scope and variables; false selects form/formPattern and establishes
 a scope as before. The creator declares this required boolean first and conditionally
 shows the form selector using ParameterDefinition.visible_when.
 
-Rename is one schema action with a ResourceProjection for the same label's
-database-tree representation. The projection changes canonical/display state and
-declares verification footprints; it is not another endpoint write. Shared-label
-actions seal adjacent groups so later schema edits/moves retain coherent predecessors.
-Explicit predecessor provenance includes the action that projected a resource.
+ModifyForm changes accumulate with compatible field edits in one schema action per
+form. Current-form edits retain the planner scope as well as the application scope.
+Rename maintains a local ResourceProjection for the database-tree label, keeping
+canonical/display state consistent without sealing schema candidates. Repeated
+renames extend the same candidate. Confirmation removes local projections and their
+footprints from executable actions; writes and recovery verify the schema alone.
+Endpoint transitions still seal candidates: schema edits before and after a move
+remain separate, while compatible moves within one database may batch.
 
 Identity materialization precedes confirmation and is retained for that attempt.
 Formula literals and historical preview identities are preserved. Execution cannot
@@ -81,12 +84,10 @@ before sending. It reads back on reported success and error, distinguishing
 intended, unchanged, divergent and unknown state. Receipts alone prove none of these.
 A reported error stops forward execution even when intended state is observed.
 
-Observations can retain related observations, including each receipt/version or
-structured read failure. Rename preflight and immediate checks cover the schema
-plus the resource label, existence and type. Post-write classification and recovery
-check both representations. A missing read makes the outcome unknown; inconsistent
-observed labels are divergent. One schema restoration compensates the shared label,
-with both representations verified and unrelated resource properties preserved.
+Observations can retain related observations, including receipts/versions and
+structured failures. Rename execution does not require a database-resource read:
+preflight, immediate checks, post-write classification and recovery use the form
+schema. Local database label projections are not execution evidence.
 
 RollbackLast skips proven unchanged attempts. RollbackAll reverses applicable
 actions. Unknown outcomes reconcile first; divergent outcomes do not establish

@@ -322,24 +322,29 @@ class PlanBuilder:
             if effect.projections:
                 if len({p.before.key for p in effect.projections}) != len(effect.projections):
                     raise PlanError('An action cannot project the same resource twice.')
-                self._seal('shared_property')
             self._schema(effect)
             if effect.projections:
-                action = self._actions[-1]
+                action = self._candidate(effect.key, ActionKind.FORM_SCHEMA_UPDATE)
+                projections = {p.before.key: p for p in action.projections}
                 dependencies = list(action.dependency_ids)
                 for projection in effect.projections:
                     expected = self._state_for(projection.before.key)
                     if expected is None or not _matches(expected, projection.before):
                         raise PlanError('Projection does not start at its projected predecessor.')
-                    previous = self._last_action(projection.before.key)
+                    # Local label projections do not order independent schema writes.
+                    # Preserve dependencies on actual database resource actions.
+                    previous = next((item.action_id for item in reversed(self._actions)
+                                     if item.key == projection.before.key and not item.is_noop), None)
                     if previous is not None:
                         dependencies.append(previous)
                     self._projected[projection.before.key] = projection.after
-                reads = tuple(f for projection in effect.projections for f in projection.footprints)
-                self._replace_action(replace(action, projections=effect.projections,
+                    prior = projections.get(projection.before.key)
+                    projections[projection.before.key] = replace(projection, before=prior.before) if prior else projection
+                projections = tuple(projections.values())
+                reads = tuple(f for projection in projections for f in projection.footprints)
+                self._replace_action(replace(action, projections=projections,
                     dependency_ids=_unique(dependencies), read_set=(*action.read_set, *reads),
                     write_set=(*action.write_set, *(replace(f, phase='after') for f in reads))))
-                self._seal('after_shared_property')
         else:
             if effect.key.kind != ResourceKind.DATABASE_RESOURCES:
                 raise PlanError('A resource patch requires a database resource collection.')

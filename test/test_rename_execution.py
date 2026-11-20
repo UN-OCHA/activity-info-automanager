@@ -1,4 +1,4 @@
-"""One shared label, one schema write, two observed representations."""
+"""Local label projections and schema-only execution and recovery."""
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
 import unittest
@@ -16,7 +16,7 @@ from test.form_command_runtime import install
 class RenameTests(unittest.IsolatedAsyncioTestCase):
     evaluate = fixtures.MoveFormTests.evaluate
 
-    async def prepare(self, text='ModifyForm(form="A", name="Renamed")', schemas=None):
+    async def prepare(self, text='ModifyForm(currentForm=False, form="A", name="Renamed")', schemas=None):
         manager, service = await self.evaluate(text, schemas)
         self.assertTrue(all(item.status == 'applied' for item in manager.executions),
                         [item.message for item in manager.executions])
@@ -42,59 +42,55 @@ class RenameTests(unittest.IsolatedAsyncioTestCase):
                 raise ValueError('Response lost after commit')
         service.put_form_schema = write
 
-    async def test_one_schema_request_and_both_immutable_observations_are_retained(self):
+    async def test_one_schema_request_and_schema_observations_only(self):
         prepared = await self.prepare()
         manager, service, _, _, attempt = prepared
+        self.assertEqual(attempt.plan.actions[0].action.projections, ())
         original_read = service.observe_resource
-        async def receipts(key):
-            observed = await original_read(key)
-            return replace(observed, receipt=EndpointReceipt(200, {}, '{}', version=key.kind.value))
-        service.observe_resource = receipts
-        self.assertEqual(len(attempt.plan.actions), 1)
-        self.assertEqual(attempt.plan.actions[0].action.kind, ActionKind.FORM_SCHEMA_UPDATE)
-        self.assertEqual(len(attempt.plan.actions[0].action.projections), 1)
+        async def schema_only(key):
+            self.assertEqual(key.kind, ResourceKind.FORM_SCHEMA)
+            return await original_read(key)
+        service.observe_resource = schema_only
         report = await self.run_prepared(prepared)
         self.assertEqual(report.status, 'success', report.messages)
         self.assertEqual(len(service.writes), 1)
         self.assertEqual(service.moves, [])
-        entry = report.journal[0]
-        self.assertEqual(entry.preimage.related[0].state.payload.entries['a']['label'], 'A')
-        self.assertEqual(entry.postimage.related[0].state.payload.entries['a']['label'], 'Renamed')
-        self.assertEqual(entry.postimage.related[0].receipt.version, 'database_resources')
-        service.resources['db']['a']['label'] = 'Later'
-        self.assertEqual(entry.postimage.related[0].state.payload.entries['a']['label'], 'Renamed')
-        with self.assertRaises(FrozenInstanceError):
-            entry.postimage.related = ()
+        self.assertEqual(report.journal[0].postimage.related, ())
+        self.assertEqual(manager.workspace.latest['a']['label'], 'Renamed')
+        display = manager.executions[0].display_state.tab_payloads()
+        self.assertEqual(display['a']['label'], 'Renamed')
+        self.assertEqual(next(row for row in display['database:db'] if row['id'] == 'a')['label'], 'Renamed')
 
-    async def test_rename_then_schema_edit_uses_the_renamed_predecessor(self):
-        prepared = await self.prepare('ModifyForm(form="A", name="Renamed")\nAddField(fieldCode="NEW", label="New")')
+    async def test_rename_then_schema_edit_share_one_schema_action(self):
+        prepared = await self.prepare('ModifyForm(currentForm=False, form="A", name="Renamed")\nAddField(fieldCode="NEW", label="New")')
         report = await self.run_prepared(prepared)
         self.assertEqual(report.status, 'success', report.messages)
-        self.assertEqual(len(report.journal), 2)
-        self.assertEqual(report.journal[1].preimage.state.payload.schema['label'], 'Renamed')
+        self.assertEqual(len(report.journal), 1)
+        self.assertEqual(report.journal[0].preimage.state.payload.schema['label'], 'A')
+        self.assertEqual(report.journal[0].postimage.state.payload.schema['elements'][0]['code'], 'NEW')
         self.assertEqual(prepared[1].resources['db']['a']['label'], 'Renamed')
 
     async def test_move_rename_edit_move_recover_in_actual_reverse_order(self):
         prepared = await self.prepare('''MoveForm(currentForm=False, form="A", folder="North")
-ModifyForm(form="A", name="Renamed")
+ModifyForm(currentForm=False, form="A", name="Renamed")
 AddField(fieldCode="NEW", label="New")
 MoveForm(currentForm=False, form="Renamed", folder="South")''')
         manager, service, _, _, attempt = prepared
         self.assertEqual([item.action.kind for item in attempt.plan.actions], [
             ActionKind.DATABASE_RESOURCE_PATCH, ActionKind.FORM_SCHEMA_UPDATE,
-            ActionKind.FORM_SCHEMA_UPDATE, ActionKind.DATABASE_RESOURCE_PATCH])
+            ActionKind.DATABASE_RESOURCE_PATCH])
         self.assertIn(attempt.plan.actions[1].action.action_id, attempt.plan.actions[-1].action.dependency_ids)
         service.error_after_move = 2
         report = await self.run_prepared(prepared, 'rollback_all')
         self.assertEqual(report.status, 'rolled_back_all', report.messages)
-        self.assertEqual(service.timeline, [('move', 'a', 'north'), ('schema', 'a'), ('schema', 'a'),
-            ('move', 'a', 'south'), ('move', 'a', 'north'), ('schema', 'a'), ('schema', 'a'), ('move', 'a', 'db')])
+        self.assertEqual(service.timeline, [('move', 'a', 'north'), ('schema', 'a'),
+            ('move', 'a', 'south'), ('move', 'a', 'north'), ('schema', 'a'), ('move', 'a', 'db')])
         self.assertEqual(service.schemas['a']['label'], 'A')
         self.assertEqual(service.schemas['a']['elements'], [])
         self.assertEqual(service.resources['db']['a']['label'], 'A')
 
     async def test_multiple_renames_keep_projections_ordered_and_restore_each_label(self):
-        prepared = await self.prepare('ModifyForm(formPattern="A|B", name="New ${form.name}")')
+        prepared = await self.prepare('ModifyForm(currentForm=False, formPattern="A|B", name="New ${form.name}")')
         self.fail_after_commit(prepared[1], {2})
         report = await self.run_prepared(prepared, 'rollback_all')
         self.assertEqual(report.status, 'rolled_back_all', report.messages)
@@ -102,21 +98,86 @@ MoveForm(currentForm=False, form="Renamed", folder="South")''')
         self.assertEqual(prepared[1].resources['db']['a']['label'], 'A')
         self.assertEqual(prepared[1].resources['db']['b']['label'], 'B')
 
+    async def test_multiple_modify_and_field_edits_share_one_action_per_form(self):
+        from test.test_modify_form import form
+        for current in (False, True):
+            for rename in (False, True):
+                with self.subTest(current=current, rename=rename):
+                    commands = []
+                    if current:
+                        commands.extend(['WithForm(formPattern="A|B")',
+                                         'AddField(fieldCode="before", label="Before")'])
+                    selector = 'currentForm=True' if current else 'currentForm=False, formPattern="A|B"'
+                    name = ', name="New ${form.name}"' if rename else ''
+                    commands.extend([f'ModifyForm({selector}, recordLabelFieldId="NAME"{name})',
+                                     'AddField(fieldCode="after", label="${form.name}")'])
+                    prepared = await self.prepare('\n'.join(commands), [form('a', 'A'), form('b', 'B')])
+                    manager, service, candidate, _, attempt = prepared
+                    self.assertEqual([a.key.identity for a in candidate.actions], ['a', 'b'])
+                    self.assertEqual(len(attempt.plan.actions), 2)
+                    self.assertTrue(all(len(a.application_ids) == (3 if current else 2)
+                                        for a in candidate.actions))
+                    result = manager.executions[-2]
+                    self.assertTrue(result.form_iterations)
+                    self.assertEqual(len(result.iterations), 2)
+                    self.assertEqual([child.schema['recordLabelFieldId'] for child in result.iterations],
+                                     ['a-name', 'b-name'])
+                    if rename:
+                        display = manager.executions[-1].display_state.tab_payloads()
+                        self.assertEqual([display[k]['label'] for k in ('a', 'b')], ['New A', 'New B'])
+                        entries = {row['id']: row for row in display['database:db']}
+                        self.assertEqual([entries[k]['label'] for k in ('a', 'b')], ['New A', 'New B'])
+                    report = await self.run_prepared(prepared)
+                    self.assertEqual(report.status, 'success', report.messages)
+                    self.assertEqual(len(service.writes), 2)
+                    self.assertEqual(service.moves, [])
+                    self.assertEqual(service.schemas['a']['recordLabelFieldId'], 'a-name')
+                    self.assertEqual(service.schemas['b']['elements'][-1]['label'], 'B')
+
+    async def test_repeated_scoped_renames_merge_and_compensate(self):
+        prepared = await self.prepare('''WithForm(formPattern="A|B")
+ModifyForm(currentForm=True, name="First ${form.name}")
+ModifyForm(currentForm=True, name="Final ${form.name}")
+AddField(fieldCode="NEW", label="New")''')
+        self.assertEqual(len(prepared[2].actions), 2)
+        self.fail_after_commit(prepared[1], {2})
+        report = await self.run_prepared(prepared, 'rollback_all')
+        self.assertEqual(report.status, 'rolled_back_all', report.messages)
+        self.assertEqual([key for key, _ in prepared[1].writes], ['a', 'b', 'b', 'a'])
+        self.assertEqual([prepared[1].schemas[k]['label'] for k in ('a', 'b')], ['A', 'B'])
+        self.assertEqual([prepared[1].resources['db'][k]['label'] for k in ('a', 'b')], ['A', 'B'])
+
+    async def test_scoped_move_seals_modify_and_field_edit_candidates(self):
+        prepared = await self.prepare('''ModifyForm(currentForm=False, formPattern="A|B", name="New ${form.name}")
+AddField(fieldCode="before", label="Before")
+MoveForm(currentForm=True, folder="North")
+AddField(fieldCode="after", label="After")''')
+        actions = prepared[2].actions
+        self.assertEqual([a.kind for a in actions], [ActionKind.FORM_SCHEMA_UPDATE,
+            ActionKind.FORM_SCHEMA_UPDATE, ActionKind.DATABASE_RESOURCE_PATCH,
+            ActionKind.FORM_SCHEMA_UPDATE, ActionKind.FORM_SCHEMA_UPDATE])
+        self.assertEqual(len(actions[2].patches), 2)
+        self.assertEqual([len(a.application_ids) for a in actions], [2, 2, 2, 1, 1])
+        report = await self.run_prepared(prepared)
+        self.assertEqual(report.status, 'success', report.messages)
+        self.assertEqual(prepared[1].timeline, [('schema', 'a'), ('schema', 'b'),
+            ('move', 'a', 'north'), ('move', 'b', 'north'), ('schema', 'a'), ('schema', 'b')])
+
     async def test_same_name_is_a_noop_without_a_write(self):
-        prepared = await self.prepare('ModifyForm(form="A", name="A")')
+        prepared = await self.prepare('ModifyForm(currentForm=False, form="A", name="A")')
         report = await self.run_prepared(prepared)
         self.assertEqual(report.status, 'success')
         self.assertEqual(prepared[1].writes, [])
         self.assertEqual(prepared[4].plan.actions, ())
 
-    async def test_stale_secondary_label_blocks_every_write(self):
+    async def test_stale_secondary_label_does_not_block_schema_write(self):
         prepared = await self.prepare()
         prepared[1].resources['db']['a']['label'] = 'Other'
         report = await self.run_prepared(prepared)
-        self.assertEqual(report.status, 'preflight_failed')
-        self.assertEqual(prepared[1].writes, [])
+        self.assertEqual(report.status, 'success')
+        self.assertEqual(len(prepared[1].writes), 1)
 
-    async def test_unreadable_secondary_postimage_is_unknown_and_never_invented(self):
+    async def test_unreadable_secondary_does_not_affect_schema_success(self):
         prepared = await self.prepare()
         service = prepared[1]
         original_read = service.observe_resource
@@ -126,13 +187,12 @@ MoveForm(currentForm=False, form="Renamed", folder="South")''')
             return await original_read(key)
         service.observe_resource = unreadable
         report = await self.run_prepared(prepared)
-        self.assertEqual(report.status, 'left')
-        self.assertEqual(report.journal[0].outcome, 'unknown')
-        self.assertEqual(report.journal[0].postimage.related[0].existence, Existence.UNKNOWN)
-        self.assertEqual(next(item for item in report.observations if item.key.kind == ResourceKind.DATABASE_RESOURCES).state, None)
+        self.assertEqual(report.status, 'success')
+        self.assertEqual(report.journal[0].postimage.related, ())
+        self.assertTrue(all(item.key.kind == ResourceKind.FORM_SCHEMA for item in report.observations))
         self.assertEqual(len(service.writes), 1)
 
-    async def test_unknown_secondary_reconciles_and_recovers_with_one_schema_write(self):
+    async def test_secondary_read_failure_is_not_consulted(self):
         prepared = await self.prepare()
         service = prepared[1]
         original_read = service.observe_resource
@@ -145,13 +205,12 @@ MoveForm(currentForm=False, form="Renamed", folder="South")''')
             return await original_read(key)
         service.observe_resource = once
         report = await self.run_prepared(prepared, 'rollback_all')
-        self.assertEqual(report.status, 'rolled_back_all', report.messages)
-        self.assertEqual(report.journal[0].outcome, 'unknown')
-        self.assertEqual(report.journal[0].recovery[0].message, 'intended')
-        self.assertEqual(len(service.writes), 2)
+        self.assertEqual(report.status, 'success', report.messages)
+        self.assertFalse(failed)
+        self.assertEqual(len(service.writes), 1)
         self.assertEqual(service.moves, [])
 
-    async def test_schema_only_success_with_mismatched_resource_label_is_divergent(self):
+    async def test_schema_success_ignores_mismatched_resource_label(self):
         prepared = await self.prepare()
         service = prepared[1]
         original_write = service.put_form_schema
@@ -160,19 +219,19 @@ MoveForm(currentForm=False, form="Renamed", folder="South")''')
             service.resources['db'][identity]['label'] = 'A'
         service.put_form_schema = inconsistent
         report = await self.run_prepared(prepared, 'rollback_all')
-        self.assertEqual(report.status, 'recovery_blocked')
-        self.assertEqual(report.journal[0].outcome, 'divergent')
+        self.assertEqual(report.status, 'success')
+        self.assertEqual(report.journal[0].outcome, 'intended')
         self.assertEqual(len(service.writes), 1)
 
-    async def test_concurrent_secondary_label_blocks_compensation(self):
+    async def test_compensation_checks_schema_only(self):
         prepared = await self.prepare()
         self.fail_after_commit(prepared[1], {1})
         async def choose(message):
             prepared[1].resources['db']['a']['label'] = 'Concurrent'
             return 'rollback_all'
         report = await self.run_prepared(prepared, choose)
-        self.assertEqual(report.status, 'recovery_blocked')
-        self.assertEqual(len(prepared[1].writes), 1)
+        self.assertEqual(report.status, 'rolled_back_all')
+        self.assertEqual(len(prepared[1].writes), 2)
 
     async def test_compensation_preserves_unowned_resource_changes(self):
         prepared = await self.prepare()
@@ -195,10 +254,10 @@ MoveForm(currentForm=False, form="Renamed", folder="South")''')
         self.assertEqual(report.status, 'recovery_failed')
         record = report.journal[0].recovery[-1]
         self.assertEqual(record.status, 'verified_restored')
-        self.assertEqual(record.observed.related[0].state.payload.entries['a']['label'], 'A')
+        self.assertEqual(record.observed.state.payload.schema['label'], 'A')
         self.assertIsNotNone(record.evidence.failure)
 
-    async def test_recovery_requires_both_representations_to_match(self):
+    async def test_recovery_verifies_schema_only(self):
         prepared = await self.prepare()
         service = prepared[1]
         original_write = service.put_form_schema
@@ -209,8 +268,8 @@ MoveForm(currentForm=False, form="Renamed", folder="South")''')
             service.resources['db'][identity]['label'] = 'Wrong'
         service.put_form_schema = wrong_restore
         report = await self.run_prepared(prepared, 'rollback_all')
-        self.assertEqual(report.status, 'recovery_failed')
-        self.assertEqual(report.journal[0].recovery[-1].status, 'failed')
+        self.assertEqual(report.status, 'rolled_back_all')
+        self.assertEqual(report.journal[0].recovery[-1].status, 'verified_restored')
 
     async def test_subform_rename_uses_the_same_shared_label_contract(self):
         schema = dict(fixtures.fixtures.form('a', 'A'), parentFormId='parent')
@@ -221,7 +280,7 @@ MoveForm(currentForm=False, form="Renamed", folder="South")''')
         self.assertEqual(prepared[1].resources['db']['a']['label'], 'Renamed')
 
     async def test_unchanged_rename_failure_rolls_back_the_prior_changed_action(self):
-        prepared = await self.prepare('AddField(fieldCode="NEW", label="New")\nModifyForm(form="A", name="Renamed")')
+        prepared = await self.prepare('AddField(fieldCode="NEW", label="New")\nWithForm(formPattern="A")\nModifyForm(currentForm=False, form="A", name="Renamed")')
         service = prepared[1]
         original_write = service.put_form_schema
         async def reject_second(identity, schema):
@@ -241,7 +300,7 @@ MoveForm(currentForm=False, form="Renamed", folder="South")''')
         service.resources['db']['a']['label'] = 'Inconsistent'
         with patch.object(fixtures.fixtures, 'MemoryService', return_value=service):
             manager, _ = await fixtures.fixtures.PreviewTests.evaluate(
-                self, [fixtures.fixtures.form('a', 'A')], 'ModifyForm(form="A", name="Renamed")')
+                self, [fixtures.fixtures.form('a', 'A')], 'ModifyForm(currentForm=False, form="A", name="Renamed")')
         self.assertEqual(manager.executions[0].status, 'error')
         self.assertEqual(manager.workspace.active_schema['label'], 'A')
         self.assertEqual(manager.candidate_plan.actions, ())
@@ -278,7 +337,7 @@ MoveForm(currentForm=False, form="Renamed", folder="South")''')
                 await callback(databases)(SimpleNamespace(args='db'))
                 await callback(forms)(SimpleNamespace(args='a'))
                 manager = managers[0]
-                manager.commands = parse_command_text('ModifyForm(form="A", name="Renamed")')
+                manager.commands = parse_command_text('ModifyForm(currentForm=False, form="A", name="Renamed")')
                 manager._evaluate_commands()
                 await manager._evaluation_task
                 manager.on_execute()
@@ -294,25 +353,26 @@ MoveForm(currentForm=False, form="Renamed", folder="South")''')
                 await manager._evaluation_task
                 service.resources['db']['a']['label'] = 'Later'
                 tabs = next(item for item in page.descendants() if isinstance(item, ui.tabs))
-                tabs.set_value('database:db')
+                tabs.set_value('a')
                 code = next(item for item in page.descendants() if isinstance(item, ui.code))
-                self.assertEqual(next(item for item in json.loads(code.content) if item['id'] == 'a')['label'], 'Renamed')
+                self.assertEqual(json.loads(code.content)['label'], 'Renamed')
 
     async def test_rename_and_pending_record_label_share_the_existing_allocation(self):
-        prepared = await self.prepare('AddField(fieldCode="NEW", label="New")\nModifyForm(form="A", name="Renamed", recordLabelFieldId="NEW")')
+        prepared = await self.prepare('AddField(fieldCode="NEW", label="New")\nModifyForm(currentForm=False, form="A", name="Renamed", recordLabelFieldId="NEW")')
         report = await self.run_prepared(prepared)
         self.assertEqual(report.status, 'success', report.messages)
         service = prepared[1]
-        self.assertEqual(service.writes[0][1]['elements'][0]['id'], service.writes[1][1]['recordLabelFieldId'])
-        self.assertFalse(service.writes[1][1]['recordLabelFieldId'].startswith('pending-'))
+        self.assertEqual(len(service.writes), 1)
+        self.assertEqual(service.writes[0][1]['elements'][0]['id'], service.writes[0][1]['recordLabelFieldId'])
+        self.assertFalse(service.writes[0][1]['recordLabelFieldId'].startswith('pending-'))
         self.assertEqual(service.resources['db']['a']['label'], 'Renamed')
 
-    async def test_confirmation_rejects_missing_shared_label_verification_coverage(self):
+    async def test_confirmation_excludes_local_projection_verification(self):
         prepared = await self.prepare()
         candidate = prepared[2]
         action = candidate.actions[0]
         projection = replace(action.projections[0], footprints=action.projections[0].footprints[1:])
         malformed = replace(candidate, actions=(replace(action, projections=(projection,)),))
-        with self.assertRaisesRegex(PlanError, 'verification'):
-            ConfirmationAttempt(malformed, prepared[3])
+        attempt = ConfirmationAttempt(malformed, prepared[3])
+        self.assertEqual(attempt.plan.actions[0].action.projections, ())
         self.assertEqual(prepared[1].writes, [])

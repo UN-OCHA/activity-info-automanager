@@ -126,13 +126,16 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
         before, after = (replace(getattr(action, phase), payload=FormPayload(
             schema_with_ids(remap_schema(readable[(action.action_id, phase)], owner), materialized_related)))
             for phase in ('before', 'after'))
-        actions.append(replace(action, before=before, after=after,
+        # Database labels are local projections. Schema actions execute and
+        # recover against the schema endpoint alone.
+        projection_keys = {projection.before.key for projection in action.projections}
+        actions.append(replace(action, before=before, after=after, projections=(),
             start_member_ids=tuple(mapped(owner, value) for value in action.start_member_ids),
             created_member_ids=tuple(mapped(owner, value) for value in action.created_member_ids),
             deleted_member_id=mapped(owner, action.deleted_member_id),
             prerequisites=tuple(member(ref) for ref in action.prerequisites),
-            read_set=tuple(replace(f, member_id=mapped(f.key.identity, f.member_id)) for f in action.read_set),
-            write_set=tuple(replace(f, member_id=mapped(f.key.identity, f.member_id)) for f in action.write_set)))
+            read_set=tuple(replace(f, member_id=mapped(f.key.identity, f.member_id)) for f in action.read_set if f.key not in projection_keys),
+            write_set=tuple(replace(f, member_id=mapped(f.key.identity, f.member_id)) for f in action.write_set if f.key not in projection_keys)))
     materialized = replace(candidate, actions=tuple(actions), member_provenance=tuple(
         replace(row, member=member(row.member)) for row in candidate.member_provenance))
     reviewed = []
