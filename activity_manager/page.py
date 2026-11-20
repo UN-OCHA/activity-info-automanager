@@ -277,8 +277,8 @@ def connection_page():
         if snapshot is not None:
             active = (('database:' if snapshot.preferred_key.kind.value == 'database_resources' else '') +
                       snapshot.preferred_key.identity) if snapshot.preferred_key is not None else None
-            result_forms = snapshot.legacy_tabs()
-            result_metadata = snapshot.legacy_metadata()
+            result_forms = snapshot.tab_payloads()
+            result_metadata = snapshot.tab_metadata()
             result_context = thaw(snapshot.related_schemas)
             result_database_names = thaw(snapshot.database_names)
         else:

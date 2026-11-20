@@ -274,7 +274,7 @@ class CommandListManager:
         return self.workspace.active_schema
 
     def target_forms(self):
-        return tuple(self.results[-1].display_state.legacy_forms().values()) if self.target_schema() is not None else None
+        return tuple(self.results[-1].display_state.form_payloads().values()) if self.target_schema() is not None else None
 
 
     def set_busy(self, busy: bool) -> None:

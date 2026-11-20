@@ -331,7 +331,7 @@ class PlanApplierTests(unittest.IsolatedAsyncioTestCase):
             'AddField(fieldCode="one", label="One")\nAddField(fieldCode="two", label="Two")', progress=progress)
         earlier, display = saved[0]
         self.assertEqual(len(earlier.actions[0].after.payload.schema['elements']), 1)
-        self.assertEqual(len(display.legacy_forms()['a']['elements']), 1)
+        self.assertEqual(len(display.form_payloads()['a']['elements']), 1)
         self.assertEqual(len(engine.candidate_plan.actions[0].after.payload.schema['elements']), 2)
         self.assertEqual(earlier.actions[0].action_id, engine.candidate_plan.actions[0].action_id)
 

@@ -153,7 +153,7 @@ class AsyncApplierTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('leak', engine.reference_defaults)
         self.assertNotIn('leak', engine.resolution_cache)
         self.assertEqual(engine.variables, {})
-        self.assertEqual(engine.results[0].display_state.legacy_forms()['a']['label'], 'A')
+        self.assertEqual(engine.results[0].display_state.form_payloads()['a']['label'], 'A')
 
     async def test_raised_resolution_error_retains_the_transformed_candidate(self):
         engine = Applier(form('a', 'A'), parse_command_text('AddField(fieldCode="rejected", label="Rejected")'),

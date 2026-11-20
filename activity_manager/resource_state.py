@@ -1,7 +1,7 @@
 """Canonical resource revisions and successful remote-read evidence.
 
-The mutable owner publishes immutable values. SDK objects and legacy schema visits
-are boundary representations, never the source of canonical state.
+The mutable owner publishes immutable values. SDK objects and detached display
+dictionaries are boundary representations, never the source of canonical state.
 """
 
 from dataclasses import dataclass, field, replace

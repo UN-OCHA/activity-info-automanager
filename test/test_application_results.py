@@ -33,14 +33,14 @@ class DisplaySnapshotTests(unittest.TestCase):
         issue = Diagnostic('warning', 'Pinned', ('elements', 0))
         builder = DisplaySnapshotBuilder(3)
         before = builder.capture(state, related, databases, {'a': [issue]}, labels=labels)
-        names = before.legacy_metadata()['a'][0]
+        names = before.tab_metadata()['a'][0]
         self.assertIn('Remote/People:Alice', names['elements'][0]['defaultValue'])
         self.assertEqual(names['elements'][1]['typeParameters']['formula'], 'REF.OLD')
         related['people']['elements'][0]['code'] = 'NEW'
         databases['remote'], labels[('people', 'r')] = 'Renamed', 'Bob'
         state.put_form(form('a', 'Changed'))
         builder.capture(state, related, databases, {}, labels=labels)
-        self.assertEqual(before.legacy_metadata()['a'][0], names)
+        self.assertEqual(before.tab_metadata()['a'][0], names)
         self.assertEqual(before.resources[0].annotations, (issue,))
         self.assertEqual(before.affected_keys, (ResourceKey.form('a'),))
 
@@ -95,7 +95,7 @@ class ResultIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await manager._evaluation_task
         return manager, container
 
-    async def test_concrete_results_survive_legacy_input_and_output_mutation(self):
+    async def test_concrete_results_survive_execution_input_and_output_mutation(self):
         template = '$' + '{vars.title}'
         manager, _ = await self.evaluate(
             'SetVariable(name="title", method="literal", value="Added")\n'
@@ -109,8 +109,8 @@ class ResultIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.results[-1].applications[0].command.member_ids, ('pending-field:new',))
         manager.executions[1].schema['elements'].clear()
         manager.executions[1].form_snapshots[0]['elements'].clear()
-        authored.display_state.legacy_forms()['a']['elements'].clear()
-        self.assertEqual(actual.display_state.legacy_forms()['a']['elements'][0]['label'], 'Added')
+        authored.display_state.form_payloads()['a']['elements'].clear()
+        self.assertEqual(actual.display_state.form_payloads()['a']['elements'][0]['label'], 'Added')
         self.assertEqual(manager.workspace.state.forms['a']['elements'], [])
         self.assertTrue(actual.display_state.resources[0].state.payload.schema['elements'][0]['id'].startswith('pending-field:'))
 
@@ -157,7 +157,7 @@ class ResultIntegrationTests(unittest.IsolatedAsyncioTestCase):
         before, target = manager.results[-1].display_state, manager.target_forms()
         self.assertIsNone(manager.enrich_current_display(before.snapshot_id, before.generation - 1, {}))
         enriched = manager.enrich_current_display(before.snapshot_id, before.generation, {('people', 'r'): 'Alice'})
-        self.assertIn('Alice', enriched.legacy_metadata()['a'][0]['elements'][0]['defaultValue'])
+        self.assertIn('Alice', enriched.tab_metadata()['a'][0]['elements'][0]['defaultValue'])
         self.assertNotIn(('people', 'r'), before.record_labels)
         self.assertEqual(manager.target_forms(), target)
         self.assertIsNone(manager.enrich_current_display(before.snapshot_id, before.generation, {}))
@@ -165,7 +165,7 @@ class ResultIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await manager._evaluation_task
         self.assertIsNone(manager.enrich_current_display(enriched.snapshot_id, enriched.generation, {}))
 
-    async def test_historical_ui_ignores_later_context_and_legacy_payload_mutations(self):
+    async def test_historical_ui_ignores_later_context_and_execution_payload_mutations(self):
         related = {'people': form('people', 'People', elements=[{'id': 'name', 'code': 'OLD', 'type': 'FREE_TEXT'}])}
         source = form('a', 'A', elements=[
             {'id': 'ref', 'code': 'REF', 'type': 'reference', 'typeParameters': {'range': [{'formId': 'people'}]}},
@@ -195,5 +195,5 @@ class ResultIntegrationTests(unittest.IsolatedAsyncioTestCase):
             'DeleteField(fieldCode="missing")\nSetVariable(name="x", method="literal", value="v")',
             [source], related={'people': form('people', 'People')}, resolver=resolver)
         for result in manager.results:
-            self.assertIn('Alice', result.display_state.legacy_metadata()['a'][0]['elements'][0]['defaultValue'])
+            self.assertIn('Alice', result.display_state.tab_metadata()['a'][0]['elements'][0]['defaultValue'])
         self.assertEqual(resolver.await_count, 1)

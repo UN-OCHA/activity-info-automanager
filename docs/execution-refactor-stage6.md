@@ -60,9 +60,10 @@ resource actions, preserving the shared immutable journal, receipts and report.
 DisplayState exposes independent database-resource tabs through its UI adapter.
 Resource snapshots retain their own entries/order/properties across later moves;
 changed-resource tabs are preferred for moves, and subsequent schema edits prefer
-their form tab. Selection does not change application context. Schema-only legacy
-display consumers retain legacy_forms; the page uses legacy_tabs. Report snapshots
-render either payload kind and remain pinned through cache clearing/reevaluation.
+their form tab. Selection does not change application context. Schema-only
+display consumers use form_payloads; the page uses tab_payloads (current helper
+names after cleanup). Report snapshots render either payload kind and remain
+pinned through cache clearing/reevaluation.
 
 No form_move_execution.py adapter was introduced into this worktree. Its preserved
 original copy remains untouched; the active runtime has no caller or synthetic

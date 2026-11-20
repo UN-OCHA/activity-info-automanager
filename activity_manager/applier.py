@@ -286,7 +286,7 @@ class Applier:
         if current.status not in EXECUTABLE_STATUSES or display is None or display.snapshot_id != snapshot_id:
             return None
         enriched = display.enrich(labels)
-        metadata = enriched.legacy_metadata()
+        metadata = enriched.tab_metadata()
         identity = (current.schema or {}).get('id')
         children = tuple(replace(child, display_state=enriched,
                                  names_schema=metadata.get((child.schema or {}).get('id'), (None, ()))[0])

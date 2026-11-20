@@ -39,6 +39,9 @@ Apply publishes state, variables, identities, effects and planning together afte
 successful transformation and required resolution. Failure retains preceding
 published state; rejected candidates are separate diagnostic attachments.
 Historical display context is pinned; inspecting a tab changes no application state.
+DisplayState.form_payloads() returns detached form-schema dictionaries;
+tab_payloads() includes database-resource tabs, and tab_metadata() supplies their
+pinned names and annotations. Mutating returned payloads cannot change the snapshot.
 
 Apply is command-first across forms. Compatible schema effects may accumulate as
 form-first writes. This accepted batching limitation does not imply arbitrary

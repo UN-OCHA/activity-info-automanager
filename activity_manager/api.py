@@ -180,7 +180,8 @@ class ActivityInfoService:
 
         The generated detailed helper parses before returning and loses response
         evidence on malformed JSON. Keep this small boundary against client 2.0.4.
-        Legacy UI requests continue using _request until the executor cutover.
+        Executor observations and writes use this evidence boundary;
+        ordinary service calls use _request.
         """
         if self._http_client.is_closed:
             return None, EndpointFailure(FailureKind.UNAVAILABLE, 'The connection is closed.')

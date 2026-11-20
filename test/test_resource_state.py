@@ -68,7 +68,7 @@ class ResourceStateTests(unittest.TestCase):
         self.assertNotIn(key, state.baselines.entries)
         state.mark_affected(key)
         unknown = DisplaySnapshotBuilder(1).capture(state, {}, {}, {})
-        self.assertEqual(unknown.legacy_forms(), {})
+        self.assertEqual(unknown.form_payloads(), {})
         self.assertEqual(unknown.resources[0].state.load_status, LoadStatus.UNAVAILABLE)
         with self.assertRaises(ValueError):
             BaselineEvidence(key, Existence.UNKNOWN)
@@ -95,7 +95,7 @@ class ResourceStateTests(unittest.TestCase):
         display = DisplaySnapshotBuilder(1).capture(state, {}, {}, {})
         self.assertEqual(display.resources[0].state, first)
         self.assertEqual(display.affected_keys, (ResourceKey.database('one'), ResourceKey.database('two')))
-        self.assertEqual(display.legacy_forms(), {})
+        self.assertEqual(display.form_payloads(), {})
         with self.assertRaises(ValueError):
             DatabaseResourcesPayload(source, ('a', 'a'))
         with self.assertRaises(TypeError):
@@ -110,7 +110,7 @@ class ResourceStateTests(unittest.TestCase):
         self.assertEqual(state.resource_order, (ResourceKey.form('a'), ResourceKey.form('related')))
         self.assertEqual(display.affected_keys, (ResourceKey.form('a'),))
         self.assertIn('related', display.related_schemas)
-        display.legacy_forms()['a']['label'] = 'mutated'
+        display.form_payloads()['a']['label'] = 'mutated'
         self.assertEqual(state.forms['a']['label'], 'A')
         self.assertEqual(state.active_form_key, ResourceKey.form('a'))
 

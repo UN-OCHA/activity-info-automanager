@@ -1,4 +1,4 @@
-"""Immutable application results and the temporary legacy UI boundary."""
+"""Immutable application results and detached display projections."""
 
 from dataclasses import dataclass, field, replace
 from uuid import uuid4
@@ -96,17 +96,19 @@ class DisplayState:
     def affected_keys(self):
         return tuple(resource.key for resource in self.resources)
 
-    def legacy_forms(self):
-        """Fresh dictionaries for NiceGUI; edits cannot feed back into the snapshot."""
+    def form_payloads(self):
+        """Return detached form-schema payloads keyed by form identity."""
         return {item.key.identity: item.state.payload.to_dict() for item in self.resources
                 if item.key.kind == ResourceKind.FORM_SCHEMA and item.state.payload is not None}
 
-    def legacy_tabs(self):
+    def tab_payloads(self):
+        """Return detached form and database payloads keyed by display tab identity."""
         return {(('database:' if item.key.kind == ResourceKind.DATABASE_RESOURCES else '') + item.key.identity):
                 display_payload(item.state) for item in self.resources
                 if item.state.payload is not None}
 
-    def legacy_metadata(self):
+    def tab_metadata(self):
+        """Return detached names and immutable annotations keyed by display tab identity."""
         return {(('database:' if item.key.kind == ResourceKind.DATABASE_RESOURCES else '') + item.key.identity):
                 (thaw(item.names), item.annotations) for item in self.resources
                 if item.state.payload is not None}
@@ -186,7 +188,7 @@ class DisplaySnapshotBuilder:
 
 
 def adapt_authored_result(authored, execution, generation, *, plan=None):
-    """Keep legacy cards while publishing separate authored and actual results."""
+    """Build immutable authored and actual results from an execution summary."""
     if execution.iterations:
         leaves = execution.iterations
     elif execution.field_iterations or execution.form_iterations or execution.schema is None:
