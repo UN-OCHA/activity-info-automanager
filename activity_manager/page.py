@@ -24,6 +24,23 @@ from .application_results import DisplayResource, DisplayState, DisplayTab, disp
 from .resource_state import ResourceKey, ResourceKind
 
 
+def ordered_result_tabs(tabs):
+    """Sort databases and their form children by their displayed names."""
+    tabs = sorted(tabs, key=lambda tab: (tab.label.casefold(), tab.identity))
+    databases = [tab for tab in tabs if tab.key.kind == ResourceKind.DATABASE_RESOURCES]
+    forms = [tab for tab in tabs if tab.key.kind == ResourceKind.FORM_SCHEMA]
+    grouped = set()
+    ordered = []
+    for database in databases:
+        ordered.append((database, False))
+        for form in forms:
+            if form.payload.get('databaseId') == database.key.identity:
+                ordered.append((form, True))
+                grouped.add(form.identity)
+    ordered.extend((form, False) for form in forms if form.identity not in grouped)
+    return ordered
+
+
 def connection_page():
     state_store = AppStateStore()
     restoring_state = False
@@ -134,6 +151,50 @@ def connection_page():
             width: 100%;
         }
         .result-code u { text-decoration: underline; text-underline-offset: 3px; }
+        .result-tabs { width: 240px; min-height: 0; overflow: hidden; }
+        .result-tabs .q-tabs__content {
+            min-height: 0;
+            justify-content: flex-start;
+            overflow-x: hidden;
+            overflow-y: auto;
+            scrollbar-width: auto;
+        }
+        .result-tabs .q-tabs__content::-webkit-scrollbar { display: block; width: 8px; }
+        .result-tabs .q-tabs__arrow { display: none; }
+        .result-tabs .q-tab {
+            flex: none;
+            justify-content: flex-start;
+            padding: 8px;
+            min-height: 60px;
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+            text-transform: none;
+            opacity: 1;
+        }
+        .result-tabs .q-tab--active {
+            background-color: #bfdbfe;
+            border-color: #3b82f6;
+        }
+        /* Quasar's vertical tab container uses display: block, so gap has no effect. */
+        .result-tabs .q-tab + .q-tab { margin-top: 0.5rem; }
+        .result-tabs .q-tab__indicator { width: 4px; }
+        .result-tabs .q-tab__label { display: none; }
+        .result-tabs .q-tab__content { width: 100%; min-width: 0; align-items: flex-start; }
+        .result-tabs .result-tab-name {
+            white-space: normal;
+            overflow-wrap: anywhere;
+            text-align: left;
+        }
+        .result-tabs .result-tab-child { margin-left: 20px; overflow: visible; }
+        .result-tabs .result-tab-child::before {
+            content: '';
+            position: absolute;
+            left: -20px;
+            top: -5px;
+            bottom: -5px;
+            border-left: 2px solid #cbd5e1;
+        }
         .result-code mark {
             color: inherit;
             background-color: #fef3c7;
@@ -330,8 +391,11 @@ def connection_page():
                               **{identity: thaw(tab.payload) for identity, tab in result_resources.items()}}
         result_tabs.clear()
         with result_tabs:
-            for identity, tab in result_resources.items():
-                ui.tab(identity, label=tab.label)
+            for tab, child in ordered_result_tabs(result_resources.values()):
+                with ui.tab(tab.identity, label=tab.label).classes('result-tab-child' if child else ''):
+                    ui.label('Database' if tab.key.kind == ResourceKind.DATABASE_RESOURCES else 'Form').classes(
+                        'text-xs text-blue-700 normal-case')
+                    ui.label(tab.label).classes('result-tab-name text-sm normal-case')
         result_tabs.set_visibility(bool(result_resources))
         identity = active if active in result_resources else next(iter(result_resources), None)
         result_tabs.set_value(identity)
@@ -768,7 +832,7 @@ def connection_page():
             ui.separator()
             schema_status = ui.label('').classes('text-sm text-red-700')
             with ui.row().classes('result-body flex-nowrap gap-2'):
-                result_tabs = ui.tabs(on_change=lambda event: select_result_resource(event.value)).props('vertical dense').classes('shrink-0 max-w-40 h-full overflow-auto')
+                result_tabs = ui.tabs(on_change=lambda event: select_result_resource(event.value)).props('vertical dense').classes('result-tabs shrink-0 h-full')
                 with ui.element('div').classes('relative grow min-w-0 h-full'):
                     schema_placeholder = ui.label(
                         'Select a form to load its schema.'
