@@ -35,6 +35,16 @@ class DatabaseListbox(ui.element):
             for database_id, name in options.items():
                 TextElement(tag='option', text=name).props['value'] = database_id
 
+    def set_value(self, value: str | None) -> None:
+        self.value = value if value in self.options else None
+        for option in self.default_slot.children:
+            if option.props.get('value') == (self.value or ''):
+                option.props['selected'] = True
+            else:
+                option.props.pop('selected', None)
+            option.update()
+        self.update()
+
     def disable(self) -> None:
         self.props['disabled'] = True
         self.update()

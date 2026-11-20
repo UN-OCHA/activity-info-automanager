@@ -7,6 +7,7 @@ from dataclasses import replace
 
 from nicegui import context
 
+from .app_state import AppStateStore
 from .api import DEFAULT_BASE_URL, ActivityInfoService
 from .command_creator import CommandCreatorRenderer, field_codes_from_schema
 from .schema_names import readable_resource, load_default_record_labels, unresolved_formula_references
@@ -24,6 +25,19 @@ from .resource_state import ResourceKey, ResourceKind
 
 
 def connection_page():
+    state_store = AppStateStore()
+    restoring_state = False
+
+    def save_state():
+        if restoring_state:
+            return
+        try:
+            state_store.save(api_token=token.value or '', dbid=databases.value,
+                             formid=forms.value,
+                             commands='\n'.join(command.to_syntax() for command in command_list.commands))
+        except (OSError, ValueError):
+            console_message.set_text('Application state could not be saved.')
+
     ui.add_css('''
         .nicegui-content {
             padding: 0 !important;
@@ -587,13 +601,14 @@ def connection_page():
 
     async def load_schema():
         nonlocal source_schema
+        save_state()
         clear_schema()
         request = schema_request
         if not forms.value or not service:
             return
         selected_form_id = forms.value
         selected_service = service
-        schema_status.set_text('Loading schemaÃ¢â‚¬Â¦')
+        schema_status.set_text('Loading schema...')
         try:
             related = await selected_service.get_form_tree(selected_form_id)
             data = related.get(selected_form_id)
@@ -628,10 +643,11 @@ def connection_page():
 
     async def load_forms():
         clear_forms()
+        save_state()
         request = form_request
         if not databases.value or not service:
             return
-        form_status.set_text('Loading formsÃ¢â‚¬Â¦')
+        form_status.set_text('Loading forms...')
         try:
             options = await service.get_forms(databases.value)
             if request == form_request:
@@ -651,7 +667,10 @@ def connection_page():
         status.set_text('Connect to load databases.')
 
     async def credentials_changed():
+        if restoring_state:
+            return
         clear_databases()
+        save_state()
         await close_service()
 
     async def connect():
@@ -659,7 +678,7 @@ def connection_page():
         clear_databases()
         for control in (base_url, token, button):
             control.disable()
-        status.set_text('Loading databasesÃ¢â‚¬Â¦')
+        status.set_text('Loading databases...')
         try:
             await close_service()
             service = ActivityInfoService(base_url.value, token.value)
@@ -744,6 +763,7 @@ def connection_page():
                 form_service=PreviewFormService(),
                 on_selection_change=selection_changed,
                 on_execute=open_execute_confirmation,
+                on_commands_change=save_state,
                 on_text_mode_change=text_mode_changed,
             )
 
@@ -766,3 +786,35 @@ def connection_page():
             ui.button('OK', on_click=execute_confirmed).props('color=primary')
 
     context.client.on_delete(close_service)
+
+    async def restore_state():
+        nonlocal restoring_state
+        restoring_state = True
+        try:
+            try:
+                saved, warning = state_store.load()
+            except (OSError, ValueError):
+                console_message.set_text('Saved application state could not be read.')
+                return
+            if saved is None:
+                return
+            try:
+                token.set_value(saved['api_token'])
+                await asyncio.sleep(0)
+                if saved['api_token']:
+                    await connect()
+                    if saved.get('dbid') in databases.options:
+                        databases.set_value(saved['dbid'])
+                        await load_forms()
+                        if saved.get('formid') in forms.options:
+                            forms.set_value(saved['formid'])
+                            await load_schema()
+            finally:
+                command_list.advanced_draft = saved.get('commands', '')
+                command_list._apply_text()
+                if warning:
+                    console_message.set_text(warning)
+        finally:
+            restoring_state = False
+
+    ui.timer(0, restore_state, once=True)

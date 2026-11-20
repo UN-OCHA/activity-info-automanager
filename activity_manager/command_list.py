@@ -31,6 +31,7 @@ class CommandListManager:
         *,
         on_selection_change=None,
         on_execute=None,
+        on_commands_change=None,
         on_text_mode_change=None,
         resolve_schema=None,
         lookup_variable=None,
@@ -60,6 +61,7 @@ class CommandListManager:
         self.advanced_draft = ''
         self.stored_text = ''
         self.on_selection_change = on_selection_change
+        self.on_commands_change = on_commands_change
         self.on_execute = on_execute
         self.on_text_mode_change = on_text_mode_change
         self.busy = False
@@ -504,6 +506,8 @@ class CommandListManager:
         """Replace Text-view content with the canonical List serialization."""
         self.advanced_draft = '\n'.join(command.to_syntax() for command in self.commands)
         self.advanced_editor.set_value(self.advanced_draft)
+        if self.on_commands_change:
+            self.on_commands_change()
 
     def _notify_selection(self) -> None:
         if not self.on_selection_change:
