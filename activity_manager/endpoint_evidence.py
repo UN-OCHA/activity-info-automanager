@@ -64,5 +64,6 @@ class Observation:
 
     @property
     def complete(self):
-        return (self.existence == Existence.PRESENT and self.failure is None
+        return ((self.existence == Existence.PRESENT and self.failure is None
+                 or self.existence == Existence.ABSENT and self.failure is not None and self.failure.kind == FailureKind.MISSING)
                 and all(item.complete for item in self.related))

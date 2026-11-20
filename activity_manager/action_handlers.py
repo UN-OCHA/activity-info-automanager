@@ -6,7 +6,7 @@ from typing import Protocol
 from .endpoint_evidence import Observation, WriteEvidence
 from .immutable import freeze, thaw
 from .planning import ActionKind, ApiAction, PlanError, Footprint
-from .resource_state import Existence, FormPayload, DatabaseResourcesPayload, ResourceState
+from .resource_state import Existence, Lifecycle, FormPayload, DatabaseResourcesPayload, ResourceState
 from .schema_change import SchemaComparison, compare_schemas, _as_form_schema
 
 
@@ -132,3 +132,30 @@ def compare_resource_footprints(expected, observed, footprints):
         if not matches:
             differences.append(f'{footprint.member_id or expected.key.identity}:{".".join(footprint.path)} differs')
     return SchemaComparison(not differences, '\n'.join(differences))
+
+
+class AddFormHandler(SchemaHandler):
+    """Creation has an absent predecessor and a fixed resource-deletion compensation."""
+
+    def compare(self, expected, observed):
+        if expected.lifecycle == Lifecycle.DELETED:
+            return SchemaComparison(observed.key == expected.key and observed.existence == Existence.ABSENT,
+                                    'Expected the form to be absent.')
+        return super().compare(expected, observed)
+
+    def encode_write(self, action):
+        schema = action.after.payload.to_dict()
+        _as_form_schema(schema, 'target')
+        database = schema['databaseId']
+        resource = next(p.after.payload.entries[action.key.identity] for p in action.projections
+                        if p.after.key.identity == database)
+        return ResourceRequest(database, {'formResource': thaw(resource), 'formClass': schema})
+
+    async def write(self, request):
+        payload = thaw(request.schema)
+        if 'resourceDeletions' in payload:
+            return await self.service.write_resources_evidence(request.database_id, payload)
+        return await self.service.write_add_form_evidence(request.database_id, payload)
+
+    def recovery_request(self, action, preimage):
+        return ResourceRequest(action.after.payload.schema['databaseId'], {'resourceDeletions': [action.key.identity]})

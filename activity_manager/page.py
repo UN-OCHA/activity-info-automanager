@@ -258,9 +258,9 @@ def connection_page():
                     data = matches[0]
         creator.set_suggestions('reference_field_codes', field_codes_from_schema(data))
         command_key = creator.command_select.value
-        if command_key not in ('modify_form', 'move_form'):
+        if command_key not in ('add_form', 'modify_form', 'move_form'):
             return
-        moving = command_key == 'move_form'
+        moving = command_key in ('add_form', 'move_form')
         multiple = creator._multiple_forms()
         source = 'folder_paths' if moving else 'form_field_codes'
         creator.set_suggestions(source, [])
@@ -268,7 +268,7 @@ def connection_page():
         evaluation = command_list._evaluation_version
         if moving:
             active_database_id = command_list.workspace.state.active_database_id
-            current_form = creator._current_form()
+            current_form = command_key == 'add_form' or creator._current_form()
             selected = None if current_form else creator.controls['form'].value
             database_id = active_database_id
             try:
@@ -290,7 +290,7 @@ def connection_page():
                         and evaluation == command_list._evaluation_version
                         and creator.command_select.value == command_key
                         and creator._multiple_forms() == multiple
-                        and creator._current_form() == current_form
+                        and (command_key == 'add_form' or creator._current_form() == current_form)
                         and (None if current_form else creator.controls['form'].value) == selected
                         and command_list.workspace.state.active_database_id == active_database_id):
                     creator.set_suggestions(source, suggestions)
@@ -524,11 +524,11 @@ def connection_page():
     async def choose_recovery(diff_summary: str):
         with ui.dialog() as dialog, ui.card().classes('w-full max-w-3xl'):
             dialog.props('persistent')
-            ui.label('Form schema application did not fully succeed.').classes(
+            ui.label('Execution did not fully succeed.').classes(
                 'text-lg font-medium text-red-700'
             )
             ui.label('Execution has stopped. Restore the last update with a known or possible change, or restore all updates in reverse order. Unchanged attempts are skipped. Unknown outcomes require reconciliation; divergent or concurrent changes block automatic recovery.')
-            ui.label('Differences from the expected schema:')
+            ui.label('Execution details:')
             ui.label(diff_summary).classes(
                 'w-full max-h-80 overflow-y-auto whitespace-pre-wrap break-all '
                 'font-mono text-sm bg-slate-100 rounded p-2'

@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime, timezone
 from enum import StrEnum
 
-from .action_handlers import SchemaHandler, PersistedFieldDeleteHandler, ResourceHandler, compare_resource_footprints
+from .action_handlers import AddFormHandler, SchemaHandler, PersistedFieldDeleteHandler, ResourceHandler, compare_resource_footprints
 from .endpoint_evidence import EndpointFailure, FailureKind, Observation, WriteEvidence
 from .immutable import thaw
 from .planning import ActionKind, PlanError
@@ -88,9 +88,32 @@ class Executor:
             return self.handler_factory(action)
         if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
             return ResourceHandler(self.service, action)
-        cls = PersistedFieldDeleteHandler if action.kind == ActionKind.PERSISTED_FIELD_DELETE else SchemaHandler
+        cls = AddFormHandler if action.kind == ActionKind.FORM_CREATE else PersistedFieldDeleteHandler if action.kind == ActionKind.PERSISTED_FIELD_DELETE else SchemaHandler
         return cls(self.service, related_schemas=thaw(self.plan.related_schemas),
                    reference_defaults=thaw(self.plan.reference_defaults))
+
+    @staticmethod
+    def action_label(action):
+        if action.key.kind == ResourceKind.FORM_SCHEMA:
+            label = action.after.payload.schema.get('label') or action.key.identity
+            operation = 'Add form' if action.kind == ActionKind.FORM_CREATE else 'Update form'
+            return f'{operation} "{label}" ({action.key.identity})'
+        return f'Update database resources ({action.key.identity})'
+
+    @staticmethod
+    def outcome_message(action, outcome):
+        if outcome == Outcome.INTENDED:
+            return {
+                ActionKind.FORM_CREATE: 'Created and verified',
+                ActionKind.FORM_SCHEMA_UPDATE: 'Updated and verified',
+                ActionKind.PERSISTED_FIELD_DELETE: 'Field deletion verified',
+                ActionKind.DATABASE_RESOURCE_PATCH: 'Moved and verified',
+            }[action.kind]
+        return {
+            Outcome.UNCHANGED: 'No changes detected',
+            Outcome.DIVERGENT: 'Observed state differs from the requested result',
+            Outcome.UNKNOWN: 'Could not verify the result',
+        }[outcome]
 
     async def observe(self, key):
         try:
@@ -123,6 +146,9 @@ class Executor:
         return self.matches(handler, expected, observed) and self.matches_related(action, related, observed)
 
     def matches_observation(self, handler, action, expected, observed):
+        if expected.existence == Existence.ABSENT:
+            return (expected.key == observed.key and expected.complete and observed.complete and observed.existence == Existence.ABSENT
+                    and self.matches_related(action, tuple(item.state for item in expected.related), observed))
         return (expected.complete and self.matches_bundle(handler, action, expected.state, observed,
                 tuple(item.state for item in expected.related)))
 
@@ -178,7 +204,10 @@ class Executor:
             self._preflight = (*self._preflight, observed)
             baseline = baselines.get(key)
             owner = next((item.action for item in actions if item.action.key == key), None)
-            if baseline is None or baseline.existence != Existence.PRESENT:
+            if baseline is not None and baseline.existence == Existence.ABSENT:
+                invalid |= not (owner is not None and owner.kind == ActionKind.FORM_CREATE
+                                and observed.existence == Existence.ABSENT and observed.complete)
+            elif baseline is None or baseline.existence != Existence.PRESENT:
                 invalid = True
             elif key.kind == ResourceKind.FORM_SCHEMA:
                 handler = self.handler(owner or actions[0].action)
@@ -199,7 +228,7 @@ class Executor:
             handler = self.handler(action)
             observed = await self.observe_action(action)
             if not self.matches_bundle(handler, action, action.before, observed, tuple(p.before for p in action.projections)):
-                self._messages.append(f'{action.action_id}: immediate predecessor is unavailable or stale.')
+                self._messages.append(f'{self.action_label(action)}: immediate predecessor is unavailable or stale.')
                 failed = True
                 break
             # Prerequisites explicitly declared by the planner only. No inferred
@@ -219,7 +248,7 @@ class Executor:
                     prerequisites_ok = False
                     break
             if not prerequisites_ok:
-                self._messages.append(f'{action.action_id}: required member no longer exists.')
+                self._messages.append(f'{self.action_label(action)}: required member no longer exists.')
                 failed = True
                 break
             if current_context is not None:
@@ -245,7 +274,7 @@ class Executor:
                       Outcome.DIVERGENT: 'failed_with_observed_state', Outcome.UNKNOWN: 'unknown_outcome'}[outcome]
             self.journal = (*self.journal[:-1], replace(entry, status=status, outcome=outcome,
                 evidence=evidence, postimage=actual, finished_at=timestamp()))
-            self._messages.append(f'{action.action_id}: {outcome.value}' +
+            self._messages.append(f'{self.action_label(action)}: {self.outcome_message(action, outcome)}' +
                                   (f'; API error: {evidence.failure.message}' if evidence.failure else ''))
             if outcome == Outcome.DIVERGENT:
                 summary = handler.compare(action.after, actual).summary

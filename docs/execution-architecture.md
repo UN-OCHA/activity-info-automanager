@@ -72,6 +72,32 @@ footprints from executable actions; writes and recovery verify the schema alone.
 Endpoint transitions still seal candidates: schema edits before and after a move
 remain separate, while compatible moves within one database may batch.
 
+AddForm(name="New", folder="/") creates one top-level form in the active database,
+without requiring an active form or supporting multiple mode. It exits the prior
+form iteration using single WithForm context semantics. Failed applications publish
+no new form, resource entry, selection or scope. Duplicate labels are allowed;
+existing selector ambiguity rules apply. Names and folders support variables and
+folders use the existing ID/name/path resolver.
+
+The creation snapshot contains an empty schema and a DBResources entry with a
+pending form ID. Subsequent selectors, references and patterns use this local form.
+An open FORM_CREATE action absorbs compatible field/schema edits, renames and
+MoveForm destinations. Switching active forms seals it; revisits use ordinary
+schema/resource actions. Regular schema updates still have the MoveForm boundary.
+Creation dependencies order later references and reverse recovery.
+
+Confirmation allocates each form ID once alongside field identities and remaps
+schemas, references, resource entries, keys and prerequisites without changing
+historical previews. Add Form sends formResource and formClass together, including required PRIVATE
+resource visibility. The adapter rejects missing required resource properties before
+sending; HTTP errors retain server response details in the execution messages. Preflight
+requires explicit form absence and checks owned database-resource properties and
+destination folder types. GetFormSchema verifies schema; GetDatabaseTree verifies
+placement. Missing observations are conclusive only with explicit not-found evidence.
+Recovery retains divergence checks, deletes the form through Update Database with
+resourceDeletions, and verifies absence of both representations. Unknown outcomes
+reconcile before compensation; schema checks cannot detect concurrent record edits.
+
 Identity materialization precedes confirmation and is retained for that attempt.
 Formula literals and historical preview identities are preserved. Execution cannot
 substitute variables, expand commands, allocate replacement identities or query
@@ -113,7 +139,8 @@ cross-endpoint transaction.
 | MoveForm within its database, top-level forms | Supported with resource snapshots and owned-property compensation. |
 | ModifyForm name | Supported for forms/subforms using one schema write and verification/recovery of both representations of the shared label. |
 | Persisted-field compensation | Schema-only; record-data restoration unverified. |
-| Arbitrary resource property clearing, AddForm/DeleteForm, new recovery endpoints | Not enabled; separate feature/evidence work. |
+| AddForm | Supported with full-schema batching, resource placement verification and verified deletion compensation. |
+| Arbitrary resource property clearing, DeleteForm, richer recovery | Not enabled; separate feature/evidence work. |
 
 No live recovery experiment or dependency upgrade was part of stages 0–7.
 

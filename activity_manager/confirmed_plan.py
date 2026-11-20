@@ -7,11 +7,12 @@ adopt this contract when stage 5 supplies the complete executor safety path.
 from dataclasses import dataclass, replace
 from copy import deepcopy
 from uuid import uuid4
+import secrets
 
-from .action_handlers import PersistedFieldDeleteHandler, SchemaHandler, ResourceHandler
+from .action_handlers import PersistedFieldDeleteHandler, SchemaHandler, ResourceHandler, AddFormHandler
 from .immutable import freeze
 from .planning import ActionKind, PlanError
-from .resource_state import FormPayload
+from .resource_state import FormPayload, DatabaseResourcesPayload, ResourceKey
 from .schema_identity import prepare_schema_for_put
 from .schema_names import readable_schema, schema_with_ids
 
@@ -126,18 +127,88 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
         before, after = (replace(getattr(action, phase), payload=FormPayload(
             schema_with_ids(remap_schema(readable[(action.action_id, phase)], owner), materialized_related)))
             for phase in ('before', 'after'))
-        # Database labels are local projections. Schema actions execute and
-        # recover against the schema endpoint alone.
+        # Update labels are local projections. Creation retains the resource
+        # projection to verify placement and deletion as well as its schema.
         projection_keys = {projection.before.key for projection in action.projections}
-        actions.append(replace(action, before=before, after=after, projections=(),
+        actions.append(replace(action, before=before, after=after, projections=action.projections if action.kind == ActionKind.FORM_CREATE else (),
             start_member_ids=tuple(mapped(owner, value) for value in action.start_member_ids),
             created_member_ids=tuple(mapped(owner, value) for value in action.created_member_ids),
             deleted_member_id=mapped(owner, action.deleted_member_id),
             prerequisites=tuple(member(ref) for ref in action.prerequisites),
-            read_set=tuple(replace(f, member_id=mapped(f.key.identity, f.member_id)) for f in action.read_set if f.key not in projection_keys),
-            write_set=tuple(replace(f, member_id=mapped(f.key.identity, f.member_id)) for f in action.write_set if f.key not in projection_keys)))
-    materialized = replace(candidate, actions=tuple(actions), member_provenance=tuple(
-        replace(row, member=member(row.member)) for row in candidate.member_provenance))
+            read_set=tuple(replace(f, member_id=mapped(f.key.identity, f.member_id)) for f in action.read_set if action.kind == ActionKind.FORM_CREATE or f.key not in projection_keys),
+            write_set=tuple(replace(f, member_id=mapped(f.key.identity, f.member_id)) for f in action.write_set if action.kind == ActionKind.FORM_CREATE or f.key not in projection_keys)))
+    # Form identities are allocated once, after context-aware field/formula conversion.
+    # Only identity-bearing properties are rewritten; labels and formula literals survive.
+    form_ids = {}
+    reserved = set(related) | set(identity_map.values())
+    for action in actions:
+        for state in (action.before, action.after, *(p.before for p in action.projections), *(p.after for p in action.projections)):
+            if isinstance(state.payload, DatabaseResourcesPayload):
+                reserved.update(state.payload.entries)
+    for action in actions:
+        if action.kind == ActionKind.FORM_CREATE:
+            while True:
+                identity = 'c' + secrets.token_hex(12)
+                if identity not in reserved:
+                    break
+            reserved.add(identity)
+            form_ids[action.key.identity] = identity
+            identity_map[(action.key.identity, action.key.identity)] = identity
+
+    def form_key(key):
+        return ResourceKey(key.kind, form_ids.get(key.identity, key.identity))
+
+    def form_schema(data):
+        data = deepcopy(data)
+        def visit(node):
+            if isinstance(node, dict):
+                for name, value in list(node.items()):
+                    if name in ('id', 'formId', 'parentFormId') and isinstance(value, str):
+                        node[name] = form_ids.get(value, value)
+                    else:
+                        visit(value)
+            elif isinstance(node, list):
+                for value in node:
+                    visit(value)
+        visit(data)
+        return data
+
+    def state_ids(state):
+        if isinstance(state.payload, FormPayload):
+            payload = FormPayload(form_schema(state.payload.to_dict()))
+        else:
+            entries = state.payload.to_list()
+            for entry in entries:
+                for prop in ('id', 'parentId'):
+                    if prop in entry:
+                        entry[prop] = form_ids.get(entry[prop], entry[prop])
+            payload = DatabaseResourcesPayload({entry['id']: entry for entry in entries},
+                tombstones=state.payload.tombstones)
+        return replace(state, key=form_key(state.key), payload=payload)
+
+    def footprint_ids(f):
+        return replace(f, key=form_key(f.key), member_id=form_ids.get(f.member_id, f.member_id))
+
+    def ref_ids(ref):
+        return replace(ref, key=form_key(ref.key), member_id=form_ids.get(ref.member_id, ref.member_id))
+
+    actions = [replace(action, key=form_key(action.key), before=state_ids(action.before), after=state_ids(action.after),
+        subjects=tuple(form_key(key) for key in action.subjects),
+        prerequisites=tuple(ref_ids(ref) for ref in action.prerequisites),
+        read_set=tuple(footprint_ids(f) for f in action.read_set), write_set=tuple(footprint_ids(f) for f in action.write_set),
+        patches=tuple(replace(patch, member_id=form_ids.get(patch.member_id, patch.member_id),
+                             before_value=form_ids.get(patch.before_value, patch.before_value) if isinstance(patch.before_value, str) else patch.before_value,
+                             after_value=form_ids.get(patch.after_value, patch.after_value) if isinstance(patch.after_value, str) else patch.after_value)
+                      for patch in action.patches),
+        projections=tuple(replace(p, before=state_ids(p.before), after=state_ids(p.after),
+                                  footprints=tuple(footprint_ids(f) for f in p.footprints)) for p in action.projections))
+        for action in actions]
+    materialized_related = {form_ids.get(identity, identity): form_schema(schema)
+                            for identity, schema in materialized_related.items()}
+    materialized = replace(candidate, actions=tuple(actions),
+        baselines=tuple(replace(b, key=form_key(b.key), state=state_ids(b.state) if b.state else None)
+                        for b in candidate.baselines),
+        member_provenance=tuple(replace(row, member=ref_ids(member(row.member))) for row in candidate.member_provenance))
     reviewed = []
     for action in actions:
         if action.kind == ActionKind.DATABASE_RESOURCE_PATCH:
@@ -146,7 +217,7 @@ def materialize_plan(candidate, binding, *, related_schemas=None, reference_defa
                 tuple((patch.member_id, patch.after_value) for patch in action.patches if patch.property_name == 'parentId'),
                 (), action.recovery_capability))
             continue
-        handler = (PersistedFieldDeleteHandler if action.kind == ActionKind.PERSISTED_FIELD_DELETE else SchemaHandler)(
+        handler = (AddFormHandler if action.kind == ActionKind.FORM_CREATE else PersistedFieldDeleteHandler if action.kind == ActionKind.PERSISTED_FIELD_DELETE else SchemaHandler)(
             None, related_schemas=related, reference_defaults=reference_defaults)
         reviewed.append(ReviewedAction(action, handler.encode_write(action), (),
             (action.deleted_member_id,) if action.deleted_member_id else (), action.recovery_capability))

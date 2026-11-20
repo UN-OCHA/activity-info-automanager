@@ -8,7 +8,11 @@ from .move_field import MOVE_FIELD, MoveFieldCommand
 from .set_variable import SET_VARIABLE, SetVariableCommand
 from .with_form import WITH_FORM, WithFormCommand
 
+from .add_form import ADD_FORM, AddFormCommand
+
 __all__ = [
+    'ADD_FORM',
+    'AddFormCommand',
     'MODIFY_FORM',
     'ModifyFormCommand',
     'MOVE_FORM',

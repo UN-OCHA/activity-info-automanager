@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from .immutable import freeze
 from .resource_state import (
-    BaselineEvidence, DatabaseResourcesPayload, FormPayload, LoadStatus, ResourceKey, ResourceKind, ResourceState,
+    BaselineEvidence, DatabaseResourcesPayload, FormPayload, LoadStatus, Lifecycle, Existence, ResourceKey, ResourceKind, ResourceState,
 )
 
 
@@ -16,6 +16,7 @@ class PlanError(ValueError):
 
 
 class ActionKind(StrEnum):
+    FORM_CREATE = 'form_create'
     FORM_SCHEMA_UPDATE = 'form_schema_update'
     PERSISTED_FIELD_DELETE = 'persisted_field_delete'
     DATABASE_RESOURCE_PATCH = 'database_resource_patch'
@@ -71,6 +72,7 @@ class SchemaEffect:
     prerequisites: tuple[MemberRef, ...] = ()
     dependency_ids: tuple[str, ...] = ()
     projections: tuple[ResourceProjection, ...] = ()
+    creation: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, 'prerequisites', tuple(self.prerequisites))
@@ -317,6 +319,21 @@ class PlanBuilder:
             ref = MemberRef(effect.key, identity)
             self._origins.setdefault(ref, MemberProvenance(ref, None))
         if isinstance(effect, SchemaEffect):
+            if effect.creation and (baseline is None or baseline.existence != Existence.ABSENT
+                    or effect.before.lifecycle != Lifecycle.DELETED or effect.after.lifecycle != Lifecycle.NEW
+                    or any(action.key == effect.key for action in self._actions)):
+                raise PlanError('Form creation requires a new identity and an absent baseline.')
+            if effect.creation:
+                database = ResourceKey.database(effect.after.payload.schema['databaseId'])
+                if len(effect.projections) != 1 or effect.projections[0].before.key != database:
+                    raise PlanError('Form creation requires its database resource projection.')
+                projection = effect.projections[0]
+                old, new = projection.before.payload.entries, projection.after.payload.entries
+                entry = new.get(effect.key.identity)
+                if (effect.key.identity in old or entry is None or entry.get('type') != 'FORM'
+                        or entry.get('label') != effect.after.payload.schema['label']
+                        or {key: value for key, value in new.items() if key != effect.key.identity} != dict(old)):
+                    raise PlanError('Form creation must add exactly its new database resource.')
             if effect.key.kind != ResourceKind.FORM_SCHEMA:
                 raise PlanError('A schema effect requires a form resource.')
             if effect.projections:
@@ -324,7 +341,7 @@ class PlanBuilder:
                     raise PlanError('An action cannot project the same resource twice.')
             self._schema(effect)
             if effect.projections:
-                action = self._candidate(effect.key, ActionKind.FORM_SCHEMA_UPDATE)
+                action = self._candidate(effect.key, ActionKind.FORM_CREATE) or self._candidate(effect.key, ActionKind.FORM_SCHEMA_UPDATE)
                 projections = {p.before.key: p for p in action.projections}
                 dependencies = list(action.dependency_ids)
                 for projection in effect.projections:
@@ -341,6 +358,11 @@ class PlanBuilder:
                     prior = projections.get(projection.before.key)
                     projections[projection.before.key] = replace(projection, before=prior.before) if prior else projection
                 projections = tuple(projections.values())
+                if action.kind == ActionKind.FORM_CREATE:
+                    projections = tuple(replace(p, footprints=tuple(Footprint(p.before.key, action.key.identity, (prop,))
+                        for prop in ('id', 'type', 'label', 'parentId', 'visibility')) + tuple(
+                        Footprint(ref.key, ref.member_id, ('type',)) for ref in action.prerequisites
+                        if ref.key == p.before.key)) for p in projections)
                 reads = tuple(f for projection in projections for f in projection.footprints)
                 self._replace_action(replace(action, projections=projections,
                     dependency_ids=_unique(dependencies), read_set=(*action.read_set, *reads),
@@ -361,6 +383,11 @@ class PlanBuilder:
 
     def _dependencies(self, effect, candidate=None):
         dependencies = list(effect.dependency_ids)
+        if isinstance(effect.after.payload, FormPayload):
+            from .schema_names import referenced_form_ids
+            targets = set(referenced_form_ids(effect.after.payload.to_dict())) | {effect.key.identity}
+            dependencies.extend(action.action_id for action in self._actions
+                                if action.kind == ActionKind.FORM_CREATE and action.key.identity in targets)
         for ref in effect.prerequisites:
             state = self._state_for(ref.key)
             if state is None or ref.member_id not in _members(state):
@@ -381,6 +408,9 @@ class PlanBuilder:
         return next((action.action_id for action in reversed(self._actions)
                      if (action.key == key or any(p.before.key == key for p in action.projections))
                      and not action.is_noop), None)
+
+    def open_creation(self, key):
+        return self._candidate(key, ActionKind.FORM_CREATE)
 
     def _candidate(self, key, kind):
         index = self._candidates.get((key, kind))
@@ -409,7 +439,8 @@ class PlanBuilder:
             tuple(getattr(effect, 'subjects', ())) or (effect.key,),
             start_member_ids=_members(effect.before), deleted_member_id=deleted,
             prerequisites=effect.prerequisites,
-            recovery_capability=('schema_only_data_unverified' if deleted else
+            recovery_capability=('form_deletion_compensation' if kind == ActionKind.FORM_CREATE else
+                                 'schema_only_data_unverified' if deleted else
                                  'owned_properties_compensation' if kind == ActionKind.DATABASE_RESOURCE_PATCH else
                                  'metadata_compensation'),
             warnings=('Record-data restoration is unverified.',) if deleted else ())
@@ -448,7 +479,7 @@ class PlanBuilder:
         added = tuple(identity for identity in after if identity not in before)
         if len(removed) > 1:
             raise PlanError('Persisted field deletions must be staged one field at a time.')
-        action = self._candidate(effect.key, ActionKind.FORM_SCHEMA_UPDATE)
+        action = self._candidate(effect.key, ActionKind.FORM_CREATE) or self._candidate(effect.key, ActionKind.FORM_SCHEMA_UPDATE)
         dependencies = self._dependencies(effect, action)
         if removed:
             identity = removed[0]
@@ -476,7 +507,7 @@ class PlanBuilder:
             self._seal('explicit_prerequisite_boundary')
             action = None
         if action is None:
-            action = self._new_action(effect, ActionKind.FORM_SCHEMA_UPDATE, dependencies=dependencies)
+            action = self._new_action(effect, ActionKind.FORM_CREATE if effect.creation else ActionKind.FORM_SCHEMA_UPDATE, dependencies=dependencies)
         else:
             action = self._contribute(action, effect, dependencies)
         for identity in added:
@@ -486,8 +517,9 @@ class PlanBuilder:
             self._origins[ref] = MemberProvenance(ref, action.action_id, effect.application_id)
         action = replace(action, created_member_ids=_unique((*action.created_member_ids, *added)))
         full = Footprint(effect.key, whole_resource=True)
-        action = replace(action, read_set=(full, *self._requirement_footprints(action)),
-                         write_set=(replace(full, phase='after'),))
+        projected_reads = tuple(f for p in action.projections for f in p.footprints)
+        action = replace(action, read_set=(full, *self._requirement_footprints(action), *projected_reads),
+                         write_set=(replace(full, phase='after'), *(replace(f, phase='after') for f in projected_reads)))
         self._replace_action(action)
 
     def _resource_patch(self, effect):

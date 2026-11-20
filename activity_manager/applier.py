@@ -16,7 +16,7 @@ from .command_execution import (
 from .command_iteration import IterativeCommand, PreparedCommand
 from .immutable import freeze, command_parameters_snapshot
 from .multi_form import FormWorkspace, FormSelectionError
-from .resource_state import ResourceKey, ResourceState, DatabaseResourcesPayload, BaselineEvidence, Existence, LoadStatus
+from .resource_state import ResourceKey, ResourceState, DatabaseResourcesPayload, BaselineEvidence, Existence, LoadStatus, Lifecycle, FormPayload
 from .planning import PlanBuilder, SchemaEffect, ResourcePatchEffect, MemberRef, ResourceProjection, Footprint
 from .schema_names import readable_schema, load_default_record_labels
 
@@ -337,11 +337,16 @@ class Applier:
 
 
     def _context_warning(self, command, current, variables):
+        from .commands.add_form import AddFormCommand
         from .commands.with_form import WithFormCommand
         from .commands.modify_form import ModifyFormCommand
         from .commands.move_form import MoveFormCommand
         from .commands.set_variable import SetVariableCommand
         command = getattr(command, 'command', command)
+        if isinstance(command, AddFormCommand):
+            if not self.workspace.state.active_database_id:
+                return ExecutionResult.warning(current, 'An active database is required. Command skipped.', 'missing_database', skipped=True)
+            return None
         if isinstance(command, WithFormCommand) or (
                 isinstance(command, (ModifyFormCommand, MoveFormCommand)) and not command.current_form):
             return None
@@ -480,6 +485,7 @@ class Applier:
 
 
     async def _apply_candidate(self, application, current, variables, *, scope_member=False, scope_context=None):
+        from .commands.add_form import AddFormCommand
         from .commands.with_form import WithFormCommand
         from .commands.modify_form import ModifyFormCommand
         from .commands.move_form import MoveFormCommand
@@ -488,6 +494,8 @@ class Applier:
         from .command_iteration import PreparedCommand
         try:
             prepared = application.command if isinstance(application, PreparedCommand) else command_parameters(application, variables)
+            if isinstance(prepared, AddFormCommand):
+                return await self._add_form(prepared, current)
             if isinstance(prepared, MoveFormCommand) and prepared.current_form:
                 if self.form_service is None:
                     return prepared.execute(current)
@@ -548,6 +556,7 @@ class Applier:
 
 
     async def _resolve_commands(self, version, current, commands):
+        from .commands.add_form import AddFormCommand
         from .commands.with_form import WithFormCommand
         from .commands.modify_form import ModifyFormCommand
         from .commands.move_form import MoveFormCommand
@@ -557,7 +566,7 @@ class Applier:
             self._index, self._position = index, 0
             self.executions[index] = CommandExecution('resolving', None, 'Resolving names...')
             self._publish_evaluation()
-            if (isinstance(command, (WithFormCommand, ModifyFormCommand, MoveFormCommand))
+            if (isinstance(command, (AddFormCommand, WithFormCommand, ModifyFormCommand, MoveFormCommand))
                     and not (isinstance(command, (ModifyFormCommand, MoveFormCommand)) and command.current_form)):
                 next_variables = deepcopy(self.variables)
                 for name in self.assigned:
@@ -571,7 +580,7 @@ class Applier:
                         self.scope = scope
                         self.assigned.clear()
                         transitioned = True
-                if command.form_pattern is not None:
+                if getattr(command, 'form_pattern', None) is not None:
                     _, execution = await self._start_form_scope(command, current, next_variables, version, commit_scope)
                 else:
                     execution = await self._run_connected_command(index, current, next_variables, version,
@@ -776,6 +785,39 @@ class Applier:
         return ResourceProjection(before, after, (Footprint(before.key, schema['id'], ('label',)),
             Footprint(before.key, schema['id'], existence=True), Footprint(before.key, schema['id'], ('type',))))
 
+    async def _add_form(self, command, current):
+        from .form_folders import resolve_folder
+        database = self.workspace.state.active_database_id
+        warnings = await self._load_context_database(database)
+        if warnings:
+            return ExecutionResult(current, warnings, skipped=True)
+        before_db = await self._database(database)
+        entries = {identity: dict(entry) for identity, entry in before_db.payload.entries.items()}
+        try:
+            parent, _ = resolve_folder(database, entries, command.folder)
+        except ValueError as exc:
+            return ExecutionResult.warning(current, str(exc), 'folder_selector_failed', skipped=True)
+        identity = 'pending-form:' + self._attempt_id
+        schema = dict(id=identity, label=command.form_name, databaseId=database, schemaVersion=1, elements=[])
+        key = ResourceKey.form(identity)
+        before = ResourceState(key, FormPayload(schema), load_status=LoadStatus.LOADED, lifecycle=Lifecycle.DELETED)
+        self.workspace.state.load(BaselineEvidence(key, Existence.ABSENT))
+        after = self.workspace.state.put_form(schema, lifecycle=Lifecycle.NEW)
+        self.workspace.state.activate(key)
+        entries[identity] = dict(id=identity, label=command.form_name, type='FORM', parentId=parent, visibility='PRIVATE')
+        after_db = self.workspace.state.put(before_db.key, DatabaseResourcesPayload(entries))
+        projection = ResourceProjection(before_db, after_db, tuple(
+            Footprint(before_db.key, identity, (prop,)) for prop in ('type', 'label', 'parentId')))
+        prerequisites = (MemberRef(before_db.key, parent),) if parent != database else ()
+        self.plan_builder.observe(self.workspace.state.baselines.entries.values())
+        self.plan_builder.select_form(key)
+        effect = SchemaEffect(self._attempt_id + ':create', self._attempt_id, key, before, after,
+                              prerequisites=prerequisites, projections=(projection,), creation=True)
+        self.plan_builder.add(effect)
+        self.effects += (effect,)
+        self.related_schemas.update(self.workspace.latest)
+        return with_prepared_command(ExecutionResult(schema, success_message=f'Added form: {command.form_name}'), command)
+
     async def _move_form(self, command, schema):
         from .form_folders import form_location, resolve_folder
         before = await self._database(schema['databaseId'])
@@ -792,6 +834,15 @@ class Applier:
         self.plan_builder.observe(self.workspace.state.baselines.entries.values())
         after = self.workspace.state.put(before.key, DatabaseResourcesPayload(entries, before.payload.order))
         prerequisites = (MemberRef(before.key, parent),) if parent != schema['databaseId'] else ()
+        if self.plan_builder.open_creation(ResourceKey.form(schema['id'])) is not None:
+            state = self.workspace.state.resources[ResourceKey.form(schema['id'])]
+            projection = ResourceProjection(before, after, tuple(
+                Footprint(before.key, schema['id'], (prop,)) for prop in ('type', 'label', 'parentId')))
+            effect = SchemaEffect(self._attempt_id + ':move', self._attempt_id, state.key, state, state,
+                                  prerequisites=prerequisites, projections=(projection,))
+            self.plan_builder.add(effect)
+            self.effects += (effect,)
+            return with_prepared_command(ExecutionResult(schema, success_message=f'Moved form to {path}'), command)
         effect = ResourcePatchEffect(self._attempt_id + ':resource', self._attempt_id, before.key, before, after,
             ((schema['id'], 'parentId'),), subjects=(ResourceKey.form(schema['id']),), prerequisites=prerequisites)
         self.plan_builder.add(effect)

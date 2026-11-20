@@ -3,6 +3,7 @@ from urllib.parse import urlsplit
 import httpx
 from activity_info_api_client import AuthenticatedClient, errors
 from activity_info_api_client.api.default import (
+    add_form,
     get_database_tree,
     get_form_schema,
     get_form_tree,
@@ -11,6 +12,7 @@ from activity_info_api_client.api.default import (
     update_form_schema,
     update_database,
 )
+from activity_info_api_client.models.add_form_request import AddFormRequest
 from activity_info_api_client.models.add_update_form_response import AddUpdateFormResponse
 from activity_info_api_client.models.database import Database
 from activity_info_api_client.models.database_resource_type import DatabaseResourceType
@@ -194,7 +196,17 @@ class ActivityInfoService:
             kind = (FailureKind.MISSING if response.status_code in (404, 410) else
                     FailureKind.FORBIDDEN if response.status_code in (401, 403) else
                     FailureKind.UNAVAILABLE if response.status_code >= 500 else FailureKind.REJECTED)
-            return None, EndpointFailure(kind, f'HTTP {response.status_code}', receipt)
+            detail = response.text.strip()
+            try:
+                data = response.json()
+                if isinstance(data, dict):
+                    detail = data.get('message') or data.get('error') or detail
+            except ValueError:
+                pass
+            message = f'HTTP {response.status_code}'
+            if detail:
+                message += f': {str(detail)[:1000]}'
+            return None, EndpointFailure(kind, message, receipt)
         try:
             parsed = endpoint._parse_response(client=self.client, response=response)
             if not isinstance(parsed, model):
@@ -263,4 +275,19 @@ class ActivityInfoService:
         except (KeyError, TypeError, ValueError) as exc:
             return WriteEvidence(failure=EndpointFailure(FailureKind.INVALID, str(exc)))
         receipt, failure = await self._endpoint_evidence(update_database, Database, database_id=database_id, body=body)
+        return WriteEvidence(receipt if failure is None else failure.receipt, failure)
+
+
+    async def write_add_form_evidence(self, database_id, payload):
+        try:
+            resource = payload['formResource']
+            required = {'id', 'type', 'label', 'parentId', 'visibility'}
+            if missing := required - resource.keys():
+                raise ValueError('Creation resource is missing required properties: ' + ', '.join(sorted(missing)))
+            body = AddFormRequest.from_dict(payload)
+            if body.form_class.database_id != database_id or body.form_resource.id != body.form_class.id:
+                raise ValueError('Creation resource and schema identities disagree.')
+        except (KeyError, TypeError, ValueError) as exc:
+            return WriteEvidence(failure=EndpointFailure(FailureKind.INVALID, str(exc)))
+        receipt, failure = await self._endpoint_evidence(add_form, AddUpdateFormResponse, database_id=database_id, body=body)
         return WriteEvidence(receipt if failure is None else failure.receipt, failure)

@@ -251,6 +251,11 @@ def readable_schema(schema, related_schemas=None, database_names=None, *, formul
         for entry in params.get('range') or []:
             if 'formId' in entry:
                 entry['formId'] = form_name(entry['formId'])
+    if not formulas_only and not _to_ids:
+        database_id = schema.get('databaseId')
+        database_name = (database_names or {}).get(database_id)
+        if isinstance(database_name, str) and database_name:
+            result['databaseId'] = substitution(database_name, database_id)
     return result
 
 
