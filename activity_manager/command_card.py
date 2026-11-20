@@ -104,8 +104,7 @@ def render_command_card(
                 'min-w-0 flex-1 font-mono text-sm whitespace-pre-wrap'
             ).style('overflow-wrap: anywhere')
 
-        with ui.row().classes('w-full items-center gap-0') as actions:
-            _stop_click(actions)
+        with ui.row().classes('w-full items-center gap-0'):
             up = _command_button(
                 'keyboard_arrow_up', 'Move command up',
                 lambda i=index: on_move(i, i - 1),
@@ -130,10 +129,10 @@ def command_preview(syntax: str) -> tuple[str, bool]:
     """Shorten at an AST argument boundary, preserving commas inside values."""
     call = ast.parse(syntax, mode='eval').body
     arguments = sorted([*call.args, *call.keywords], key=lambda item: (item.lineno, item.col_offset))
-    if len(arguments) <= 1:
+    if len(arguments) <= 2:
         return syntax, False
-    first = ast.get_source_segment(syntax, arguments[0])
-    return f'{syntax.split("(", 1)[0]}({first}, ...', True
+    preview = ', '.join(ast.get_source_segment(syntax, argument) for argument in arguments[:2])
+    return f'{syntax.split("(", 1)[0]}({preview}, ...', True
 
 
 def _stop_click(element):
@@ -154,6 +153,7 @@ def _command_button(icon: str, label: str, handler):
     button = ui.button(
         icon=icon, on_click=handler,
     ).props('flat dense round color=grey-7').classes('w-8 h-8 shrink-0')
+    _stop_click(button)
     button.props['aria-label'] = label
     button.tooltip(label)
     return button

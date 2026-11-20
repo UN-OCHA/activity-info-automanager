@@ -68,13 +68,14 @@ class CommandListManager:
         self.busy = False
         self.current_view = 'list'
 
-        with ui.row().classes('w-full items-center justify-between gap-2'):
+        with ui.row().classes('w-full items-center gap-3'):
+            ui.label('Command List').classes('text-lg font-medium')
             self.view_toggle = ui.toggle(
                 {'list': 'List', 'text': 'Text'},
                 value='list',
                 on_change=self._view_changed,
             )
-            self.count_badge = ui.badge('0 commands', color='grey')
+            self.count_badge = ui.badge('0 commands', color='grey').classes('ml-auto')
         ui.separator()
 
         self.simple_view = ui.column().classes('command-list-body w-full gap-2')
@@ -127,7 +128,9 @@ class CommandListManager:
                 }''')
 
         with ui.column().classes('w-full'):
-            self.step_checkbox = ui.checkbox('Execute step by step').props('dense')
+            with ui.row().classes('w-full items-center justify-between'):
+                self.step_checkbox = ui.checkbox('Execute step by step').props('dense')
+                self.clear_button = ui.button('Clear', icon='delete_sweep', on_click=self.clear_commands).props('flat dense')
             self.execute_button = ui.button(
                 'Execute', icon='play_arrow', on_click=on_execute,
             ).classes('w-full')
@@ -191,6 +194,19 @@ class CommandListManager:
     def add_command(self, command: Command) -> None:
         self.commands.append(command)
         self._regenerate_advanced_draft()
+        self._evaluate_commands()
+        self._update_count()
+
+    def clear_commands(self) -> None:
+        if self.busy:
+            return
+        self.commands.clear()
+        self.selected_index = None
+        self.selected_iteration = None
+        self.expanded_commands.clear()
+        self.expanded_text_commands.clear()
+        self._regenerate_advanced_draft()
+        self.stored_text = self.advanced_draft
         self._evaluate_commands()
         self._update_count()
 
@@ -283,7 +299,7 @@ class CommandListManager:
 
     def set_busy(self, busy: bool) -> None:
         self.busy = busy
-        for control in (self.view_toggle, self.advanced_editor, self.paste_button, self.step_checkbox):
+        for control in (self.view_toggle, self.advanced_editor, self.paste_button, self.step_checkbox, self.clear_button):
             (control.disable if busy else control.enable)()
         self._render_simple_view()
         self._update_execute_button()
@@ -440,6 +456,9 @@ class CommandListManager:
         self._regenerate_advanced_draft()
         self.stored_text = self.advanced_draft
         self.current_view = 'text'
+        self.count_badge.set_visibility(False)
+        self.clear_button.set_visibility(False)
+        self.step_checkbox.set_visibility(False)
         self.simple_view.set_visibility(False)
         self.advanced_view.set_visibility(True)
         self.execute_button.set_visibility(False)
@@ -450,6 +469,9 @@ class CommandListManager:
 
     def _show_list_view(self) -> None:
         self.current_view = 'list'
+        self.count_badge.set_visibility(True)
+        self.clear_button.set_visibility(True)
+        self.step_checkbox.set_visibility(True)
         self.view_toggle.set_value('list')
         self.simple_view.set_visibility(True)
         self.advanced_view.set_visibility(False)
@@ -463,13 +485,15 @@ class CommandListManager:
         return self.advanced_draft != self.stored_text
 
     def _update_text_action_buttons(self) -> None:
-        enabled = self.current_view == 'text' and self._text_is_dirty() and not self.busy
+        enabled = self.current_view == 'text' and not self.busy
         for button in (self.apply_button, self.discard_button):
             (button.enable if enabled else button.disable)()
 
     def _open_discard_dialog(self) -> None:
         if self._text_is_dirty():
             self.discard_dialog.open()
+        else:
+            self._show_list_view()
 
     def _discard_text(self) -> None:
         self.discard_dialog.close()
@@ -479,6 +503,9 @@ class CommandListManager:
 
     def _apply_text(self) -> None:
         """Atomically replace the command list with valid edited text."""
+        if not self._text_is_dirty():
+            self._show_list_view()
+            return
         try:
             commands = parse_command_text(self.advanced_draft)
         except CommandTextError as error:

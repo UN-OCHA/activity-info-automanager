@@ -21,10 +21,19 @@ def button(manager, label):
 class CommandCardTests(unittest.TestCase):
     def test_preview_preserves_quoted_commas_unicode_and_nested_calls(self):
         for first in ('fieldCode="café, \\"quoted\\""', 'label=Append("End", ",", "x")'):
-            syntax = f'ModifyField({first}, fieldType="text")'
-            self.assertEqual(command_preview(syntax), (f'ModifyField({first}, ...', True))
+            syntax = f'ModifyField({first}, fieldType="text", required=True)'
+            self.assertEqual(command_preview(syntax), (f'ModifyField({first}, fieldType="text", ...', True))
         syntax = 'DeleteField(fieldCode="x,y")'
         self.assertEqual(command_preview(syntax), (syntax, False))
+
+    def test_two_parameters_are_shown_in_full_without_expansion(self):
+        syntax = 'MoveField(fieldCode="x", position="End")'
+        self.assertEqual(command_preview(syntax), (syntax, False))
+        with Client(ui.page('/')), ui.column():
+            manager = CommandListManager()
+            manager.add_command(parse_command_text(syntax)[0])
+            self.assertFalse(button(manager, 'Expand command text').enabled)
+            self.assertIn(manager.commands[0].to_syntax(), [item.text for item in elements(manager, ui.label)])
 
     def test_single_parameter_is_full_and_toggle_disabled(self):
         with Client(ui.page('/')), ui.column():

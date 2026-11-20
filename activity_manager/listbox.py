@@ -13,7 +13,7 @@ class DatabaseListbox(ui.element):
         self.placeholder = placeholder
         self.options: dict[str, str] = {}
         self.value: str | None = None
-        self.props('size=10 disabled').classes('w-full border rounded p-2')
+        self.props('size=10 disabled').classes('source-listbox w-full')
         self.props['aria-label'] = label
 
         async def change(event):

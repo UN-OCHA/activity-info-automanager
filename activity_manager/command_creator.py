@@ -334,7 +334,11 @@ class CommandCreatorRenderer:
     """
 
     def __init__(self, definitions: tuple[CommandCreatorDefinition, ...], *, on_add=None, on_parameter_change=None):
-        self.definitions = {definition.key: definition for definition in definitions}
+        order = ('set_variable', 'with_form', 'add_form', 'modify_form', 'move_form',
+                 'delete_form', 'add_field', 'modify_field', 'move_field', 'delete_field')
+        by_key = {definition.key: definition for definition in definitions}
+        self.definitions = {key: by_key.pop(key) for key in order if key in by_key}
+        self.definitions.update(by_key)
         self.on_add = on_add
         self.on_parameter_change = on_parameter_change
         self.controls: dict[str, Any] = {}
@@ -373,6 +377,13 @@ class CommandCreatorRenderer:
                     value=next(iter(self.definitions), None), label='Command',
                     on_change=self._command_changed,
                 ).classes('w-full bg-white')
+                self.command_select.add_slot('option', '''
+                    <q-item-label v-if="props.opt.label === 'With form'" header>Form commands</q-item-label>
+                    <q-item-label v-if="props.opt.label === 'Add field'" header>Field commands</q-item-label>
+                    <q-item v-bind="props.itemProps">
+                        <q-item-section>{{ props.opt.label }}</q-item-section>
+                    </q-item>
+                ''')
                 self.target_label = ui.label('Target')
                 self.target_mode = ui.radio(
                     ['Single', 'Multiple'], value='Single',
@@ -384,8 +395,9 @@ class CommandCreatorRenderer:
                 ).classes('text-xs text-slate-500')
             with ui.column().classes('min-w-0 flex-1 gap-3'):
                 self.parameters = ui.row().classes('w-full items-start gap-3 flex-wrap')
-                self.add_button = ui.button('Add command', icon='add', on_click=self._add_command)
-        self.error = ui.label('').classes('text-sm text-red-700')
+                with ui.row().classes('w-full items-center gap-3'):
+                    self.add_button = ui.button('Add command', icon='add', on_click=self._add_command).classes('shrink-0')
+                    self.error = ui.label('').classes('text-sm text-red-700')
         self._render_selected_command()
 
     def _command_changed(self, event):

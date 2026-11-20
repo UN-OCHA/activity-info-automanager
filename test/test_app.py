@@ -795,8 +795,8 @@ class UITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command_list.stored_text, original)
         self.assertEqual(command_list.advanced_editor.value, original)
         self.assertEqual(text_mode_changes, [True])
-        self.assertTrue(command_list.apply_button.props['disable'])
-        self.assertTrue(command_list.discard_button.props['disable'])
+        self.assertFalse(command_list.apply_button.props['disable'])
+        self.assertFalse(command_list.discard_button.props['disable'])
 
         edited = f'{original}\nDeleteField(fieldCode="B")'
         command_list._advanced_changed(SimpleNamespace(value=edited))
@@ -815,15 +815,45 @@ class UITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command_list.commands, [command])
         self.assertEqual(text_mode_changes, [True, False])
 
-    def test_text_view_buttons_disable_when_edit_returns_to_snapshot(self):
+    def test_text_view_buttons_remain_enabled_when_edit_returns_to_snapshot(self):
         with Client(ui.page('/')), ui.column():
             command_list = CommandListManager()
         command_list._view_changed(SimpleNamespace(value='text'))
         command_list._advanced_changed(SimpleNamespace(value='changed'))
         self.assertFalse(command_list.apply_button.props['disable'])
         command_list._advanced_changed(SimpleNamespace(value=''))
-        self.assertTrue(command_list.apply_button.props['disable'])
-        self.assertTrue(command_list.discard_button.props['disable'])
+        self.assertFalse(command_list.apply_button.props['disable'])
+        self.assertFalse(command_list.discard_button.props['disable'])
+
+    def test_unchanged_text_actions_return_to_list_and_preserve_selection(self):
+        for action in ('_apply_text', '_open_discard_dialog'):
+            with self.subTest(action=action), Client(ui.page('/')), ui.column():
+                manager = CommandListManager()
+                command = MoveFieldCommand('A', 'Beginning')
+                manager.add_command(command)
+                manager.select_command(0)
+                manager._enter_text_view()
+                self.assertFalse(manager.count_badge.visible)
+                getattr(manager, action)()
+                self.assertEqual(manager.current_view, 'list')
+                self.assertFalse(manager.discard_dialog.value)
+                self.assertTrue(manager.count_badge.visible)
+                self.assertIs(manager.commands[0], command)
+                self.assertEqual(manager.selected_index, 0)
+
+    def test_clear_commands_resets_selection_text_and_evaluation(self):
+        with Client(ui.page('/')), ui.column():
+            changes = []
+            manager = CommandListManager(on_commands_change=lambda: changes.append(True))
+            manager.add_command(MoveFieldCommand('A', 'Beginning'))
+            manager.select_command(0)
+            manager.clear_commands()
+            self.assertEqual(manager.commands, [])
+            self.assertEqual(manager.executions, [])
+            self.assertIsNone(manager.selected_index)
+            self.assertEqual(manager.advanced_editor.value, '')
+            self.assertEqual(manager.count_badge.text, '0 commands')
+            self.assertEqual(len(changes), 2)
 
     def test_text_apply_is_atomic_and_reports_errors_without_losing_edits(self):
         original = MoveFieldCommand('A', 'Beginning')

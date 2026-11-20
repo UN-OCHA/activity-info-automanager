@@ -1,4 +1,4 @@
-from nicegui import ui
+from nicegui import app, ui
 
 import json
 import asyncio
@@ -65,7 +65,7 @@ def connection_page():
         .workbench {
             box-sizing: border-box;
             display: grid;
-            grid-template-columns: minmax(260px, 300px) minmax(0, 1fr) minmax(320px, 380px);
+            grid-template-columns: minmax(260px, 300px) minmax(0, 1fr) minmax(480px, 570px);
             grid-template-rows: auto minmax(360px, 1fr) minmax(140px, 22vh);
             gap: 0.75rem;
             min-height: 720px;
@@ -82,6 +82,26 @@ def connection_page():
             grid-column: 1;
             grid-row: 1 / 4;
             overflow-y: auto;
+        }
+        .source-listbox {
+            box-sizing: border-box;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            padding: 10px;
+            background-color: #fff;
+            color: #334155;
+            font: inherit;
+        }
+        .source-listbox option {
+            padding: 4px 8px;
+        }
+        .source-listbox:focus-visible {
+            outline: 2px solid #3b82f6;
+            outline-offset: 2px;
+        }
+        .source-listbox:disabled {
+            background-color: #f8fafc;
+            color: #64748b;
         }
         .command-creator-panel {
             grid-column: 2 / 4;
@@ -792,10 +812,26 @@ def connection_page():
 
     def add_command(command):
         command_list.add_command(command)
+        command_list.select_command(len(command_list.commands) - 1)
 
     with ui.element('main').classes('workbench'):
         with ui.card().classes('workbench-panel sources-panel w-full no-shadow'):
-            ui.label('Sources').classes('text-xl font-medium')
+            exit_button = ui.button('Exit App', icon='close').props('flat dense no-caps').classes('text-xs')
+            exit_button.on('click', app.shutdown, js_handler='''() => {
+                emit();
+                window.close();
+                window.setTimeout(() => {
+                    document.open();
+                    document.write(`<!doctype html><html lang="en"><head>
+                        <meta charset="utf-8"><title>ActivityInfo Manager &mdash; Closed</title>
+                        <style>body { margin: 0; min-height: 100vh; display: grid;
+                        place-items: center; font: 16px system-ui, sans-serif;
+                        color: #334155; background: #f8fafc; }</style>
+                        </head><body><p>App closed&mdash;you can close this tab</p></body></html>`);
+                    document.close();
+                }, 150);
+            }''')
+            ui.label('Sources').classes('text-lg font-medium')
             ui.separator()
             with ui.expansion('Connection', icon='link', value=True).classes('w-full'):
                 base_url = ui.input(
@@ -807,12 +843,12 @@ def connection_page():
                 ).classes('w-full')
                 button = ui.button('Connect', on_click=connect).classes('w-full')
             ui.separator()
-            with ui.column().classes('w-full gap-2'):
+            with ui.column().classes('w-full gap-3'):
                 ui.label('Initial database').classes('text-base font-medium')
                 databases = DatabaseListbox(on_change=load_forms)
                 status = ui.label('Connect to load databases.').classes('text-sm text-slate-600')
             ui.separator()
-            with ui.column().classes('w-full gap-2'):
+            with ui.column().classes('w-full gap-3'):
                 ui.label('Initial form').classes('text-base font-medium')
                 forms = DatabaseListbox(
                     label='Forms', placeholder='Select a form', on_change=load_schema,
@@ -853,7 +889,6 @@ def connection_page():
             rejected_view.set_visibility(False)
 
         with ui.card().classes('workbench-panel command-list-panel w-full no-shadow flex flex-col'):
-            ui.label('Command List').classes('text-lg font-medium')
             command_list = CommandListManager(
                 resolve_schema=resolve_preview,
                 lookup_variable=lookup_variable,
@@ -869,7 +904,6 @@ def connection_page():
         with ui.card().classes('workbench-panel console-panel w-full no-shadow flex flex-col'):
             with ui.row().classes('w-full items-center justify-between'):
                 ui.label('Console').classes('text-lg font-medium')
-                ui.button('Clear', icon='delete_sweep').props('flat dense disable')
             ui.separator()
             with ui.column().classes('panel-body w-full grow'):
                 console_message = ui.label('No messages.').classes(
