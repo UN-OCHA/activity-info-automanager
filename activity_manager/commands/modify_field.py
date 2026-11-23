@@ -107,6 +107,8 @@ FUNCTION_PARAMETERS = {
 
 
 def edit_syntax(value):
+    if value is None:
+        return '""'
     if isinstance(value, FunctionCall):
         return value.name + '(' + ', '.join(literal_syntax(arg) for arg in value.arguments) + ')'
     return literal_syntax(value)
@@ -457,7 +459,9 @@ def parse_modify_field(text, call):
             expected = (int, float)
         if parameter.key == 'default_value':
             expected = (str, int, float, dict, list)
-        types[EDIT_ARGUMENTS[parameter.key]] = (*expected, type(None))
+        # Explicit blank strings clear any editable property. Nonblank values
+        # still pass the property's own typed validation in create_modify_field.
+        types[EDIT_ARGUMENTS[parameter.key]] = (*expected, str, type(None))
     values = parse_literal_parameters(text, call, 'ModifyField', types=types,
                                       required={'fieldCode', 'fieldType'},
                                       function_parameters=set(FUNCTION_PARAMETERS.values()),

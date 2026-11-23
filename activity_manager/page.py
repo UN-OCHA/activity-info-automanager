@@ -10,6 +10,8 @@ from nicegui import context
 from .app_state import AppStateStore
 from .api import DEFAULT_BASE_URL, ActivityInfoService
 from .command_creator import CommandCreatorRenderer, field_codes_from_schema
+from .form_comparison_ui import FormComparisonRenderer
+from .form_folders import form_location
 from .schema_names import readable_resource, load_default_record_labels, unresolved_formula_references
 from .command_execution import Diagnostic, EXECUTABLE_STATUSES
 from .immutable import thaw
@@ -619,12 +621,14 @@ def connection_page():
             (databases.enable if databases.options else databases.disable)()
             (forms.enable if forms.options else forms.disable)()
         command_creator.set_enabled(not busy and not text_mode)
+        form_comparison.set_enabled(not busy and not text_mode)
         command_list.set_busy(busy)
 
     def text_mode_changed(editing: bool) -> None:
         nonlocal text_mode
         text_mode = editing
         command_creator.set_enabled(not editing and not command_list.busy)
+        form_comparison.set_enabled(not editing and not command_list.busy)
 
     async def execute_confirmed():
         nonlocal pending_execution, source_schema, report_schemas, report_version, report_context, record_cache, report_display
@@ -704,6 +708,7 @@ def connection_page():
         cancel_execute_confirmation()
         schema_request += 1
         source_schema = None
+        form_comparison.set_initial(forms.value)
         command_creator.set_schema(None)
         command_list.related_schemas = {}
         command_list.database_names = {identity: label.removesuffix(f' ({identity})')
@@ -754,6 +759,8 @@ def connection_page():
         form_request += 1
         clear_schema()
         forms.set_options({})
+        form_comparison.set_initial(None)
+        form_comparison.set_forms({})
         command_creator.set_suggestions('form_names', [])
         form_status.set_text('')
 
@@ -768,6 +775,7 @@ def connection_page():
             options = await service.get_forms(databases.value)
             if request == form_request:
                 forms.set_options(options)
+                form_comparison.set_forms(options)
                 command_creator.set_suggestions('form_names', [
                     label.removesuffix(f' ({identity})') for identity, label in options.items()
                 ])
@@ -814,6 +822,44 @@ def connection_page():
         command_list.add_command(command)
         command_list.select_command(len(command_list.commands) - 1)
 
+    def comparison_context():
+        return (id(service), databases.value, forms.value, schema_request,
+                command_list._evaluation_version,
+                tuple(command.to_syntax() for command in command_list.commands),
+                command_list.current_view, command_list.advanced_draft)
+
+    def command_list_replace(commands):
+        cancel_execute_confirmation()
+        command_list.replace_commands(commands)
+
+    async def load_comparison(model_id, create_new):
+        selected_service = service
+        database_id, initial_id = databases.value, forms.value
+        if selected_service is None or not database_id:
+            raise ValueError('Connect and select a database first.')
+        model_tree = await selected_service.get_form_tree(model_id)
+        model = model_tree[model_id]
+        initial_tree = (await selected_service.get_form_tree(initial_id)
+                        if initial_id and not create_new else {})
+        initial = initial_tree.get(initial_id)
+        if initial_id and not create_new and initial is None:
+            raise ValueError('The initial form could not be loaded.')
+        related = {**model_tree, **initial_tree}
+        names = await selected_service.get_database_names()
+        folder = '/'
+        if initial is None:
+            model_database_id = model['databaseId']
+            resources = await selected_service.get_database_resources(model_database_id)
+            path = form_location(model_database_id, resources, model_id)['path']
+            folder = '/' + path.lstrip('/')
+        record_labels = await load_default_record_labels(selected_service, model, related, {})
+        return dict(model=model, initial=initial, related=related,
+                    database_names=names, folder=folder, record_labels=record_labels)
+
+    def creator_view_changed(event):
+        single_creator.set_visibility(event.value == 'single')
+        form_comparison.container.set_visibility(event.value == 'comparison')
+
     with ui.element('main').classes('workbench'):
         with ui.card().classes('workbench-panel sources-panel w-full no-shadow'):
             exit_button = ui.button('Exit App', icon='close').props('flat dense no-caps').classes('text-xs')
@@ -856,11 +902,18 @@ def connection_page():
                 form_status = ui.label('').classes('text-sm text-slate-600')
 
         with ui.card().classes('workbench-panel command-creator-panel w-full no-shadow'):
-            ui.label('Command Creator').classes('text-lg font-medium')
-            command_creator = CommandCreatorRenderer(
-                COMMAND_CREATORS, on_add=add_command,
-                on_parameter_change=refresh_reference_suggestions,
-            )
+            with ui.row().classes('items-center gap-3'):
+                ui.label('Command Creator').classes('text-lg font-medium')
+                ui.toggle({'single': 'Single Command', 'comparison': 'Form Comparison'},
+                          value='single', on_change=creator_view_changed)
+            with ui.column().classes('w-full') as single_creator:
+                command_creator = CommandCreatorRenderer(
+                    COMMAND_CREATORS, on_add=add_command,
+                    on_parameter_change=refresh_reference_suggestions,
+                )
+            form_comparison = FormComparisonRenderer(load_comparison=load_comparison,
+                replace_commands=command_list_replace, context_key=comparison_context)
+            form_comparison.container.set_visibility(False)
 
         with ui.card().classes('workbench-panel result-panel w-full no-shadow flex flex-col'):
             with ui.row().classes('w-full items-center gap-3'):

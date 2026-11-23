@@ -170,7 +170,7 @@ class ModifyFieldCreatorTests(unittest.TestCase):
                                            'required': False, 'units': 'people'})
         self.assertEqual(parse_command_text(command.to_syntax()), [command])
         self.assertNotIn('key', command.changes)
-        self.assertIn('newCode=None', command.to_syntax())
+        self.assertIn('newCode=""', command.to_syntax())
 
     def test_required_condition_and_translation_children_are_independent(self):
         creator = self.creator('FREE_TEXT', 'text')

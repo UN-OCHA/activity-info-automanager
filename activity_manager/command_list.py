@@ -197,6 +197,20 @@ class CommandListManager:
         self._evaluate_commands()
         self._update_count()
 
+    def replace_commands(self, commands) -> None:
+        """Publish a fully generated list and apply it once through the normal path."""
+        if self.busy:
+            return
+        self.commands = list(commands)
+        self.selected_index = None
+        self.selected_iteration = None
+        self.expanded_commands.clear()
+        self.expanded_text_commands.clear()
+        self._regenerate_advanced_draft()
+        self.stored_text = self.advanced_draft
+        self._evaluate_commands()
+        self._update_count()
+
     def clear_commands(self) -> None:
         if self.busy:
             return
