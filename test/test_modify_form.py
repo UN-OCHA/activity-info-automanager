@@ -157,11 +157,20 @@ ModifyForm(currentForm=False, formPattern="A|B", name="Renamed", recordLabelFiel
 AddField(fieldCode="later", label="Later")
 ''')
         self.assertEqual([e.status for e in manager.executions[0].iterations], ['error', 'not_executed'])
-        # Stage 2: failed form selection/edit publishes neither candidate nor context.
-        self.assertEqual(manager.executions[0].schema['id'], 'root')
-        self.assertEqual(manager.executions[0].schema['label'], 'Root')
+        self.assertIsNone(manager.executions[0].schema)
+        self.assertIsNone(manager.workspace.active_schema)
         self.assertEqual(manager.executions[1].status, 'not_executed')
         self.assertEqual([s['id'] for s in manager.workspace.form_snapshots], ['root'])
+
+    async def test_failed_pattern_clears_context_and_keeps_earlier_successful_edits(self):
+        manager, _ = await self.evaluate([form('a', 'A'), form('b', 'B', code='OTHER')], '''
+ModifyForm(currentForm=False, formPattern="A|B", name="Renamed", recordLabelFieldId="NAME")
+''')
+        self.assertEqual([item.status for item in manager.executions[0].iterations], ['applied', 'error'])
+        self.assertIsNone(manager.workspace.active_schema)
+        self.assertFalse(manager.workspace.state.active_scope)
+        self.assertEqual(manager.workspace.latest['a']['label'], 'Renamed')
+        self.assertEqual(len(manager.candidate_plan.actions), 1)
 
     async def test_new_form_command_replaces_scope_and_discards_local_variables(self):
         manager, _ = await self.evaluate([form('a', 'A'), form('b', 'B')], '''

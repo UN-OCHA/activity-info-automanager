@@ -283,9 +283,10 @@ def connection_page():
                     data = matches[0]
         creator.set_suggestions('reference_field_codes', field_codes_from_schema(data))
         command_key = creator.command_select.value
-        if command_key not in ('add_form', 'modify_form', 'move_form'):
+        active_database_target = command_key in ('add_form', 'add_modify_form')
+        if not active_database_target and command_key not in ('modify_form', 'move_form'):
             return
-        moving = command_key in ('add_form', 'move_form')
+        moving = active_database_target or command_key == 'move_form'
         multiple = creator._multiple_forms()
         source = 'folder_paths' if moving else 'form_field_codes'
         creator.set_suggestions(source, [])
@@ -293,7 +294,7 @@ def connection_page():
         evaluation = command_list._evaluation_version
         if moving:
             active_database_id = command_list.workspace.state.active_database_id
-            current_form = command_key == 'add_form' or creator._current_form()
+            current_form = active_database_target or creator._current_form()
             selected = None if current_form else creator.controls['form'].value
             database_id = active_database_id
             try:
@@ -315,7 +316,7 @@ def connection_page():
                         and evaluation == command_list._evaluation_version
                         and creator.command_select.value == command_key
                         and creator._multiple_forms() == multiple
-                        and (command_key == 'add_form' or creator._current_form() == current_form)
+                        and (active_database_target or creator._current_form() == current_form)
                         and (None if current_form else creator.controls['form'].value) == selected
                         and command_list.workspace.state.active_database_id == active_database_id):
                     creator.set_suggestions(source, suggestions)

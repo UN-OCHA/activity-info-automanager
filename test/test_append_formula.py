@@ -34,6 +34,8 @@ class AppendFormulaTests(unittest.TestCase):
             ('A || B', 'AND', 'A', '(A || B) && (A)'),
             ('A && B', 'OR', 'A', '(A && B) || (A)'),
             ('A && B', 'OR', 'B && A', 'A && B'),
+            (' ((A) > (0)) ', 'AND', 'A>0', ' ((A) > (0)) '),
+            (' ((A) > (0)) ', 'OR', 'A>0', ' ((A) > (0)) '),
         ):
             with self.subTest(current=current, formula=formula):
                 self.assertEqual(self.evaluate(current, operator, formula), expected)
@@ -47,7 +49,7 @@ class AppendFormulaTests(unittest.TestCase):
                 self.evaluate(current, operator, formula)
 
     def test_permissions_and_safe_signature(self):
-        self.assertEqual(APPEND_FORMULA.commands, frozenset({'ModifyField'}))
+        self.assertEqual(APPEND_FORMULA.commands, frozenset({'ModifyField', 'AddModifyField'}))
         self.assertEqual(APPEND_FORMULA.parameters, frozenset({
             'validationCondition', 'relevanceCondition', 'requiredCondition',
             'calculationFormula', 'defaultFormula', 'prefixFormula'}))

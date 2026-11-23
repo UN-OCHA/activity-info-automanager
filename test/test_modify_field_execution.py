@@ -7,8 +7,9 @@ from nicegui import ui
 from nicegui.client import Client
 
 from activity_manager.commands import AddFieldCommand, ModifyFieldCommand
-from activity_manager.command_execution import apply_command
+from activity_manager.command_execution import apply_command, apply_command_locally
 from activity_manager.command_list import CommandListManager
+from activity_manager.command_parser import parse_command_text
 from activity_manager.schema_identity import prepare_schema_for_put
 from activity_manager.schema_resolution import resolve_command_schema
 
@@ -27,6 +28,26 @@ def form(*elements):
 
 
 class ModifyFieldExecutionTests(unittest.TestCase):
+    def test_optional_reference_match_preserves_code_and_label_lookup(self):
+        source = form(element('reference', params={'range': [{'formId': 'people'}]}))
+        related = {'people': {'id': 'people', 'label': 'People', 'databaseId': 'db'}}
+        for selector, reference, status in (
+            ('target', None, 'applied'), ('target', 'people', 'applied'),
+            ('Target', 'People', 'applied'), ('target', 'Other', 'warning'),
+        ):
+            with self.subTest(selector=selector, reference=reference):
+                command = ModifyFieldCommand(selector, 'reference', 'reference',
+                                             {'label': 'Edited'}, referenced_form=reference)
+                result = apply_command_locally(command, source, related)
+                self.assertEqual(result.status, status, result.message)
+                if status == 'warning':
+                    self.assertEqual(result.schema, source)
+                    self.assertEqual(result.diagnostics[0].code, 'target_type_mismatch')
+                else:
+                    field = result.schema['elements'][0]
+                    self.assertEqual(field['label'], 'Edited')
+                    self.assertEqual(field['typeParameters'], source['elements'][0]['typeParameters'])
+
     def execute(self, source, changes, kind='quantity', variant=None, target='target', success=True):
         before = deepcopy(source)
         command = ModifyFieldCommand(target, kind, variant, changes)
@@ -297,6 +318,41 @@ class ModifyFieldExecutionTests(unittest.TestCase):
 
 
 class ModifyFieldPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reference_match_resolves_qualified_names_before_planning(self):
+        source = form(element('reference', params={'range': [{'formId': 'people'}]}))
+        related = {}
+        service = SimpleNamespace(
+            get_database_names=AsyncMock(return_value={'directory': 'Directory'}),
+            get_form_names=AsyncMock(return_value={'people': 'People', 'places': 'Places'}),
+            get_form_tree=AsyncMock(side_effect=lambda identity: {
+                identity: {'id': identity, 'databaseId': 'directory',
+                           'label': identity.title(), 'elements': []},
+            }),
+        )
+
+        async def resolve(candidate):
+            return await resolve_command_schema(service, candidate, related, {}, {}, {}, source_schema=source)
+
+        with Client(ui.page('/')), ui.column():
+            manager = CommandListManager(resolve_schema=resolve)
+        manager.set_schema(source)
+        manager.advanced_draft = '\n'.join(
+            f'ModifyField(fieldCode="target", fieldType="reference", fieldVariant="reference", '
+            f'referencedForm="Directory/{name}", label="{name}")' for name in ('Places', 'People')
+        )
+        commands = parse_command_text(manager.advanced_draft)
+        self.assertEqual([command.referenced_form for command in commands],
+                         ['Directory/Places', 'Directory/People'])
+        manager._apply_text()
+        await manager._evaluation_task
+        skipped, applied = manager.executions
+        self.assertEqual(skipped.status, 'warning')
+        self.assertEqual(skipped.schema, source)
+        self.assertFalse(skipped.effect_ids)
+        self.assertEqual(applied.status, 'applied', applied.message)
+        self.assertEqual(applied.schema['elements'][0]['label'], 'People')
+        self.assertEqual(len(manager.candidate_plan.actions), 1)
+
     async def test_translation_changes_use_existing_resolver_and_validate_target(self):
         source = form(element('FREE_TEXT'), element('FREE_TEXT', code='french', identity='frenchid'))
         async def resolver(candidate):

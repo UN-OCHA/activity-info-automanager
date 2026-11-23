@@ -636,7 +636,11 @@ class PlanBuilder:
         self._effect_order += (effect_id,)
 
     def exit_deleted_scope(self):
-        self._scope_id, self._scope_keys = None, ()
+        # Adjacent deletions can share one API action across form-context resets.
+        if self._endpoint == 'form_deletion':
+            self._scope_id, self._scope_keys, self._active_form = None, (), None
+        else:
+            self.select_form(None)
 
     def finish_deletions(self):
         if self._endpoint == 'form_deletion':

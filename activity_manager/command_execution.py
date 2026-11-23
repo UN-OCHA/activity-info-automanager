@@ -189,6 +189,8 @@ def apply_command_locally(command, schema, related_schemas=None, database_names=
 async def apply_command(command, schema, resolver, *, related_schemas=None, database_names=None, variables=None, lookup_variable=None, reserved_identities=None):
     """Run transformation then resolution, preserving diagnostics in order."""
     from .commands.set_variable import SetVariableCommand
+    from .commands.add_modify_field import AddModifyFieldCommand
+    from .commands.modify_field import ModifyFieldCommand
     from .command_iteration import PreparedCommand
     from .command_templates import command_parameters
     context = CommandContext(related_schemas, database_names, variables if variables is not None else {}, reserved_identities)
@@ -208,6 +210,16 @@ async def apply_command(command, schema, resolver, *, related_schemas=None, data
             raise
         except Exception as exc:
             return ExecutionResult.error(schema, str(exc), 'invalid_variable')
+    if isinstance(prepared, AddModifyFieldCommand) or (
+        isinstance(prepared, ModifyFieldCommand) and prepared.referenced_form is not None
+    ):
+        try:
+            result = await prepared.execute_resolved(schema, context, resolver)
+            return with_prepared_command(result, prepared, schema)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return ExecutionResult.error(schema, f'{type(exc).__name__}: {exc}', 'unexpected_command_error')
     result = transform_command(PreparedCommand(prepared), schema, context)
     if result.has_errors:
         return result

@@ -174,7 +174,7 @@ AddField(fieldCode="EXTRA", label="Extra")
         self.assertEqual(app.executions[0].status, 'warning')
         self.assertFalse(app.candidate_plan.actions)
 
-    async def test_iteration_break_and_failed_creation_preserves_iteration(self):
+    async def test_creation_ends_prior_iteration_even_when_it_skips(self):
         app, _ = await self.apply('''WithForm(formPattern="A|B")
 AddForm(name="New")
 AddField(fieldCode="NEW", label="New")''')
@@ -187,8 +187,11 @@ AddField(fieldCode="NEW", label="New")''')
 AddForm(name="New", folder="missing")
 AddField(fieldCode="NEW", label="New")''')
         self.assertEqual(app.executions[1].status, 'warning')
-        self.assertEqual(len(app.workspace.latest['a']['elements']), 1)
-        self.assertEqual(len(app.workspace.latest['b']['elements']), 1)
+        self.assertIsNone(app.scope)
+        self.assertIsNone(app.workspace.active_schema)
+        self.assertEqual(app.executions[2].diagnostics[0].code, 'missing_form')
+        self.assertEqual(len(app.workspace.latest['a']['elements']), 0)
+        self.assertEqual(len(app.workspace.latest['b']['elements']), 0)
         self.assertEqual(len(app.workspace.latest), 2)
 
     async def test_duplicate_name_allowed_but_selector_ambiguous(self):
@@ -330,7 +333,7 @@ MoveField(fieldCode="TWO", position="Beginning")''')
                       form_service=service, resolve_schema=AsyncMock())
         await app.evaluate()
         self.assertEqual(app.executions[0].status, 'warning')
-        self.assertEqual(app.workspace.active_schema['id'], 'a')
+        self.assertIsNone(app.workspace.active_schema)
         self.assertFalse(app.candidate_plan.actions)
         self.assertFalse(any(key.startswith('pending-form:') for key in app.workspace.latest))
 

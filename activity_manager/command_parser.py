@@ -53,6 +53,7 @@ def parse_literal_parameters(
     required: Collection[str],
     allow_empty: Collection[str] = (),
     function_parameters: Collection[str] = (),
+    blank_parameters: Collection[str] = (),
 ) -> dict[str, Any]:
     """Accept only explicitly typed constants, without evaluating expressions."""
     canonical_names = {name.casefold(): name for name in types}
@@ -83,7 +84,7 @@ def parse_literal_parameters(
             continue
         value = _literal_value(text, keyword.value)
         accepted_types = expected_type if isinstance(expected_type, tuple) else (expected_type,)
-        if type(value) not in accepted_types:
+        if type(value) not in accepted_types and not (value == '' and canonical_name in blank_parameters):
             literal_name = 'string' if expected_type is str else 'boolean' if expected_type is bool else 'supported'
             raise command_error(
                 text,

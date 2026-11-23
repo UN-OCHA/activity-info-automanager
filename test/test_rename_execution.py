@@ -302,7 +302,8 @@ AddField(fieldCode="after", label="After")''')
             manager, _ = await fixtures.fixtures.PreviewTests.evaluate(
                 self, [fixtures.fixtures.form('a', 'A')], 'ModifyForm(currentForm=False, form="A", name="Renamed")')
         self.assertEqual(manager.executions[0].status, 'error')
-        self.assertEqual(manager.workspace.active_schema['label'], 'A')
+        self.assertIsNone(manager.workspace.active_schema)
+        self.assertEqual(manager.workspace.latest['a']['label'], 'A')
         self.assertEqual(manager.candidate_plan.actions, ())
 
     async def test_rename_confirmation_execute_and_report_tabs(self):

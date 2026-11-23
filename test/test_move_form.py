@@ -241,11 +241,11 @@ MoveForm(currentForm=False, form="A", folder="/")
         self.assertEqual(outcome.status, 'success', outcome.messages)
         self.assertEqual(service.timeline, [])
 
-    async def test_ambiguous_folder_and_subform_stop_without_moves(self):
+    async def test_unmovable_targets_remain_selected(self):
         for target, schemas in [('Shared', None), ('North', [dict(fixtures.form('a', 'A'), parentFormId='parent')])]:
             manager, service = await self.evaluate(f'MoveForm(currentForm=False, formPattern="A|B", folder="{target}")\nAddField(fieldCode="later", label="Later")', schemas)
-            self.assertEqual(manager.executions[0].status, 'warning' if target == 'Shared' else 'error')
-            self.assertEqual(manager.executions[1].status, 'applied' if target == 'Shared' else 'not_executed')
+            self.assertEqual(manager.executions[0].status, 'warning')
+            self.assertEqual(manager.executions[1].status, 'applied')
             self.assertEqual({key for key in manager.workspace.state.baselines.entries if key.kind == ResourceKind.DATABASE_RESOURCES}, {ResourceKey.database('db')})
             self.assertEqual(service.moves, [])
 
@@ -338,6 +338,8 @@ AddField(fieldCode="skip", label="Skip")
 WithForm(form="A")
 ''')
         self.assertEqual([e.status for e in manager.executions], ['warning', 'warning', 'applied'])
+        self.assertIsNone(manager.executions[0].schema)
+        self.assertEqual(manager.executions[1].diagnostics[0].code, 'missing_form')
         self.assertEqual({key for key in manager.workspace.state.baselines.entries if key.kind == ResourceKind.DATABASE_RESOURCES}, {ResourceKey.database('db')})
         self.assertEqual(service.timeline, [])
 
@@ -639,7 +641,8 @@ class MoveFormDestinationScopeTests(unittest.IsolatedAsyncioTestCase):
                 await engine.evaluate()
                 self.assertEqual([e.status for e in engine.executions], [expected, 'applied'])
                 active = engine.workspace.active_schema
-                self.assertEqual(active['id'], 'b' if expected == 'applied' else 'a')
-                self.assertEqual(engine.workspace.state.active_database_id, 'remote' if expected == 'applied' else 'db')
+                remote = selector.startswith('Remote/')
+                self.assertEqual(active['id'], 'b' if remote else 'a')
+                self.assertEqual(engine.workspace.state.active_database_id, 'remote' if remote else 'db')
                 self.assertEqual(len(engine.effects), 2 if expected == 'applied' else 1)
                 self.assertEqual(service.moves, [])

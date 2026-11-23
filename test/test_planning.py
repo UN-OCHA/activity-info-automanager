@@ -364,7 +364,7 @@ class PlanApplierTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plan.groups[0].sealed)
         self.assertNotEqual(plan.groups[0].scope_id, plan.groups[1].scope_id)
 
-    async def test_failed_form_switch_does_not_seal_or_replace_the_published_group(self):
+    async def test_failed_form_switch_seals_the_group_and_preserves_prior_actions(self):
         source = form('a', 'A')
         saved = []
         def progress(engine):
@@ -373,8 +373,8 @@ class PlanApplierTests(unittest.IsolatedAsyncioTestCase):
         engine = await self.evaluate(source, 'AddField(fieldCode="x", label="X")\nWithForm(form="Missing")',
             service=MemoryService([source]), progress=progress)
         self.assertEqual(engine.results[-1].status, 'warning')
-        self.assertEqual(engine.candidate_plan, saved[0])
-        self.assertFalse(engine.candidate_plan.groups[0].sealed)
+        self.assertEqual(engine.candidate_plan.actions, saved[0].actions)
+        self.assertTrue(engine.candidate_plan.groups[0].sealed)
 
     async def test_retained_draft_cannot_extend_the_published_plan(self):
         retained = []

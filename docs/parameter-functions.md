@@ -127,8 +127,8 @@ serialization preserves their values with ordinary escaped string literals.
 
 ## AppendFormula
 
-`AppendFormula(Operator, Formula)` is limited to ModifyField's six top-level formula
-inputs. Operator accepts case-insensitive AND/OR only. It parses Formula even if
+`AppendFormula(Operator, Formula)` supports the six top-level formula inputs on
+ModifyField and AddModifyField. Operator accepts case-insensitive AND/OR only. It parses Formula even if
 the current value is absent/blank, then returns Formula directly for those empty
 values. Otherwise, the standalone `formula_parser` package checks normalized
 whole-expression equality or top-level inclusion under the requested operator.
@@ -141,15 +141,19 @@ parse/normalize/includes API and supported grammar.
 
 ## Append
 
-`Append(Position, Separator, AddText)` permits ModifyField's top-level non-formula
-text inputs (Replace's permission set minus AppendFormula's). All three arguments
+`Append(Position, Separator, AddText)` supports top-level editable non-formula text
+inputs on ModifyField and AddModifyField. All three arguments
 are positional strings. Position accepts case-insensitive Start/End. None or an
 empty current string produces AddText directly. For a non-empty current string,
-Start checks for AddText+Separator at the beginning, while End checks for
+both positions first compare the whole string with AddText alone. Start then
+checks for AddText+Separator at the beginning, and End checks for
 Separator+AddText at the end. Casefolded comparisons preserve original text on a
-match; otherwise the exact boundary string is prepended/appended. No whitespace
+match. Otherwise the exact boundary string is prepended or appended. No whitespace
 is trimmed, and whitespace-only current text is non-empty. Separator/AddText may
 be empty. Shared context, validation, serialization, and atomic errors apply.
+
+AddModifyField evaluates both append functions against an empty value on its add
+path and the existing property on its modify path.
 
 ## Alignment with commands
 

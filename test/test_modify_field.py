@@ -199,11 +199,12 @@ class ModifyFieldCreatorTests(unittest.TestCase):
 
     def test_immutable_properties_absent_and_metadata_has_only_allowed_edits(self):
         creator = self.creator('reference', 'metadata')
-        for key in ('barcode', 'metadata', 'referenced_form', 'reverse_reference_field', 'attachment_cardinality'):
+        for key in ('barcode', 'metadata', 'reverse_reference_field', 'attachment_cardinality'):
             self.assertNotIn(key, creator.controls)
         visible = {key for key, container in creator.parameter_containers.items() if container.visible}
         self.assertEqual(visible, {'field_code', 'field_type', 'field_variant', 'new_code', 'label',
-                                   'hide_from_entry', 'hide_in_table'})
+                                   'hide_from_entry', 'hide_in_table', 'referenced_form'})
+        self.assertIsNone(self.command(creator).referenced_form)
         serial = self.creator('serial')
         self.assertNotIn('key', self.command(serial).changes)
         self.assertFalse(serial.parameter_containers['key'].visible)
@@ -217,6 +218,16 @@ class ModifyFieldCreatorTests(unittest.TestCase):
         command = self.command(creator)
         self.assertEqual(command.field_code, 'Target label or code')
         self.assertEqual(command.changes, {'label': 'Replacement label'})
+
+    def test_referenced_form_is_an_optional_match_selector(self):
+        creator = self.creator('reference', 'reference')
+        creator.activations['referenced_form'].set_value(True)
+        creator.controls['referenced_form'].set_value('Directory/People')
+        creator._parameter_changed(None)
+        command = self.command(creator)
+        self.assertEqual(command.referenced_form, 'Directory/People')
+        self.assertEqual(command.changes, {})
+        self.assertEqual(parse_command_text(command.to_syntax()), [command])
 
     def test_partial_option_edits_and_empty_collection_clear(self):
         creator = self.creator('enumerated', 'multiple')
@@ -279,7 +290,8 @@ class ModifyFieldCreatorTests(unittest.TestCase):
         for arguments in (
             'fieldCode="x", fieldType="FREE_TEXT"',
             'fieldCode="x", fieldType="date", fieldVariant="text"',
-            'fieldCode="x", fieldType="reference", fieldVariant="user", referencedForm="other"',
+            'fieldCode="x", fieldType="reference", fieldVariant="user", referencedForm=""',
+            'fieldCode="x", fieldType="reference", fieldVariant="user", referencedForm=Append("End", "", "other")',
             'fieldCode="x", fieldType="quantity", required=0',
             'fieldCode="x", fieldType="quantity", newCode=123',
             'fieldCode="x", fieldType="enumerated", fieldVariant="single", optionList={"values": [{"code": "x", "label": "X"}]}',

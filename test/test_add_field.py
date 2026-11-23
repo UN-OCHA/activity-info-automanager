@@ -92,7 +92,7 @@ class AddFieldTests(unittest.TestCase):
         creator.controls['field_code'].set_value('name')
         creator._parameter_changed(None)
         creator._add_command()
-        self.assertEqual(added, [AddFieldCommand('name', 'Name', required=False, field_variant='text', position='End')])
+        self.assertEqual(added, [AddFieldCommand('name', 'Name', required=False, field_variant='text')])
         for name in ('key', 'unique'):
             self.assertTrue(creator.activations[name].visible)
             self.assertFalse(creator.activations[name].value)
@@ -102,7 +102,7 @@ class AddFieldTests(unittest.TestCase):
         creator._parameter_changed(None)
         creator._add_command()
         self.assertEqual(added[-1], AddFieldCommand(
-            'name', 'Name', field_type='NARRATIVE', required=True, position='End',
+            'name', 'Name', field_type='NARRATIVE', required=True,
         ))
         creator.controls['field_type'].set_value('unknown')
         creator._parameter_changed(None)
@@ -152,6 +152,30 @@ class GenericCreatorTests(unittest.TestCase):
             return CommandCreatorRenderer((CommandCreatorDefinition(
                 'example', 'Example', parameters, dict,
             ),))
+
+    def test_multiline_popover_applies_text_and_discards_cancelled_drafts(self):
+        creator = self.make_creator((
+            P('formula', 'Formula', 'combobox', multiline=True, initially_active=True),
+        ))
+        editor = creator.editors[0]
+        self.assertNotEqual(editor.control.props.get('type'), 'textarea')
+        editor.control.set_value('A > 0')
+        editor._open_multiline_editor()
+        self.assertTrue(editor.multiline_menu.value)
+        self.assertEqual(editor.multiline_input.value, 'A > 0')
+        editor.multiline_input.set_value('A > 0\nAND B > 0')
+        self.assertEqual(creator.values()['formula'], 'A > 0')
+        editor._apply_multiline_editor()
+        self.assertFalse(editor.multiline_menu.value)
+        self.assertEqual(creator.values()['formula'], 'A > 0\nAND B > 0')
+        editor._open_multiline_editor()
+        editor.multiline_input.set_value('discard me')
+        editor.multiline_menu.close()
+        editor._open_multiline_editor()
+        self.assertEqual(editor.multiline_input.value, 'A > 0\nAND B > 0')
+        creator.set_enabled(False)
+        self.assertFalse(editor.multiline_menu.value)
+        self.assertTrue(editor.buttons[0].props['disable'])
 
     def test_activation_distinguishes_omission_blank_unset_and_false(self):
         creator = self.make_creator((

@@ -58,10 +58,11 @@ form-first writes. This accepted batching limitation does not imply arbitrary
 cross-form read/write consistency. Explicit prerequisites, endpoint/scope boundaries
 and deletion boundaries constrain grouping; there is no general dependency graph.
 Resource moves precede later schema edits and may batch compatible entries.
-MoveForm and ModifyForm require currentForm: true uses the current application form and retains
-the existing form scope and variables; false selects form/formPattern and establishes
-a scope as before. The creator declares this required boolean first and conditionally
-shows the form selector using ParameterDefinition.visible_when.
+MoveForm and ModifyForm require currentForm. With true, they use the current form
+or set of forms and retain that context. With false, they clear the previous form
+context before resolving form or formPattern. WithForm also replaces the context.
+A failed selection leaves the active form and scope empty while preserving the
+active database. A MoveForm destination warning retains the selected form.
 
 ModifyForm changes accumulate with compatible field edits in one schema action per
 form. Current-form edits retain the planner scope as well as the application scope.
@@ -74,8 +75,8 @@ remain separate, while compatible moves within one database may batch.
 
 AddForm(name="New", folder="/") creates one top-level form in the active database,
 without requiring an active form or supporting multiple mode. It exits the prior
-form iteration using single WithForm context semantics. Failed applications publish
-no new form, resource entry, selection or scope. Duplicate labels are allowed;
+form context before attempting creation. Failed applications leave the form
+context empty. Duplicate labels are allowed;
 existing selector ambiguity rules apply. Names and folders support variables and
 folders use the existing ID/name/path resolver.
 
@@ -159,11 +160,11 @@ services. These test construction helpers are not imported by application module
 ## Form deletion
 
 DeleteForm supports currentForm, a single form selector, or a whole-name pattern in
-only the active database. Explicit selectors exit iteration; currentForm preserves
-its frozen form iterator. Later commands skip deleted members with a warning.
-Deleting another form preserves active context; deleting the active form clears
-only the active form. Missing targets warn and skip. Direct subform selection is
-currently skipped; parent deletion removes descendant database entries locally.
+the active database. With currentForm=True, it processes the frozen form iteration
+before clearing the active form and scope. All DeleteForm applications clear that
+context afterwards, including skipped deletions. The active database remains
+selected. Missing targets and direct subform deletions warn and skip. Parent
+deletion removes descendant database entries locally.
 
 Deleted forms retain display tombstones, but disappear from live name resolution,
 reference context, resource lists and selector suggestions. Result tabs use red,

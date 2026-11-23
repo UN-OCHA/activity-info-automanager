@@ -180,7 +180,7 @@ class AsyncApplierTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('invalid', engine.database_names)
         self.assertEqual(engine.effects, ())
 
-    async def test_failed_scope_switch_retains_outer_and_per_form_variables(self):
+    async def test_failed_scope_switch_retains_outer_variables_and_clears_form_context(self):
         forms = [form('root', 'Root'), form('a', 'A'), form('b', 'B')]
         service = MemoryService(forms)
         engine = Applier(forms[0], parse_command_text(
@@ -192,12 +192,12 @@ class AsyncApplierTests(unittest.IsolatedAsyncioTestCase):
         await engine.evaluate()
         self.assertEqual(engine.results[-1].status, 'warning')
         self.assertEqual(engine.variables, {'vars.x': 'Outer'})
-        self.assertEqual([target['variables']['vars.x'] for target in engine.scope], ['Scoped', 'Scoped'])
+        self.assertIsNone(engine.scope)
         state = engine.workspace.state
-        self.assertEqual(state.active_scope, (ResourceKey.form('a'), ResourceKey.form('b')))
-        self.assertEqual(state.active_form_key, ResourceKey.form('b'))
+        self.assertFalse(state.active_scope)
+        self.assertIsNone(state.active_form_key)
         self.assertEqual(state.variables['vars.x'], 'Outer')
-        self.assertEqual(state.scoped_variables['a']['vars.x'], 'Scoped')
+        self.assertFalse(state.scoped_variables)
 
     async def test_failed_b_application_retains_a_state_and_b_target_metadata(self):
         forms = [form('root', 'Root'), form('a', 'A'), form('b', 'B')]

@@ -73,13 +73,14 @@ class _ParameterEditor:
         self.rows: list[list[_ParameterEditor]] = []
         self.buttons = []
         self.control = None
+        self.multiline_menu = None
         self.current_options = definition.options
         self.relevant = True
         self.required = definition.required
         self._fixed_value = None
         state = state or {}
         self.add_row_button = None
-        with ui.column().classes('creator-parameter gap-1 rounded bg-slate-100 px-2 py-1') as self.container:
+        with ui.column().classes('creator-parameter gap-1 rounded bg-slate-100 px-2 py-0.5') as self.container:
             if definition.control in ('group', 'repeat'):
                 self.container.classes('creator-expanding-parameter')
             if definition.inline_rows:
@@ -96,6 +97,10 @@ class _ParameterEditor:
                     self.container.tooltip(definition.help)
                 with ui.column().classes('gap-1 min-w-0'):
                     self._render_control(state.get('value', definition.default))
+                    if definition.multiline:
+                        append_slot = self.control.slots.get('append') or self.control.add_slot('append')
+                        with append_slot:
+                            self._render_multiline_menu()
             if definition.control in ('group', 'repeat'):
                 self.body = ui.column().classes('w-full pl-4 gap-2')
                 if definition.control == 'group':
@@ -120,13 +125,11 @@ class _ParameterEditor:
         elif definition.control == 'combobox':
             self.control = FreeTextCombobox(
                 definition.label, self._options(), value=value, on_change=on_change,
-            )
-            if definition.multiline:
-                self.control.props('type=textarea autogrow')
+            ).props('dense')
         elif definition.control == 'select':
             self.control = ui.select(
                 list(definition.options), label=definition.label, value=value, on_change=on_change,
-            ).classes('min-w-28')
+            ).props('dense').classes('min-w-28')
         elif definition.control == 'single_select':
             ui.label(definition.label).classes('text-sm text-slate-600')
             self.control = ui.radio(
@@ -145,10 +148,36 @@ class _ParameterEditor:
                 self.control = ui.checkbox(value=bool(value), on_change=on_change).props('dense size=md')
                 self.control.props['aria-label'] = definition.label
         else:
-            factory = ui.textarea if definition.multiline else ui.input
-            self.control = factory(
+            self.control = ui.input(
                 definition.label, value='' if value is None else str(value), on_change=on_change,
+            ).props('dense')
+
+    def _render_multiline_menu(self):
+        label = self.definition.label
+        with ui.button(icon='open_in_full', on_click=self._open_multiline_editor).props(
+            'flat dense round'
+        ).classes('shrink-0') as expand:
+            self.multiline_menu = ui.menu().props('no-parent-event')
+        expand.props['aria-label'] = f'Expand {label}'
+        expand.tooltip(f'Expand {label}')
+        self.buttons.append(expand)
+        with self.multiline_menu, ui.column().classes('gap-2 p-3').style(
+            'width: min(36rem, calc(100vw - 2rem))'
+        ):
+            self.multiline_input = ui.textarea(label).props('outlined rows=6').classes(
+                'w-full creator-multiline-input'
             )
+            with ui.row().classes('w-full justify-end gap-2'):
+                ui.button('Cancel', on_click=self.multiline_menu.close).props('flat')
+                ui.button('Apply', on_click=self._apply_multiline_editor)
+
+    def _open_multiline_editor(self):
+        self.multiline_input.set_value(self.control.value or '')
+        self.multiline_menu.open()
+
+    def _apply_multiline_editor(self):
+        self.control.set_value(self.multiline_input.value)
+        self.multiline_menu.close()
 
     def _options(self):
         if self.definition.option_source == 'field_codes':
@@ -260,6 +289,8 @@ class _ParameterEditor:
                     self.control.set_suggestions(options)
         for button in self.buttons:
             button.set_enabled(active and not button.props.get('data-boundary', False))
+        if self.multiline_menu is not None and not active:
+            self.multiline_menu.close()
         for children in [self.children, *self.rows]:
             self.owner._refresh_editors(children, active, siblings)
 
@@ -334,8 +365,8 @@ class CommandCreatorRenderer:
     """
 
     def __init__(self, definitions: tuple[CommandCreatorDefinition, ...], *, on_add=None, on_parameter_change=None):
-        order = ('set_variable', 'with_form', 'add_form', 'modify_form', 'move_form',
-                 'delete_form', 'add_field', 'modify_field', 'move_field', 'delete_field')
+        order = ('set_variable', 'with_form', 'add_form', 'add_modify_form', 'modify_form', 'move_form',
+                 'delete_form', 'add_field', 'modify_field', 'add_modify_field', 'move_field', 'delete_field')
         by_key = {definition.key: definition for definition in definitions}
         self.definitions = {key: by_key.pop(key) for key in order if key in by_key}
         self.definitions.update(by_key)
@@ -351,20 +382,19 @@ class CommandCreatorRenderer:
         self._updating = False
         ui.add_css('''
             .creator-parameter {
-                height: 64px;
+                height: 56px;
                 flex-shrink: 0;
                 flex-wrap: nowrap;
                 justify-content: center;
                 overflow: auto;
             }
             .creator-parameter > .nicegui-row { flex-shrink: 0; }
-            .creator-parameter textarea.q-field__native {
-                min-height: 0;
-                height: 40px;
+            .creator-multiline-input textarea.q-field__native {
+                max-height: 50vh;
                 overflow-y: auto;
             }
             .creator-parameter .q-radio { min-height: 28px; }
-            .creator-expanding-parameter { height: auto; min-height: 64px; }
+            .creator-expanding-parameter { height: auto; min-height: 56px; }
             .creator-inline-rows .creator-parameter {
                 background: transparent;
                 padding: 0;

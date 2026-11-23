@@ -38,7 +38,7 @@ ADD_FIELD_PARAMETER_OVERRIDES = {
 
 _FIELD_PARAMETERS = configure_field_parameters(ADD_FIELD_PARAMETER_OVERRIDES)
 ADD_FIELD_PARAMETERS = (
-    replace(MOVE_FIELD.parameters[1], default='End'),
+    replace(MOVE_FIELD.parameters[1], required=False, blank_action='unset'),
     replace(MOVE_FIELD.parameters[2], key='before_after_field'),
     *_FIELD_PARAMETERS,
 )

@@ -23,7 +23,7 @@ def append_formula(context: FunctionContext, operator: str, formula: str) -> str
 
 APPEND_FORMULA = FunctionDefinition(
     name='AppendFormula',
-    commands=frozenset({'ModifyField'}),
+    commands=frozenset({'ModifyField', 'AddModifyField'}),
     arguments=(FunctionArgument('Operator'), FunctionArgument('Formula')),
     parameters=frozenset({'relevanceCondition', 'requiredCondition', 'validationCondition',
                           'defaultFormula', 'prefixFormula', 'calculationFormula'}),

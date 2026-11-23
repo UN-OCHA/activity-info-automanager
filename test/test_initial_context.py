@@ -49,14 +49,16 @@ class InitialContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(engine.workspace.state.active_form_key)
         self.assertEqual(engine.candidate_plan.actions, ())
 
-    async def test_failed_selections_preserve_previous_form_and_do_not_modify_it(self):
+    async def test_failed_selections_clear_active_form_and_do_not_modify_previous_form(self):
         for selector in ('Missing', 'Remote/Missing', 'MissingDatabase/B'):
             with self.subTest(selector=selector):
                 engine, _ = await self.evaluate(f'ModifyForm(currentForm=False, form="{selector}", name="Rejected")\nAddField(fieldCode="kept", label="Kept")', initial=form('a', 'A'))
-                self.assertEqual([e.status for e in engine.executions], ['warning', 'applied'])
-                self.assertEqual(engine.workspace.active_schema['label'], 'A')
+                self.assertEqual([e.status for e in engine.executions], ['warning', 'warning'])
+                self.assertEqual(engine.executions[-1].diagnostics[0].code, 'missing_form')
+                self.assertIsNone(engine.workspace.active_schema)
+                self.assertEqual(engine.workspace.latest['a']['label'], 'A')
                 self.assertEqual(engine.workspace.state.active_database_id, 'db')
-                self.assertEqual(len(engine.effects), 1)
+                self.assertFalse(engine.effects)
 
     async def test_literal_variable_can_establish_selector_without_initial_context(self):
         engine, _ = await self.evaluate('SetVariable(name="target", method="literal", value="Remote/B")\nWithForm(form="${vars.target}")')

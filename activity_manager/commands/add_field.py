@@ -137,7 +137,7 @@ class AddFieldCommand:
             if isinstance(value, (dict, list)):
                 object.__setattr__(self, name, deepcopy(value))
 
-    def _validate(self):
+    def _validate_position(self):
         if self.position is not None:
             positions = {value.casefold(): value for value in ('Beginning', 'End', 'Before field', 'After field')}
             if not isinstance(self.position, str) or self.position.casefold() not in positions:
@@ -150,6 +150,9 @@ class AddFieldCommand:
                 fail('before_after_field', 'AddField cannot position a field relative to itself.')
         elif self.before_after_field is not None:
             fail('before_after_field', 'AddField does not use beforeAfterField for this position.')
+
+    def _validate(self):
+        self._validate_position()
         if self.field_variant is not None and self.field_variant not in FIELD_VARIANTS.get(str(self.field_type).casefold(), ()):
             fail('field_variant', 'Invalid field variant for this field type.')
         error = field_type_error(self.field_type)
@@ -445,7 +448,8 @@ def create_add_field(values: Mapping[str, Any]) -> AddFieldCommand:
     return AddFieldCommand(**arguments)
 
 
-def parse_add_field(text: str, call: ast.Call) -> AddFieldCommand:
+def parse_add_field_arguments(text, call, *, command_name='AddField', require_label=True,
+                              function_parameters=(), blank_parameters=()):
     types = {argument: str for argument in ARGUMENTS.values()}
     for key in ('key', 'unique', 'required', 'hide_from_entry', 'hide_in_table', 'reviewer_only',
                 'read_only', 'translation', 'barcode'):
@@ -454,21 +458,26 @@ def parse_add_field(text: str, call: ast.Call) -> AddFieldCommand:
                   'translationLanguage': (str, list), 'uploadType': list, 'allowedFileTypes': list,
                   'optionList': dict, 'lookupFields': list, 'defaultValue': (str, int, float, list, dict)})
     values = parse_literal_parameters(
-        text, call, 'AddField', types=types, required={'label'},
-        allow_empty=set(types) - {'fieldType', 'fieldCode', 'label'},
+        text, call, command_name, types=types, required={'label'} if require_label else (),
+        allow_empty=set(types) - ({'fieldType', 'fieldCode', 'label'} if require_label else {'fieldType', 'fieldCode'}),
+        function_parameters=function_parameters, blank_parameters=blank_parameters,
     )
     for argument, error in (
         ('fieldCode', None if values.get('fieldType', '').casefold() in ('section', 'note')
          and 'fieldCode' not in values else field_code_error(values.get('fieldCode'))),
         ('fieldType', field_type_error(values.get('fieldType', 'FREE_TEXT'))),
-        ('label', None if values['label'].strip() else 'Field label is required.'),
+        ('label', 'Field label is required.' if require_label and not values['label'].strip() else None),
     ):
         if error:
             node = next((keyword.value for keyword in call.keywords
                          if keyword.arg and keyword.arg.casefold() == argument.casefold()), call)
             raise command_error(text, node, error)
     by_argument = {argument: key for key, argument in ARGUMENTS.items()}
-    return AddFieldCommand(**{by_argument[key]: value for key, value in values.items()})
+    return {by_argument[key]: value for key, value in values.items()}
+
+
+def parse_add_field(text: str, call: ast.Call) -> AddFieldCommand:
+    return AddFieldCommand(**parse_add_field_arguments(text, call))
 
 
 ADD_FIELD = CommandCreatorDefinition(

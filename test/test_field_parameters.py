@@ -279,8 +279,11 @@ class ExpandedEditorTests(unittest.TestCase):
     def test_add_field_position_controls(self):
         creator = self.creator()
         creator.set_schema(schema())
-        self.assertEqual(creator.values()['position'], 'End')
+        self.assertNotIn('position', creator.values())
+        appended = ADD_FIELD.create_command(creator.values()).execute(schema())
+        self.assertEqual(appended.schema['elements'][-1]['code'], 'new')
         self.assertFalse(creator.parameter_containers['before_after_field'].visible)
+        creator.activations['position'].set_value(True)
         creator.controls['position'].set_value('Before field')
         creator._parameter_changed(None)
         self.assertTrue(creator.parameter_containers['before_after_field'].visible)

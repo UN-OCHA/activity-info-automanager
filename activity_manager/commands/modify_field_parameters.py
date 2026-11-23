@@ -15,7 +15,8 @@ def optional_edit(parameter):
                    children=tuple(optional_edit(child) for child in parameter.children))
 
 
-_EXCLUDED = {'field_code', 'barcode', 'metadata', 'referenced_form',
+TARGET_PARAMETERS = {'field_code', 'field_type', 'field_variant', 'referenced_form'}
+_EXCLUDED = {'field_code', 'barcode', 'metadata',
              'reverse_reference_field', 'attachment_cardinality'}
 
 
@@ -26,6 +27,10 @@ def configure(parameter):
         return replace(parameter, required=True)
     if key == 'field_variant':
         return replace(parameter, required_when=variant_required)
+    if key == 'referenced_form':
+        return replace(parameter, label='Match referenced form',
+                       visible_when=for_types('reference', 'multiselectreference', 'subform', 'reversereference'),
+                       help='Optional match by form ID, local name, or Database/Form.')
     if key in ('key', 'unique'):
         return replace(parameter, visible_when=lambda values: parameter_applies(key, values)
                        and not for_types('serial')(values))
@@ -57,7 +62,7 @@ MODIFY_FIELD_PARAMETERS = (
 MODIFY_FIELD_PARAMETERS = tuple(
     replace(parameter, parse_text=partial(parse_function_input, command_name='ModifyField',
         parameter='newCode' if parameter.key == 'new_code' else FIELD_ARGUMENTS[parameter.key]))
-    if parameter.key not in ('field_code', 'field_type', 'field_variant')
+    if parameter.key not in TARGET_PARAMETERS
     and parameter.control in ('text', 'combobox') and parameter.value_type == 'string'
     else parameter
     for parameter in MODIFY_FIELD_PARAMETERS

@@ -1,7 +1,7 @@
 """Standalone ModifyField creation, serialization and atomic schema updates."""
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import math
 
@@ -14,13 +14,13 @@ from ..field_parameters import FIELD_ARGUMENTS, FIELD_TYPES_BY_CASE, FIELD_VARIA
 from .add_field import AddFieldCommand, literal_syntax
 from ..schema_identity import pending_row_id, schema_identities
 from ..schema_names import readable_schema
-from .modify_field_parameters import MODIFY_FIELD_PARAMETERS
+from .modify_field_parameters import MODIFY_FIELD_PARAMETERS, TARGET_PARAMETERS
 
 
 EDIT_ARGUMENTS = {
     'new_code': 'newCode',
     **{parameter.key: FIELD_ARGUMENTS[parameter.key] for parameter in MODIFY_FIELD_PARAMETERS
-       if parameter.key not in ('field_code', 'field_type', 'field_variant', 'new_code')},
+       if parameter.key not in TARGET_PARAMETERS | {'new_code'}},
 }
 
 
@@ -30,10 +30,15 @@ class ModifyFieldCommand:
     field_type: str
     field_variant: str | None = None
     changes: dict = field(default_factory=dict)
+    referenced_form: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.field_code, str) or not self.field_code.strip():
             raise ValueError('Existing field code or label is required.')
+        if self.referenced_form is not None and (
+            not isinstance(self.referenced_form, str) or not self.referenced_form.strip()
+        ):
+            raise ValueError('referencedForm requires a form ID or name.')
         error = field_type_error(self.field_type)
         if error:
             raise ValueError(error)
@@ -54,23 +59,55 @@ class ModifyFieldCommand:
         arguments = [('fieldCode', self.field_code), ('fieldType', self.field_type)]
         if self.field_variant is not None:
             arguments.append(('fieldVariant', self.field_variant))
+        if self.referenced_form is not None:
+            arguments.append(('referencedForm', self.referenced_form))
         arguments.extend((argument, self.changes[key]) for key, argument in EDIT_ARGUMENTS.items()
                          if key in self.changes)
         return 'ModifyField(' + ', '.join(f'{key}={edit_syntax(value)}' for key, value in arguments) + ')'
 
-    def execute(self, schema, *, context=None):
+    def _target(self, schema):
         if not isinstance(schema, dict) or not isinstance(schema.get('elements'), list):
             return ExecutionResult.error(None, 'ModifyField requires a form schema with an elements list.', 'invalid_schema')
         try:
-            # Revalidate mutable nested values before touching the schema copy.
-            command = ModifyFieldCommand(self.field_code, self.field_type, self.field_variant, self.changes)
-            index = find_target(command, schema['elements'])
+            index = find_target(self, schema['elements'])
             if index is None:
                 return ExecutionResult.warning(schema, f'ModifyField could not find field {self.field_code!r}.', 'missing_target')
-            if not matches_target(command, schema['elements'][index]):
-                return ExecutionResult.warning(schema,
-                    f'Field code {self.field_code!r} has a different type or variant. '
-                    'Command skipped; schema unchanged.', 'target_type_mismatch')
+            if not matches_target(self.field_type, self.field_variant, schema['elements'][index]):
+                return target_mismatch(schema, self.field_code, 'type or variant')
+            return index
+        except ValueError as exc:
+            return ExecutionResult.error(schema, str(exc), 'invalid_modify_field')
+
+    def execute(self, schema, *, context=None):
+        index = self._target(schema)
+        if isinstance(index, ExecutionResult):
+            return index
+        requested = self.referenced_form
+        if requested is not None:
+            requested = cached_target_form(schema, requested, context)
+            mismatch = check_reference_target(schema, self.field_code, schema['elements'][index], requested)
+            if mismatch is not None:
+                return mismatch
+        return self.apply_to_target(schema, index, context)
+
+    async def execute_resolved(self, schema, context, resolver):
+        index = self._target(schema)
+        if isinstance(index, ExecutionResult):
+            return index
+        target = schema['elements'][index]
+        requested = await resolve_target_form(schema, target, self.referenced_form, resolver)
+        mismatch = check_reference_target(schema, self.field_code, target, requested, required=True)
+        if mismatch is not None:
+            return mismatch
+        result = self.apply_to_target(schema, index, context)
+        if result.has_errors:
+            return result
+        return await resolver(result.schema)
+
+    def apply_to_target(self, schema, index, context):
+        try:
+            # Revalidate mutable nested values before touching the schema copy.
+            command = replace(self)
             check_applicability(command, schema['elements'][index])
             command = resolve_function_edits(command, schema, index, context)
             result = deepcopy(schema)
@@ -141,8 +178,7 @@ def resolve_function_edits(command, schema, index, context=None):
         function_context = FunctionContext(FUNCTION_PARAMETERS[key],
             str(value) if isinstance(value, str) else value, command='ModifyField')
         changes[key] = normalize_blank_edit(definitions[key], evaluate_function(call, function_context))
-    return ModifyFieldCommand(command.field_code, command.field_type, command.field_variant,
-                             changes)
+    return replace(command, changes=changes)
 
 
 def schema_variant(element):
@@ -167,23 +203,91 @@ def schema_variant(element):
     return None
 
 
-def matches_target(command, element):
-    return str(element.get('type', '')).casefold() == command.field_type.casefold() and schema_variant(element) == command.field_variant
+def matches_target(field_type, field_variant, element):
+    return str(element.get('type', '')).casefold() == field_type.casefold() and schema_variant(element) == field_variant
+
+
+def find_coded_target(code, elements):
+    if code is None:
+        return None
+    coded = [index for index, element in enumerate(elements)
+             if isinstance(element, dict) and element.get('code') == code]
+    if len(coded) > 1:
+        raise ValueError(f'Ambiguous field code {code!r}.')
+    return coded[0] if coded else None
 
 
 def find_target(command, elements):
-    coded = [index for index, element in enumerate(elements)
-             if isinstance(element, dict) and element.get('code') == command.field_code]
-    if len(coded) > 1:
-        raise ValueError(f'Ambiguous field code {command.field_code!r}.')
-    if coded:
-        return coded[0]
+    coded = find_coded_target(command.field_code, elements)
+    if coded is not None:
+        return coded
     labelled = [index for index, element in enumerate(elements)
                 if isinstance(element, dict) and element.get('label') == command.field_code
-                and matches_target(command, element)]
+                and matches_target(command.field_type, command.field_variant, element)]
     if len(labelled) > 1:
         raise ValueError(f'Ambiguous field label {command.field_code!r} for this type and variant.')
     return labelled[0] if labelled else None
+
+
+def target_mismatch(schema, code, property_name):
+    return ExecutionResult.warning(schema, f'Field code {code!r} has a different '
+        f'{property_name}. Command skipped; schema unchanged.', 'target_type_mismatch')
+
+
+def reference_target_ids(element):
+    kind = str(element.get('type', '')).casefold()
+    params = element.get('typeParameters') or {}
+    if kind in ('reference', 'multiselectreference'):
+        return [entry.get('formId') for entry in params.get('range') or [] if isinstance(entry, dict)]
+    if kind in ('subform', 'reversereference'):
+        return [params.get('formId')]
+    return []
+
+
+def check_reference_target(schema, code, target, requested, *, required=False):
+    if requested is None and not required:
+        return None
+    if not requested or reference_target_ids(target) != [requested]:
+        return target_mismatch(schema, code, 'referenced form')
+    return None
+
+
+def cached_target_form(schema, value, context):
+    forms = dict(context.related_schemas or {}) if context else {}
+    forms[schema.get('id')] = schema
+    if value in forms:
+        return value
+    database_names = (context.database_names or {}) if context else {}
+    matches = []
+    for identity, form in forms.items():
+        name = form.get('label')
+        database_id = form.get('databaseId')
+        database_name = database_names.get(database_id)
+        if name and ((database_id == schema.get('databaseId') and name == value)
+                     or (database_name and f'{database_name}/{name}' == value)):
+            matches.append(identity)
+    return matches[0] if len(matches) == 1 else value
+
+
+async def resolve_target_form(schema, target, requested, resolver, *, load_context=False):
+    if not requested:
+        return requested
+    existing_ids = reference_target_ids(target)
+    if requested in existing_ids and not load_context:
+        return requested
+    if not existing_ids:
+        return None
+    # The normal resolver handles local and database-qualified names and verifies IDs.
+    probe = {**schema, 'elements': [{'type': 'reference',
+             'typeParameters': {'range': [{'formId': requested}]}}]}
+    try:
+        resolved = await resolver(probe)
+    except ValueError:
+        return None
+    if resolved.application_failed:
+        return None
+    ids = reference_target_ids(resolved.schema['elements'][0])
+    return ids[0] if ids else None
 
 
 def set_or_remove(container, key, value):
@@ -440,11 +544,12 @@ def create_modify_field(values):
                 changes['default_value'] = json.loads(default)
             except ValueError:
                 raise ValueError('Use JSON for coordinates or multiple defaults.') from None
-    return ModifyFieldCommand(values['field_code'], values['field_type'], values.get('field_variant'), changes)
+    return ModifyFieldCommand(values['field_code'], values['field_type'], values.get('field_variant'),
+                              changes, referenced_form=values.get('referenced_form'))
 
 
 def parse_modify_field(text, call):
-    types = {'fieldCode': str, 'fieldType': str, 'fieldVariant': str}
+    types = {'fieldCode': str, 'fieldType': str, 'fieldVariant': str, 'referencedForm': str}
     for parameter in MODIFY_FIELD_PARAMETERS:
         if parameter.key not in EDIT_ARGUMENTS:
             continue
@@ -465,8 +570,9 @@ def parse_modify_field(text, call):
     values = parse_literal_parameters(text, call, 'ModifyField', types=types,
                                       required={'fieldCode', 'fieldType'},
                                       function_parameters=set(FUNCTION_PARAMETERS.values()),
-                                      allow_empty=set(types) - {'fieldCode', 'fieldType', 'fieldVariant'})
+                                      allow_empty=set(EDIT_ARGUMENTS.values()))
     names = {'fieldCode': 'field_code', 'fieldType': 'field_type', 'fieldVariant': 'field_variant',
+             'referencedForm': 'referenced_form',
              **{argument: key for key, argument in EDIT_ARGUMENTS.items()}}
     try:
         return create_modify_field({names[key]: value for key, value in values.items()})

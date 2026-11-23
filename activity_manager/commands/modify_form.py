@@ -45,7 +45,7 @@ class ModifyFormCommand:
 
     def execute(self, schema, *, context=None):
         """The runner selects the form before applying this atomic edit."""
-        if not self.current_form and (self.form_pattern is not None or self.form != schema.get('id')):
+        if not self.current_form and (self.form_pattern is not None or self.form != (schema or {}).get('id')):
             return ExecutionResult.error(schema, 'ModifyForm requires a connected form loader.', 'form_unavailable')
         result = deepcopy(schema)
         if self.new_name is not None:

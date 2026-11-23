@@ -91,7 +91,7 @@ class DeleteFormTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_active_context_tombstone_and_missing_targets(self):
         app, _ = await self.apply('DeleteForm(currentForm=False, form="B")')
-        self.assertEqual(app.workspace.active_schema['id'], 'a')
+        self.assertIsNone(app.workspace.active_schema)
         self.assertEqual(app.workspace.state.active_database_id, 'db')
         self.assertNotIn('b', app.workspace.latest)
         tab = next(t for t in app.executions[-1].display_state.tabs() if t.key.identity == 'b')
@@ -139,12 +139,31 @@ class DeleteFormTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(set(service.schemas), {'a', 'b'})
             self.assertIsNone(app.scope)
 
-    async def test_current_form_preserves_iterator_and_later_commands_skip(self):
+    async def test_current_form_deletes_the_whole_iterator_then_clears_context(self):
         app, _ = await self.apply('WithForm(formPattern="[AB]")\nDeleteForm(currentForm=True)\nAddField(fieldCode="X", label="X")')
-        self.assertEqual(len(app.scope), 2)
+        self.assertIsNone(app.scope)
+        self.assertIsNone(app.workspace.active_schema)
+        self.assertEqual(len(app.executions[1].iterations), 2)
+        self.assertTrue(all(e.status == 'applied' for e in app.executions[1].iterations))
         self.assertEqual(len(app.candidate_plan.actions), 1)
-        self.assertTrue(all(e.status == 'warning' for e in app.executions[-1].iterations))
+        self.assertEqual(app.executions[-1].diagnostics[0].code, 'missing_form')
+        self.assertFalse(app.executions[-1].form_iterations)
         self.assertEqual(app.workspace.latest, {})
+
+    async def test_current_form_deletion_continues_past_warning_before_clearing_context(self):
+        service = DeletionService()
+        service.resources['db']['a']['type'] = 'SUB_FORM'
+        app, _ = await self.apply(
+            'WithForm(formPattern="[AB]")\nDeleteForm(currentForm=True)\nAddField(fieldCode="X", label="X")',
+            service=service,
+        )
+        deletion = app.executions[1]
+        self.assertEqual([child.status for child in deletion.iterations], ['warning', 'applied'])
+        self.assertNotIn('b', app.workspace.latest)
+        self.assertIn('a', app.workspace.latest)
+        self.assertIsNone(app.scope)
+        self.assertIsNone(app.workspace.active_schema)
+        self.assertEqual(app.executions[2].diagnostics[0].code, 'missing_form')
 
     async def test_reference_warning_and_substitutions_disappear(self):
         service = DeletionService()
@@ -203,7 +222,8 @@ class DeleteFormTests(unittest.IsolatedAsyncioTestCase):
         app, _ = await self.apply('WithForm(formPattern="[AB]")\nDeleteForm(currentForm=False, form="Remote/C")\nAddField(fieldCode="X", label="X")', service=service)
         self.assertIsNone(app.scope)
         self.assertEqual(app.workspace.state.active_database_id, 'db')
-        self.assertEqual(app.workspace.active_schema['id'], 'b')
+        self.assertIsNone(app.workspace.active_schema)
+        self.assertEqual(app.executions[-1].diagnostics[0].code, 'missing_form')
         self.assertNotIn('c', app.workspace.latest)
 
     async def test_reapply_without_delete_restores_selection_and_report_omits_deleted_schema(self):
@@ -235,17 +255,17 @@ class DeleteFormTests(unittest.IsolatedAsyncioTestCase):
         toggle.set_value('names')
         self.assertTrue(any(item.text == 'Form deleted' and item.visible for item in labels))
 
-    async def test_unmatched_delete_exits_scope_without_breaking_active_form_edits(self):
+    async def test_unmatched_delete_clears_scope_and_active_form(self):
         app, _ = await self.apply('WithForm(formPattern="[AB]")\nDeleteForm(currentForm=False, formPattern="Missing")\nAddField(fieldCode="X", label="X")')
         self.assertEqual(app.executions[1].status, 'warning')
         self.assertIsNone(app.scope)
-        self.assertEqual(app.workspace.active_schema['id'], 'b')
-        self.assertEqual(app.executions[-1].status, 'applied')
+        self.assertIsNone(app.workspace.active_schema)
+        self.assertEqual(app.executions[-1].diagnostics[0].code, 'missing_form')
 
     async def test_later_failed_write_rolls_back_deletion_with_its_receipt(self):
         service = DeletionService()
         service.reject_schema = True
-        app, _ = await self.apply('DeleteForm(currentForm=False, form="B")\nAddField(fieldCode="X", label="X")', service=service)
+        app, _ = await self.apply('DeleteForm(currentForm=False, form="B")\nWithForm(form="A")\nAddField(fieldCode="X", label="X")', service=service)
         _, report = await self.execute(app, service)
         self.assertEqual(report.status, 'rolled_back_all', report.messages)
         self.assertIn(('revert', '11'), service.calls)

@@ -115,15 +115,18 @@ WithForm(form="Three")
         self.assertEqual(manager.executions[-1].schema['databaseId'], 'remote')
         self.assertEqual(service.reads, ['two', 'three'])
 
-    async def test_failed_switch_preserves_state_and_allows_later_commands(self):
+    async def test_failed_switch_clears_active_form_until_next_selection(self):
         manager, service = await self.evaluate([form('one', 'One')], '''
 WithForm(form="Missing")
+AddField(fieldCode="skip", label="Skip")
+WithForm(form="One")
 AddField(fieldCode="new", label="New")
 ''')
         self.assertEqual(manager.executions[0].status, 'warning')
-        self.assertEqual(manager.executions[1].status, 'applied')
-        self.assertEqual(manager.executions[1].schema['elements'][0]['code'], 'new')
-        self.assertEqual(manager.executions[0].schema['id'], 'one')
+        self.assertEqual(manager.executions[1].diagnostics[0].code, 'missing_form')
+        self.assertEqual(manager.executions[3].status, 'applied')
+        self.assertEqual([field['code'] for field in manager.executions[3].schema['elements']], ['new'])
+        self.assertIsNone(manager.executions[0].schema)
         self.assertEqual(len(manager.workspace.form_snapshots), 1)
 
     async def test_reevaluation_does_not_reuse_previous_local_edits(self):
@@ -168,12 +171,13 @@ WithForm(form="${vars.target}")
 WithForm(form="One")
 WithForm(form="Missing")
 ''')
-        for index in (0, 1, 2, 4, 5):
+        for index in (0, 1, 2, 4):
             with self.subTest(index=index):
                 self.assertEqual(len(manager.executions[index].issues), 1)
                 self.assertEqual(manager.executions[index].issues[0].path,
                                  ('elements', 0, 'validationCondition'))
         self.assertEqual(manager.executions[5].status, 'warning')
+        self.assertFalse(manager.executions[5].issues)
 
     async def test_result_tabs_show_history_and_reuse_revisited_form(self):
         managers = []

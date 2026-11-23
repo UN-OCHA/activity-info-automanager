@@ -32,6 +32,8 @@ class AppendTests(unittest.TestCase):
         for current, position, separator, added, expected in (
             ('Value', 'sTaRt', ' - ', 'Added', 'Added - Value'),
             ('Value', 'eND', ' - ', 'Added', 'Value - Added'),
+            ('aDDeD', 'Start', ' - ', 'Added', 'aDDeD'),
+            ('aDDeD', 'End', ' - ', 'Added', 'aDDeD'),
             ('aDDeD - Value', 'Start', ' - ', 'Added', 'aDDeD - Value'),
             ('Value - aDDeD', 'End', ' - ', 'Added', 'Value - aDDeD'),
             ('Added Value', 'Start', ' - ', 'Added', 'Added - Added Value'),
@@ -50,7 +52,7 @@ class AppendTests(unittest.TestCase):
                 self.assertEqual(self.evaluate(current, position, separator, added), expected)
 
     def test_permissions_and_signature(self):
-        self.assertEqual(APPEND.commands, frozenset({'ModifyField'}))
+        self.assertEqual(APPEND.commands, frozenset({'ModifyField', 'AddModifyField'}))
         self.assertEqual(APPEND.parameters, REPLACE.parameters - APPEND_FORMULA.parameters)
         call = FunctionCall('Append', ['End', ' ', 'text'])
         for parameter in (*APPEND_FORMULA.parameters, 'fieldCode', 'fieldType', 'fieldVariant', 'lookupFields'):
