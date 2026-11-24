@@ -1,4 +1,5 @@
 """Optional initial context and atomic warning-only selection failures."""
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -31,7 +32,46 @@ class InitialContextTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(execution.names_schema['elements'][0]['typeParameters']['range'],
                              [{'formId': 'Target'}])
         self.assertEqual([call.args[0] for call in service.get_form_tree.await_args_list], ['a', 'b'])
+        self.assertEqual(service.reads, [])
+        self.assertEqual(engine.workspace.baseline_forms['a'], service.schemas['a'])
         self.assertNotIn('target', engine.workspace.latest)
+
+    async def test_form_pattern_bounds_tree_reads_and_preserves_iteration_order(self):
+        schemas = [form(f'a{i}', f'Form {i:02}', 'db' if i < 5 else 'remote') for i in range(10)]
+        service = MemoryService(reversed(schemas))
+        in_flight = peak = 0
+
+        async def tree(identity):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(0)
+                return {identity: service.schemas[identity]}
+            finally:
+                in_flight -= 1
+
+        service.get_form_tree = AsyncMock(side_effect=tree)
+        engine = Applier(commands=parse_command_text('WithDatabase(databasePattern=".*")\nWithForm(formPattern="Form .*")'),
+                         form_service=service)
+        forms_seen_on_next_tick = []
+        apply_actual = engine._apply_actual
+
+        async def apply_and_schedule(*args, **kwargs):
+            result = await apply_actual(*args, **kwargs)
+            if result.schema['id'] == 'a0':
+                asyncio.get_running_loop().call_soon(
+                    lambda: forms_seen_on_next_tick.append(tuple(engine.workspace.latest)))
+            return result
+
+        with patch.object(engine, '_apply_actual', side_effect=apply_and_schedule):
+            await engine.evaluate()
+        self.assertEqual(forms_seen_on_next_tick, [('a0',)])
+        self.assertEqual(peak, 8)
+        self.assertEqual(service.get_form_tree.await_count, 10)
+        self.assertEqual(service.reads, [])
+        self.assertEqual([child.schema['id'] for child in engine.executions[1].iterations],
+                         [schema['id'] for schema in schemas])
 
     async def test_form_tree_failure_warns_and_keeps_the_selected_form(self):
         service = MemoryService([form('a', 'A')])
@@ -42,6 +82,7 @@ class InitialContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.executions[0].status, 'warning')
         self.assertEqual(engine.executions[0].diagnostics[0].code, 'form_tree_unavailable')
         self.assertEqual(engine.workspace.active_schema['id'], 'a')
+        self.assertEqual(service.reads, ['a'])
 
     async def evaluate(self, text, *, initial=None, database=None):
         service = MemoryService([form('a', 'A'), form('b', 'B', 'remote')])

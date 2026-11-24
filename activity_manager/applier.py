@@ -21,6 +21,17 @@ from .planning import PlanBuilder, SchemaEffect, ResourcePatchEffect, FormDelete
 from .schema_names import readable_schema, load_default_record_labels
 
 ACTIVE_DRAFT = ContextVar('activity_manager_application_draft', default=None)
+FORM_READ_CONCURRENCY = 8
+
+
+async def _read_form_scope(items, read):
+    limit = asyncio.Semaphore(FORM_READ_CONCURRENCY)
+
+    async def bounded(item):
+        async with limit:
+            return await read(item)
+
+    return await asyncio.gather(*(bounded(item) for item in items), return_exceptions=True)
 
 
 @dataclass
@@ -210,7 +221,10 @@ class Applier:
             return self._save_result(self._failed_result(result, current))
         try:
             publication = {name: deepcopy(getattr(draft, name)) for name in self._CONTEXT_FIELDS
-                           if name != 'variables'}
+                           if name not in ('variables', 'resolution_cache')}
+            # Cached reads return detached copies. Share the stored payloads so
+            # each form selection does not copy every prefetched tree.
+            publication['resolution_cache'] = draft.resolution_cache.copy()
             committed_variables = deepcopy(draft.variables)
         except Exception as exc:
             failure = ExecutionResult.error(result.schema,
@@ -253,7 +267,7 @@ class Applier:
         return self._commit(draft, result, current, variables, None)
 
     async def _apply_actual(self, application, current, variables, *, form_key=None, scope_member=False,
-                            on_success=None, scope_context=None):
+                            on_success=None, scope_context=None, tree_read=None):
         draft = self._new_draft(variables, form_key)
         self._attempt_id = self._application_id()
         self._position += 1
@@ -261,7 +275,8 @@ class Applier:
         token = ACTIVE_DRAFT.set(draft)
         try:
             result = await self._apply_candidate(application, deepcopy(current), draft.variables,
-                                                 scope_member=scope_member, scope_context=scope_context)
+                                                 scope_member=scope_member, scope_context=scope_context,
+                                                 tree_read=tree_read)
             if not self.is_current():
                 return None
             result = self._stage_result(result, current)
@@ -568,7 +583,8 @@ class Applier:
                        snapshot_issues=issues, form_issues=deepcopy(self.workspace.issues), display_state=display)
 
 
-    async def _apply_candidate(self, application, current, variables, *, scope_member=False, scope_context=None):
+    async def _apply_candidate(self, application, current, variables, *, scope_member=False, scope_context=None,
+                               tree_read=None):
         from .commands.add_form import AddFormCommand
         from .commands.add_modify_form import AddModifyFormCommand
         from .commands.with_form import WithFormCommand
@@ -599,12 +615,14 @@ class Applier:
                 if self.form_service is None:
                     return prepared.execute(current)
                 try:
-                    schema = (current if isinstance(prepared, ModifyFormCommand) and prepared.current_form else
-                              await self.workspace.select(prepared.form, self.form_service) if scope_member else
-                              await self._switch_form(prepared.form))
+                    if scope_member or (isinstance(prepared, ModifyFormCommand) and prepared.current_form):
+                        identity = prepared.form if scope_member else self.workspace.key_for(current).identity
+                        schema, tree_warnings = await self.workspace.select_with_tree(
+                            identity, self.form_service, self.related_schemas, tree_read=tree_read)
+                    else:
+                        schema, tree_warnings = await self._switch_form(prepared.form, self.related_schemas)
                 except FormSelectionError as exc:
                     return ExecutionResult.warning(current, str(exc), 'form_switch_failed', skipped=True)
-                tree_warnings = await self.workspace.load_form_tree(schema, self.form_service, self.related_schemas)
                 if scope_context is not None:
                     self._plan_form_selection(self.workspace.key_for(schema), scope_context)
                 elif not (isinstance(prepared, ModifyFormCommand) and prepared.current_form):
@@ -647,10 +665,10 @@ class Applier:
         return result
 
 
-    async def _switch_form(self, selector):
+    async def _switch_form(self, selector, related=None):
         from .schema_resolution import CachedResolutionService
         service = CachedResolutionService(self.form_service, self.resolution_cache)
-        return await self.workspace.switch(selector, service)
+        return await self.workspace.switch(selector, service, related)
 
     def _plan_form_selection(self, key, scope_context):
         if scope_context is None:
@@ -1017,6 +1035,7 @@ class Applier:
     async def _start_form_scope(self, command, current, variables, branches=()):
         from .command_iteration import compile_pattern
         from .command_templates import substitute_text
+        from .commands.with_form import WithFormCommand
         from .schema_resolution import CachedResolutionService
 
         scope, empty_branches = [], []
@@ -1030,13 +1049,20 @@ class Applier:
             if self.form_service is None:
                 raise ValueError('WithForm requires a connected form loader.')
             service = CachedResolutionService(self.form_service, self.resolution_cache)
-            for branch in databases:
-                bindings = branch['variables']
-                pattern = compile_pattern(substitute_text(command.form_pattern, bindings,
+            async def read_directory(branch):
+                pattern = compile_pattern(substitute_text(command.form_pattern, branch['variables'],
                                                           namespaces={'vars', 'database'}), kind='form')
                 names = await self.workspace.form_directory(service, branch['id'])
-                if not self.is_current():
-                    return None, None
+                return pattern, names
+
+            directories = await _read_form_scope(databases, read_directory)
+            if not self.is_current():
+                return None, None
+            for branch, directory in zip(databases, directories, strict=True):
+                if isinstance(directory, BaseException):
+                    raise directory
+                pattern, names = directory
+                bindings = branch['variables']
                 count = 0
                 for identity, name in sorted(names.items(), key=lambda item: (item[1].casefold(), item[0])):
                     if (match := pattern.fullmatch(name)) is None:
@@ -1060,7 +1086,25 @@ class Applier:
         scope_id = self.authored_commands[self._index].authored_id
         scope_keys = tuple(ResourceKey.form(target['identity']) for target in scope)
         children = self._pending_forms(scope)
+        tree_reads = {}
+        if isinstance(command, WithFormCommand) and len(scope) > 1:
+            async def read_tree(identity):
+                return await self.workspace.read_form_tree(identity, self.form_service)
+
+            identities = tuple(dict.fromkeys(target['identity'] for target in scope))
+            reads = await _read_form_scope(identities, read_tree)
+            if not self.is_current():
+                return None, None
+            for identity, read in zip(identities, reads, strict=True):
+                if isinstance(read, BaseException):
+                    raise read
+                tree_reads[identity] = read
         for i, target in enumerate(scope):
+            # Prefetched and cached reads can complete without suspending.
+            # Let the UI service its connection between form applications.
+            await asyncio.sleep(0)
+            if not self.is_current():
+                return None, None
             from .command_templates import command_parameters
             try:
                 concrete = command_parameters(replace(command, form=target['identity'], form_pattern=None),
@@ -1069,7 +1113,8 @@ class Applier:
                 result = ExecutionResult.error(current, str(exc), 'invalid_parameter')
             else:
                 result = await self._apply_actual(PreparedCommand(concrete), current, target['variables'],
-                                                 scope_member=True, scope_context=(scope_id, scope_keys))
+                                                 scope_member=True, scope_context=(scope_id, scope_keys),
+                                                 tree_read=tree_reads.pop(target['identity'], None))
             if result is None or not self.is_current():
                 return None, None
             if not result.application_failed:
@@ -1135,6 +1180,9 @@ class Applier:
         self.executions[index] = self._form_summary(children, current)
         self._publish_evaluation()
         for i, target in enumerate(scope):
+            await asyncio.sleep(0)
+            if not self.is_current():
+                return None
             state = self.workspace.state.resources.get(target['form_key'])
             if state is None or state.lifecycle == Lifecycle.DELETED:
                 warning = self._snapshot_execution(CommandExecution.from_result(ExecutionResult.warning(
@@ -1154,8 +1202,6 @@ class Applier:
                                   console_path=children[i].console_path,
                                   target_keys=children[i].target_keys)
             current = execution.schema
-            self.executions[index] = self._form_summary(children, current)
-            self._publish_evaluation()
             if execution.status == 'error':
                 break
         return self._form_summary(children, current)
@@ -1217,7 +1263,8 @@ class Applier:
             return with_prepared_command(result, command)
 
         try:
-            schema = await self.workspace.select(identity, self.form_service)
+            schema, tree_warnings = await self.workspace.select_with_tree(
+                identity, self.form_service, self.related_schemas)
             if schema.get('databaseId') != database:
                 raise FormSelectionError('The selected schema does not match the form name in the active database.')
         except asyncio.CancelledError:
@@ -1225,7 +1272,6 @@ class Applier:
         except Exception as exc:
             return ExecutionResult.warning(current, f'Could not select form {command.form_name!r}. {exc}',
                                            'form_switch_failed', skipped=True)
-        tree_warnings = await self.workspace.load_form_tree(schema, self.form_service, self.related_schemas)
         self._plan_form_selection(self.workspace.key_for(schema), scope_context)
         if command.folder is None:
             result = ExecutionResult(schema, success_message=f'Active form: {command.form_name}')

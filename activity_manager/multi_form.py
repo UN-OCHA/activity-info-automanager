@@ -3,7 +3,7 @@
 from copy import deepcopy
 
 from .command_execution import Diagnostic
-from .resource_state import ApplicationState, FormPayload, Lifecycle, ResourceKey
+from .resource_state import ApplicationState, FormPayload, Lifecycle, LoadStatus, ResourceKey
 
 from .name_lookup import require_named_id
 from .schema_identity import schema_identities
@@ -59,17 +59,20 @@ class FormWorkspace:
         self.state.activate(self.key_for(schema))
         self.reserved.setdefault(schema.get("id"), set()).update(schema_identities(schema))
 
-    async def switch(self, form, service):
+    async def switch(self, form, service, related=None):
         database_id = self.state.active_database_id
         try:
             names = await self.form_directory(service, database_id)
             identity = require_named_id(form, names, kind='Form')
         except ValueError as exc:
             raise FormSelectionError(str(exc)) from exc
-        schema = await self.select(identity, service)
+        if related is None:
+            schema = await self.select(identity, service)
+        else:
+            schema, warnings = await self.select_with_tree(identity, service, related)
         if schema.get('databaseId') != database_id:
             raise FormSelectionError('The selected form is outside the active database.')
-        return schema
+        return schema if related is None else (schema, warnings)
 
     async def form_directory(self, service, database_id):
         if not database_id:
@@ -82,39 +85,55 @@ class FormWorkspace:
                 if not ((state := self.state.resources.get(ResourceKey.form(identity)))
                         and state.lifecycle == Lifecycle.DELETED)}
 
-    async def select(self, identity, service):
+    async def select(self, identity, service, *, remote_schema=None):
         """Select a frozen scope member by identity, loading it once."""
         local = self.state.resources.get(ResourceKey.form(identity))
         if local is not None and local.lifecycle == Lifecycle.DELETED:
             raise FormSelectionError('Form deleted. Command skipped.')
-        schema = self.latest.get(identity)
+        schema = local.payload.to_dict() if local is not None and local.load_status == LoadStatus.LOADED else None
         if schema is None:
-            schema = await service.get_form_schema(identity)
-            if schema.get('id') != identity or not isinstance(schema.get('elements'), list) or not schema.get('databaseId'):
-                raise ValueError('The selected form has an invalid schema or no database ID.')
+            schema = remote_schema if remote_schema is not None else await service.get_form_schema(identity)
+            self._validate_schema(identity, schema)
             self.state.load_form(schema, affected=True)
         self.state.activate(self.key_for(schema))
         return deepcopy(schema)
 
-    async def load_form_tree(self, schema, service, related):
-        """Enrich a selected existing form without replacing local schemas."""
-        related.update(self.latest)
-        key = self.key_for(schema)
-        if key.identity in self.loaded_form_trees or self.state.resources[key].lifecycle == Lifecycle.NEW:
-            return ()
+    @staticmethod
+    def _validate_schema(identity, schema):
+        if (not isinstance(schema, dict) or schema.get('id') != identity
+                or not isinstance(schema.get('elements'), list) or not schema.get('databaseId')):
+            raise ValueError('The selected form has an invalid schema or no database ID.')
+
+    async def read_form_tree(self, identity, service):
+        """Read ahead without changing the active form or registering baselines."""
+        state = self.state.resources.get(ResourceKey.form(identity))
+        if identity in self.loaded_form_trees or (state and state.lifecycle in (Lifecycle.NEW, Lifecycle.DELETED)):
+            return None, None
         try:
-            tree = await service.get_form_tree(key.identity)
-            if not isinstance(tree, dict) or key.identity not in tree:
+            tree = await service.get_form_tree(identity)
+            if not isinstance(tree, dict) or identity not in tree:
                 raise ValueError('The form tree did not contain the selected form schema.')
+            self._validate_schema(identity, tree[identity])
+            return tree, None
         except AttributeError:
             # Schema-only services do not provide related-form reads.
-            return ()
+            return None, None
         except Exception as exc:
-            return (Diagnostic('warning', f'Form {schema.get("label") or key.identity!r}: '
-                               f'related schemas could not be loaded. {exc}', code='form_tree_unavailable'),)
-        for identity, data in tree.items():
-            state = self.state.resources.get(ResourceKey.form(identity))
-            if state is None or state.lifecycle != Lifecycle.DELETED:
-                related.setdefault(identity, data)
-        self.loaded_form_trees.add(key.identity)
-        return ()
+            return None, exc
+
+    async def select_with_tree(self, identity, service, related, *, tree_read=None):
+        """Select from the tree when available, keeping local revisions authoritative."""
+        tree, error = tree_read if tree_read is not None else await self.read_form_tree(identity, service)
+        schema = await self.select(identity, service, remote_schema=tree[identity] if tree is not None else None)
+        related.update(self.latest)
+        if error is not None:
+            return schema, (Diagnostic('warning', f'Form {schema.get("label") or identity!r}: '
+                                       f'related schemas could not be loaded. {error}',
+                                       code='form_tree_unavailable'),)
+        if tree is not None:
+            for related_id, data in tree.items():
+                state = self.state.resources.get(ResourceKey.form(related_id))
+                if state is None or state.lifecycle != Lifecycle.DELETED:
+                    related.setdefault(related_id, data)
+            self.loaded_form_trees.add(identity)
+        return schema, ()

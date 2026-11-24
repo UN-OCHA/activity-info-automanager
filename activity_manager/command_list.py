@@ -79,6 +79,7 @@ class CommandListManager:
         ui.separator()
 
         self.simple_view = ui.column().classes('command-list-body w-full gap-2')
+        self.simple_view.client.on_delete(self._cancel_evaluation)
         with self.simple_view:
             self.simple_content = ui.column().classes('w-full shrink-0 gap-2')
 
@@ -319,11 +320,14 @@ class CommandListManager:
         self._update_execute_button()
         self._update_text_action_buttons()
 
-    def _evaluate_commands(self) -> None:
+    def _cancel_evaluation(self) -> None:
         if self._evaluation_task is not None:
             self.applier.cancel()
             self._evaluation_task.cancel()
             self._evaluation_task = None
+
+    def _evaluate_commands(self) -> None:
+        self._cancel_evaluation()
         self._evaluation_version += 1
         available = list(self._authored_bindings)
         bindings, authored = [], []

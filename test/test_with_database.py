@@ -1,3 +1,4 @@
+import asyncio
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
@@ -32,6 +33,23 @@ async def evaluate(text, schemas=(), *, names=None, initial=None, service=None):
 
 
 class WithDatabaseTests(IsolatedAsyncioTestCase):
+    async def test_form_scope_publishes_pending_and_complete_results_without_partial_redraws(self):
+        service = MemoryService([form('a', 'A'), form('b', 'B'), form('c', 'C')])
+        updates = []
+
+        def on_progress(engine):
+            execution = engine.executions[-1]
+            if execution.iterations:
+                updates.append(tuple(child.status for child in execution.iterations))
+
+        engine = Applier(commands=parse_command_text(
+            'WithForm(formPattern=".*")\nAddField(fieldCode="NEW", label="New")'),
+            initial_database_id='db', form_service=service, on_progress=on_progress)
+        await engine.evaluate()
+        self.assertIn(('not_executed',) * 3, updates)
+        self.assertEqual(updates[-1], ('applied',) * 3)
+        self.assertTrue(all(len(set(statuses)) == 1 for statuses in updates))
+
     async def test_single_switch_matches_names_and_exact_ids_and_clears_active_form(self):
         first, second = form('a', 'One'), form('B-id', 'Two', 'remote')
         app = await evaluate('''
@@ -207,6 +225,29 @@ DeleteForm(currentForm=False, form="SHARED")
 
 
 class WithDatabaseCreatorTests(IsolatedAsyncioTestCase):
+    async def test_client_deletion_cancels_in_flight_evaluation(self):
+        service = MemoryService([form('a', 'A')])
+        started, blocked = asyncio.Event(), asyncio.Event()
+
+        async def read_tree(identity):
+            started.set()
+            await blocked.wait()
+            return {identity: service.schemas[identity]}
+
+        service.get_form_tree = read_tree
+        client = Client(ui.page('/'))
+        with client, ui.column():
+            manager = CommandListManager(form_service=service)
+            manager.initial_database_id = 'db'
+            manager.commands = parse_command_text('WithForm(form="A")')
+            manager._evaluate_commands()
+        task = manager._evaluation_task
+        await asyncio.wait_for(started.wait(), timeout=2)
+        client.delete()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertIsNone(manager._evaluation_task)
+
     async def test_database_modes_and_unqualified_union_suggestions(self):
         def field(code):
             return {'id': f'id{code}', 'code': code, 'type': 'text', 'label': code}
