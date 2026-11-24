@@ -15,15 +15,16 @@ back to an unambiguous code. Ambiguous or missing bindings fail explicitly.
 
 `command_templates.py` centrally defines namespace member syntax: `field`,
 `form`, and `database` accept named/numbered members; `vars` accepts variable
-names. `form` is supplied by an enclosing multiple-form scope; `database` remains reserved. The former `match` and `iteration`
+names. Multiple form and database selectors supply `form` and `database`
+respectively. The former `match` and `iteration`
 namespaces are rejected. Field targets provide `field.code`, `field.index`, and
 `field.<name>` / `field.<number>` captures. Capture names `code` and `index` are
 reserved to prevent overriding built-in members.
 
 `command_templates.py` validates placeholder syntax and performs one substitution
 pass over supported parameter values, including literal containers and FunctionCall
-arguments. Dictionary keys remain literal. Field selectors resolve `vars` and enclosing `form`
-references before target selection; `field` context is rejected. This is text
+arguments. Dictionary keys remain literal. Field selectors resolve `vars`,
+`database`, and enclosing `form` references before target selection. This is text
 substitution, not Python evaluation, recursive expansion, or formula escaping.
 SetVariable writes `vars.name` text into a mapping owned by one command-list
 evaluation. Iteration preparation merges that mapping with its local captures.
@@ -63,7 +64,7 @@ uses Single / Multiple for both fields and forms. A form pattern uses fullmatch
 against names in the active database, with local names overriding remote names.
 Targets are frozen by ID in `(name.casefold(), ID)` order. `form.name`,
 `form.index`, and numbered/named captures remain fixed; name/index are reserved
-capture names. Pattern substitution permits only vars.
+capture names. Pattern substitution permits `vars` and enclosing `database` references.
 
 The connected runner evaluates each following authored command across targets
 sequentially, stopping globally on error. A new WithForm replaces the scope.
@@ -89,3 +90,26 @@ concrete leaves, including WithForm and scoped single commands/SetVariable.
 Selection indexes the flat list and renders that application's immutable
 DisplayState with its affected resource selected. Execution consumes the confirmed
 action plan, independently of display order or selected tabs.
+
+
+## Database scopes
+
+`WithDatabase(database=...)` selects one database from the account directory.
+`WithDatabase(databasePattern=...)` matches database names using fullmatch and
+freezes targets in alphabetical order with ID as the tie-breaker. Its
+`database.name`, `database.index`, and numbered and named captures are available
+even when only one database matches. Both modes clear the active form. Zero
+matches or an ambiguous single name clear both contexts and stop evaluation.
+
+Single selectors match names case-insensitively and accept exact IDs as fallback.
+A bare form selector runs independently in each active database. A
+`Database/Form` selector exits the database iteration and uses the resolved
+database. A failed qualified selection clears both active contexts.
+
+Database branches keep their own variable bindings as forms change. Form-pattern
+matches inherit their branch bindings and keep their own assignments until the
+form scope ends. A database that matches zero forms remains available to later
+selectors. Nested result cards flatten database, form, and field applications.
+The Applier visits targets command-first and PlanBuilder groups compatible writes
+by form. Creator form suggestions are bare names across the active databases.
+Field selector suggestions are codes across the currently active forms.

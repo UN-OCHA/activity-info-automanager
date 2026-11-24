@@ -14,14 +14,14 @@ ITERABLE_CREATORS = frozenset({'move_field', 'delete_field', 'modify_field'})
 
 
 def compile_pattern(pattern, *, kind='field'):
-    label = 'Form name' if kind == 'form' else 'Field code'
+    label = {'form': 'Form name', 'database': 'Database name', 'field': 'Field code'}[kind]
     if not isinstance(pattern, str) or not pattern:
         raise ValueError(f'{label} pattern is required.')
     try:
         compiled = re.compile(pattern)
     except re.error as exc:
         raise ValueError(f'Invalid {label.lower()} pattern: {exc}') from None
-    builtins = {'name', 'index'} if kind == 'form' else FIELD_BUILTINS
+    builtins = {'name', 'index'} if kind != 'field' else FIELD_BUILTINS
     for name in sorted(builtins.intersection(compiled.groupindex)):
         raise ValueError(f'Capture group {name!r} is reserved for built-in {kind} context.')
     return compiled
@@ -29,9 +29,15 @@ def compile_pattern(pattern, *, kind='field'):
 
 def validate_pattern(pattern, *, kind='field'):
     """Validate authored templates; compile after substitution at selection time."""
+    from .command_templates import substitute_text
+
     if not isinstance(pattern, str) or not pattern:
-        raise ValueError(f'{"Form name" if kind == "form" else "Field code"} pattern is required.')
-    substitute_selector(pattern)
+        compile_pattern(pattern, kind=kind)
+    if kind == 'field':
+        substitute_selector(pattern)
+    else:
+        namespaces = {'vars', 'database', 'form'} if kind == 'form' else {'vars'}
+        substitute_text(pattern, namespaces=namespaces)
     if '${' not in pattern:
         compile_pattern(pattern, kind=kind)
 
@@ -95,15 +101,22 @@ class IterationTarget:
         from .commands.move_field import MoveFieldCommand
         if isinstance(command, MoveFieldCommand) and previous is not None:
             command = replace(command, position='After field', before_after_field=previous)
-        return PreparedCommand(command)
+        return PreparedCommand(command, exact_field_code=True,
+                               exact_anchor=isinstance(command, MoveFieldCommand) and previous is not None)
 
 
 @dataclass(frozen=True)
 class PreparedCommand:
     """Concrete values must never undergo a second substitution pass."""
     command: object
+    # Field iterations already resolved their target and may supply a generated anchor.
+    exact_field_code: bool = False
+    exact_anchor: bool = False
 
     def execute(self, schema, *, context=None):
+        if self.exact_field_code:
+            from .command_execution import CommandContext
+            context = replace(context or CommandContext(), exact_field_code=True, exact_anchor=self.exact_anchor)
         return self.command.execute(schema, context=context)
 
 

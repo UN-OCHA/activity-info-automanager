@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from .field_selector import find_field_index
 from .models import CommandDefinition
 from ..command_execution import ExecutionResult
 from ..command_creator import CommandCreatorDefinition
@@ -146,8 +147,6 @@ class AddFieldCommand:
         if self.position in ('Before field', 'After field'):
             if not isinstance(self.before_after_field, str) or not self.before_after_field.strip():
                 fail('before_after_field', 'AddField requires beforeAfterField for this position.')
-            if self.before_after_field == self.field_code:
-                fail('before_after_field', 'AddField cannot position a field relative to itself.')
         elif self.before_after_field is not None:
             fail('before_after_field', 'AddField does not use beforeAfterField for this position.')
 
@@ -425,11 +424,12 @@ class AddFieldCommand:
         if self.position == 'Beginning':
             elements.insert(0, field)
         elif self.position in ('Before field', 'After field'):
-            relative_index = next((index for index, element in enumerate(elements)
-                                   if isinstance(element, dict)
-                                   and element.get('code') == self.before_after_field), None)
+            try:
+                relative_index = find_field_index(self.before_after_field, elements)
+            except ValueError as exc:
+                return ExecutionResult.error(schema, f'AddField beforeAfterField: {exc}', 'ambiguous_relative_target')
             if relative_index is None:
-                return ExecutionResult.error(schema, f'AddField could not find before/after field code {self.before_after_field!r}.', 'missing_relative_target')
+                return ExecutionResult.error(schema, f'AddField could not find before/after field {self.before_after_field!r}.', 'missing_relative_target')
             elements.insert(relative_index + (self.position == 'After field'), field)
         else:
             elements.append(field)

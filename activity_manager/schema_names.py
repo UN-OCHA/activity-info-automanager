@@ -398,10 +398,8 @@ async def resolve_form_names(service, schema, related_schemas=None, *, known_for
             database_name, name = value.split('/', 1)
             if databases is None:
                 databases = await service.get_database_names()
-            matches = [identity for identity, label in databases.items() if label == database_name]
-            if len(matches) != 1:
-                raise ValueError(f'Database name {database_name!r} must resolve to exactly one database; use an ID instead.')
-            database_id = matches[0]
+            from .name_lookup import require_named_id
+            database_id = require_named_id(database_name, databases, kind='Database')
         if not database_id:
             raise ValueError(f'Cannot resolve referenced form {value!r} without a database ID.')
         if database_id not in directories:

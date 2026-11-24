@@ -226,7 +226,8 @@ def adapt_authored_result(authored, execution, generation, *, plan=None):
     """Build immutable authored and actual results from an execution summary."""
     if execution.iterations:
         leaves = execution.iterations
-    elif execution.field_iterations or execution.form_iterations or (execution.schema is None and not execution.effect_ids):
+    elif execution.field_iterations or execution.form_iterations or (
+            execution.schema is None and not execution.effect_ids and not execution.target_keys):
         leaves = ()
     else:
         leaves = (execution,)
@@ -245,7 +246,7 @@ def adapt_authored_result(authored, execution, generation, *, plan=None):
         members = ((leaf.target.field_id,) if leaf.target and leaf.target.field_id else leaf.target_member_ids)
         command = ActualCommand(f'{generation}:{authored.authored_id}:{position}', authored.authored_id,
             authored.order, position, leaf.prepared_parameters, leaf.prepared_syntax, targets, context, members)
-        applications.append(ApplicationResult(command, leaf.status, leaf.message,
+        applications.append(ApplicationResult(command, leaf.status, leaf.console_message or leaf.message,
             leaf.display_state if leaf.status != 'not_executed' else None, leaf.diagnostics,
             effect_ids=leaf.effect_ids, rejected_candidate=leaf.rejected_candidate,
             action_ids=plan.action_ids_for_effects(leaf.effect_ids) if plan is not None else ()))

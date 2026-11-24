@@ -281,6 +281,13 @@ class PlanBuilder:
         elif keys != self._scope_keys:
             raise PlanError('A scope target set cannot change after it is frozen.')
 
+    def add_scope_form(self, scope_id, key):
+        """Register a form discovered while applying a single selector per database."""
+        if self._scope_id != scope_id:
+            self.begin_scope(scope_id, (key,))
+        elif key not in self._scope_keys:
+            self._scope_keys += (key,)
+
     def select_form(self, key, *, scope_id=None):
         if scope_id is not None:
             if self._scope_id != scope_id or key not in self._scope_keys:

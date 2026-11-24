@@ -116,17 +116,46 @@ class ModifyFieldExecutionTests(unittest.TestCase):
 
     def test_ambiguous_codes_and_labels_fail(self):
         for source, target in (
-            (form(element(), element(identity='other')), 'target'),
+            (form(element(), element(code='TARGET', identity='other')), 'target'),
             (form(element(code='a'), element(code='b', identity='other')), 'Target'),
         ):
             with self.subTest(target=target):
                 self.assertIn('Ambiguous', self.execute(source, {'label': 'New'}, target=target, success=False).message)
 
-    def test_missing_target_is_case_sensitive_warning_noop(self):
-        source = form(element())
-        result = self.execute(source, {'label': 'New'}, target='TARGET')
+    def test_single_selector_code_label_and_id_order(self):
+        source = form(element(label='Primary', identity='PrimaryID'),
+                      element(code='other', label='TARGET', identity='SecondaryID'),
+                      element(code=None, label='Uncoded', identity='Primary'))
+        for selector in ('TARGET', 'primary', 'PrimaryID'):
+            with self.subTest(selector=selector):
+                result = self.execute(source, {'label': 'New'}, target=selector)
+                self.assertEqual(result.status, 'applied')
+                self.assertEqual(result.schema['elements'][0]['label'], 'New')
+                self.assertEqual(result.target_member_ids, ('PrimaryID',))
+        result = self.execute(source, {'label': 'New'}, target='primaryid')
         self.assertEqual(result.status, 'warning')
         self.assertEqual(result.schema, source)
+
+    def test_delete_move_and_add_share_field_lookup(self):
+        source = form(element(label='First field', identity='FirstID'),
+                      element(code=None, label='Anchor field', identity='AnchorID'))
+        for selector in ('TARGET', 'first FIELD', 'FirstID'):
+            with self.subTest(selector=selector):
+                deleted = apply_command_locally(parse_command_text(f'DeleteField(fieldCode="{selector}")')[0], source)
+                self.assertEqual(deleted.target_member_ids, ('FirstID',))
+                self.assertEqual(deleted.schema['elements'], source['elements'][1:])
+        for anchor in ('ANCHOR FIELD', 'AnchorID'):
+            with self.subTest(anchor=anchor):
+                move = parse_command_text(f'MoveField(fieldCode="FirstID", position="After field", beforeAfterField="{anchor}")')[0]
+                moved = apply_command_locally(move, source)
+                self.assertEqual(moved.schema['elements'], source['elements'][::-1])
+                add = parse_command_text(f'AddField(fieldCode="new", fieldType="quantity", label="New", position="Before field", beforeAfterField="{anchor}")')[0]
+                added = apply_command_locally(add, source)
+                self.assertFalse(added.has_errors, added.message)
+                self.assertEqual([field['label'] for field in added.schema['elements']],
+                                 ['First field', 'New', 'Anchor field'])
+        move = parse_command_text('MoveField(fieldCode="FirstID", position="Before field", beforeAfterField="TARGET")')[0]
+        self.assertEqual(apply_command_locally(move, source).diagnostics[0].code, 'self_relative_move')
 
     def test_renaming_and_removing_code_preserves_identity_and_position(self):
         source = form(element(), element(code='other', identity='other'))

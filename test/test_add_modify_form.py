@@ -108,14 +108,15 @@ AddField(fieldCode="AFTER", label="After")''', service)
         self.assertEqual(following.diagnostics[0].code, 'missing_form')
         self.assertIsNone(following.schema)
 
-    async def test_subforms_other_databases_and_different_case_do_not_match(self):
+    async def test_matches_different_case_and_excludes_subforms_and_other_databases(self):
         service = CreationService()
         service.resources['db']['child'] = dict(id='child', type='SUB_FORM', label='a', parentId='a')
         service.resources['remote'] = {'remote_form': dict(id='remote_form', type='FORM', label='a')}
         app = await self.apply('AddModifyForm(name="a", folder="North")', service)
         result = app.executions[0]
         self.assertEqual(result.status, 'applied')
-        self.assertEqual([item.kind for item in app.candidate_plan.actions], [ActionKind.FORM_CREATE])
+        self.assertEqual([item.kind for item in app.candidate_plan.actions], [ActionKind.DATABASE_RESOURCE_PATCH])
+        self.assertEqual(result.schema['id'], 'a')
         entry = app.workspace.state.resources[ResourceKey.database('db')].payload.entries[result.schema['id']]
         self.assertEqual(entry['parentId'], 'north')
 

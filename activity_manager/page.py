@@ -2,6 +2,7 @@ from nicegui import app, ui
 
 import json
 import asyncio
+from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
 
@@ -15,6 +16,7 @@ from .form_folders import form_location
 from .schema_names import readable_resource, load_default_record_labels, unresolved_formula_references
 from .command_execution import Diagnostic, EXECUTABLE_STATUSES
 from .immutable import thaw
+from .name_lookup import find_named_id
 from .schema_display import underline_substitutions
 from .schema_resolution import resolve_command_schema
 from .command_list import CommandExecution, CommandListManager
@@ -26,6 +28,13 @@ from .execution_presentation import confirmation_summary
 from .step_execution import StepExecutionDialog
 from .application_results import DisplayResource, DisplayState, DisplayTab, display_payload
 from .resource_state import ResourceKey, ResourceKind, Lifecycle, Existence
+
+
+def _form_name_suggestions(names):
+    unique = {}
+    for name in names:
+        unique.setdefault(name.casefold(), name)
+    return [unique[key] for key in sorted(unique)]
 
 
 def ordered_result_tabs(tabs):
@@ -299,7 +308,8 @@ def connection_page():
         if moving:
             active_database_id = command_list.workspace.state.active_database_id
             current_form = active_database_target or creator._current_form()
-            selected = None if current_form else creator.controls['form'].value
+            target_control = creator.controls['form_name' if active_database_target else 'form']
+            selected = target_control.value if active_database_target or not current_form else None
             database_id = active_database_id
             try:
                 from .form_folders import folder_choices
@@ -308,10 +318,7 @@ def connection_page():
                     if '${' in database_name:
                         return
                     names = await command_list.form_service.get_database_names()
-                    matches = [identity for identity, name in names.items() if name == database_name]
-                    if len(matches) != 1:
-                        return
-                    database_id = matches[0]
+                    database_id = find_named_id(database_name, names, kind='Database')
                 if not database_id:
                     return
                 resources = await command_list.form_service.get_database_resources(database_id)
@@ -321,7 +328,7 @@ def connection_page():
                         and creator.command_select.value == command_key
                         and creator._multiple_forms() == multiple
                         and (active_database_target or creator._current_form() == current_form)
-                        and (None if current_form else creator.controls['form'].value) == selected
+                        and (target_control.value if active_database_target or not current_form else None) == selected
                         and command_list.workspace.state.active_database_id == active_database_id):
                     creator.set_suggestions(source, suggestions)
             except (ValueError, KeyError, TypeError, AttributeError):
@@ -524,22 +531,24 @@ def connection_page():
             rejected_code.markdown._sanitize = lambda html: underline_substitutions(html, candidate, paths, underline=False)
             rejected_code.set_content(json.dumps(candidate, indent=2, ensure_ascii=False))
             rejected_code.markdown._handle_content_change(rejected_code._render_markdown())
-        active = command_list.workspace.active_schema if command_list.workspace.form_snapshots else source_schema
-        command_creator.set_schema(active)
-        active_database = command_list.workspace.state.active_database_id
-        if active_database:
-            directory = command_list.resolution_cache.get(('get_form_names', json.dumps((active_database,))))
+        applier = command_list.applier
+        command_creator.set_schema(command_list.workspace.active_schema)
+        codes = {code for schema in applier.active_form_schemas for code in field_codes_from_schema(schema)}
+        command_creator.set_suggestions('active_field_codes', sorted(codes, key=lambda code: (code.casefold(), code)))
+        form_names = []
+        deleted = {key.identity for key, state in command_list.workspace.state.resources.items()
+                   if state.lifecycle == Lifecycle.DELETED}
+        for active_database in applier.active_database_ids:
+            directory = command_list.resolution_cache.get(('get_form_names', json.dumps((active_database,), ensure_ascii=False)))
             if directory is None:
-                directory = {identity: label.removesuffix(f' ({identity})')
-                             for identity, label in forms.options.items()}
-                if active_database != databases.value:
-                    directory = {}
+                directory = ({identity: label.removesuffix(f' ({identity})')
+                              for identity, label in forms.options.items()}
+                             if active_database == databases.value else {})
             directory = {**directory, **{
-                identity: data.get('label') or identity for identity, data in command_list.related_schemas.items()
+                identity: data.get('label') or identity for identity, data in command_list.workspace.latest.items()
                 if data.get('databaseId') == active_database}}
-            deleted = {k.identity for k, state in command_list.workspace.state.resources.items() if state.lifecycle == Lifecycle.DELETED}
-            directory = {i: n for i, n in directory.items() if i not in deleted}
-            command_creator.set_suggestions('form_names', list(directory.values()))
+            form_names.extend(name for identity, name in directory.items() if identity not in deleted)
+        command_creator.set_suggestions('form_names', _form_name_suggestions(form_names))
         if selected_index is None:
             # Background evaluation still refreshes the source display, but its
             # per-command messages belong to executions until a command is selected.
@@ -781,9 +790,9 @@ def connection_page():
             if request == form_request:
                 forms.set_options(options)
                 form_comparison.set_forms(options)
-                command_creator.set_suggestions('form_names', [
+                command_creator.set_suggestions('form_names', _form_name_suggestions(
                     label.removesuffix(f' ({identity})') for identity, label in options.items()
-                ])
+                ))
                 form_status.set_text('' if options else 'No forms available.')
         except ValueError as exc:
             if request == form_request:
@@ -791,6 +800,7 @@ def connection_page():
                 console_message.set_text(f'Form list error:\n{exc}')
 
     def clear_databases():
+        command_creator.set_suggestions('database_names', [])
         databases.set_options({})
         clear_forms()
         status.set_text('Connect to load databases.')
@@ -813,6 +823,13 @@ def connection_page():
             service = ActivityInfoService(base_url.value, token.value)
             options = await service.get_databases()
             databases.set_options(options)
+            names = {identity: label.removesuffix(f' ({identity})') for identity, label in options.items()}
+            counts = Counter(name.casefold() for name in names.values())
+            command_creator.set_suggestions('database_names', {
+                names[identity] if counts[names[identity].casefold()] == 1 else identity: label
+                for identity, label in options.items()
+            })
+            command_list.database_names = names
             command_list.set_schema(None)
             status.set_text(f'{len(options)} databases loaded.' if options else 'No databases available.')
         except ValueError as exc:

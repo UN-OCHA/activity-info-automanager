@@ -214,14 +214,14 @@ class DeleteFormTests(unittest.IsolatedAsyncioTestCase):
         app, _ = await self.apply('DeleteForm(currentForm=False, form="B")\nWithForm(form="A")\nDeleteForm(currentForm=True)')
         self.assertEqual(len(app.candidate_plan.actions), 2)
 
-    async def test_explicit_delete_exits_iterator_and_preserves_other_database_context(self):
+    async def test_qualified_delete_exits_iterator_and_selects_qualified_database(self):
         service = DeletionService()
         service.schemas['c'] = form('c', 'C', 'remote')
         service.resources['remote'] = {}
         service.resources['remote']['c'] = dict(id='c', label='C', type='FORM', parentId='remote')
         app, _ = await self.apply('WithForm(formPattern="[AB]")\nDeleteForm(currentForm=False, form="Remote/C")\nAddField(fieldCode="X", label="X")', service=service)
         self.assertIsNone(app.scope)
-        self.assertEqual(app.workspace.state.active_database_id, 'db')
+        self.assertEqual(app.workspace.state.active_database_id, 'remote')
         self.assertIsNone(app.workspace.active_schema)
         self.assertEqual(app.executions[-1].diagnostics[0].code, 'missing_form')
         self.assertNotIn('c', app.workspace.latest)

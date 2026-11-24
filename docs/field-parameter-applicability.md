@@ -96,15 +96,15 @@ substitution. Parameter types and applicability remain as documented below.
 - Both creators use `fieldType` and conditional `fieldVariant` selectors:
   FREE_TEXT: `text` / `barcode`; enumerated: `single` / `multiple`;
   reference: `reference` / `user` / `metadata`. Other types have no variant.
-- ModifyField requires `fieldCode` (code or fallback label), `fieldType`, and a
-  variant where applicable. These identify the expected target, not changes.
-  `newCode` and `label` are optional edits; `label` never identifies the target.
-- Future matching: exact code first; a code match with a different type/variant
-  warns and skips. Only when no code matches, try the supplied `fieldCode` as an exact
-  label. Reject ambiguous matches. Note/Section use this same targeting argument.
-- Selecting an existing ModifyField target populates its type and variant from
-  the cached schema (exact code first, then an unambiguous exact label). Both
-  selectors remain editable. Other edit values and rows are not populated.
+- In single mode, MoveField, DeleteField, and ModifyField resolve `fieldCode`
+  by code, then label, then ID. Codes and labels are case-insensitive. IDs are
+  case-sensitive. If a step finds multiple matches, the command reports ambiguity.
+  MoveField and AddField also use this lookup for `beforeAfterField`.
+- ModifyField requires `fieldType` and a variant where applicable. It filters
+  label matches by type and variant. An incompatible code or ID match warns
+  and skips. `newCode` and `label` are optional edits.
+- Selecting an unambiguous ModifyField target populates its type and variant from
+  the cached schema using the single-mode lookup. Both selectors remain editable.
 - Excluded edits are omitted (unchanged). Included blank text/numbers/choices and
   empty collections produce explicit `None` (remove). Included unchecked booleans
   produce `False`. No separate Clear control or literal empty-string operation.

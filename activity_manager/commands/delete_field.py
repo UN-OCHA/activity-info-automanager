@@ -7,6 +7,7 @@ from typing import Any
 
 from ..command_creator import CommandCreatorDefinition, ParameterDefinition
 from ..command_parser import parse_string_parameters
+from .field_selector import find_field_index
 from .models import CommandDefinition
 from ..command_execution import ExecutionResult
 
@@ -27,18 +28,16 @@ class DeleteFieldCommand:
 
         result = deepcopy(schema)
         result_elements = result['elements']
-        field_index = next(
-            (
-                index for index, element in enumerate(result_elements)
-                if isinstance(element, dict) and element.get('code') == self.field_code
-            ),
-            None,
-        )
+        try:
+            field_index = find_field_index(self.field_code, result_elements,
+                                           exact_code=bool(context and context.exact_field_code))
+        except ValueError as exc:
+            return ExecutionResult.error(schema, f'DeleteField: {exc}', 'ambiguous_target')
         if field_index is None:
-            return ExecutionResult.warning(schema, f'DeleteField could not find field code {self.field_code!r}. Command skipped; schema unchanged.', 'missing_target')
+            return ExecutionResult.warning(schema, f'DeleteField could not find field {self.field_code!r}. Command skipped; schema unchanged.', 'missing_target')
 
-        result_elements.pop(field_index)
-        return ExecutionResult(result)
+        field = result_elements.pop(field_index)
+        return ExecutionResult(result, target_member_ids=(field['id'],) if field.get('id') else ())
 
 
 def create_delete_field(values: Mapping[str, Any]) -> DeleteFieldCommand:

@@ -470,7 +470,7 @@ class ExpandedWriteTests(unittest.IsolatedAsyncioTestCase):
                 creator.controls['field_type'].set_value(field_type)
                 creator._parameter_changed(None)
                 control = creator.controls['referenced_form']
-                self.assertEqual(control.options, ['Survey', 'Other'])
+                self.assertEqual(control.options, ['Other', 'Survey'])
                 control._select_option('Other')
                 self.assertEqual(control.value, 'Other')
             creator.command_select.set_value('add_field')

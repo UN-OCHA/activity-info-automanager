@@ -584,7 +584,7 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             ['B', 'C', 'A'],
         )
         execution = MoveFieldCommand('missing', 'End').execute(source)
-        self.assertRegex(execution.message, "could not find field code 'missing'")
+        self.assertRegex(execution.message, "could not find field 'missing'")
         self.assertTrue(execution.diagnostics)
         execution = MoveFieldCommand('A', 'Before field', 'A').execute(source)
         self.assertRegex(execution.message, 'relative to itself')
@@ -663,7 +663,7 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             'DeleteField(fieldCode="FIELD \\"A\\"")',
         )
         execution = DeleteFieldCommand('missing').execute(source)
-        self.assertRegex(execution.message, "could not find field code 'missing'")
+        self.assertRegex(execution.message, "could not find field 'missing'")
         self.assertTrue(execution.diagnostics)
 
         self.assertEqual(DELETE_FIELD.key, 'delete_field')

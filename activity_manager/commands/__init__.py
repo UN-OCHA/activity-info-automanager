@@ -7,6 +7,7 @@ from .delete_field import DELETE_FIELD, DeleteFieldCommand
 from .move_field import MOVE_FIELD, MoveFieldCommand
 
 from .set_variable import SET_VARIABLE, SetVariableCommand
+from .with_database import WITH_DATABASE, WithDatabaseCommand
 from .with_form import WITH_FORM, WithFormCommand
 
 from .add_form import ADD_FORM, AddFormCommand
@@ -23,6 +24,8 @@ __all__ = [
     'ModifyFormCommand',
     'MOVE_FORM',
     'MoveFormCommand',
+    'WITH_DATABASE',
+    'WithDatabaseCommand',
     'WITH_FORM',
     'WithFormCommand',
     'SET_VARIABLE',

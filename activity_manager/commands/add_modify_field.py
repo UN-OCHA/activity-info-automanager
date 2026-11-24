@@ -7,15 +7,16 @@ from functools import partial
 from .add_field import (
     ADD_FIELD_PARAMETERS, ARGUMENTS, AddFieldCommand, FieldParameterError, parse_add_field_arguments,
 )
+from .field_selector import find_field_index
 from .models import CommandDefinition
 from .modify_field import (
     EDIT_ARGUMENTS, FUNCTION_PARAMETERS, cached_target_form, check_reference_target,
-    create_modify_field, edit_syntax, find_coded_target, matches_target, resolve_target_form,
+    create_modify_field, edit_syntax, matches_target, resolve_target_form,
     target_mismatch,
 )
 from .move_field import MoveFieldCommand
 from ..command_creator import CommandCreatorDefinition
-from ..command_execution import ExecutionResult
+from ..command_execution import CommandContext, ExecutionResult
 from ..command_parser import parse_function_input
 from ..field_parameters import FIELD_TYPES_BY_CASE, FIELD_VARIANTS, field_type_error
 from ..functions import FunctionCall, FunctionContext, evaluate_function, validate_function
@@ -58,7 +59,7 @@ class AddModifyFieldCommand(AddFieldCommand):
             error = field_code_error(self.field_code)
             if error:
                 raise ValueError(error)
-        return find_coded_target(self.field_code, schema['elements'])
+        return find_field_index(self.field_code, schema['elements'], exact_code=True)
 
     def _add(self, schema, context):
         arguments = {}
@@ -175,7 +176,7 @@ class AddModifyFieldCommand(AddFieldCommand):
             return ExecutionResult.error(schema, str(exc).replace('AddField', 'MoveField'),
                                          f'invalid_{exc.parameter}')
         return MoveFieldCommand(self.field_code, position.position, self.before_after_field).execute(
-            schema, context=context)
+            schema, context=replace(context or CommandContext(), exact_field_code=True))
 
     @staticmethod
     def _warnings(step, result):

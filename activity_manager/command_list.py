@@ -343,7 +343,7 @@ class CommandListManager:
             owner=self._context_owner, on_progress=self._evaluation_updated,
             initial_database_id=self.initial_database_id)
         self.applier = engine
-        if self.resolve_schema is not None:
+        if self.resolve_schema is not None or self.form_service is not None:
             self._publish_evaluation()
             self._evaluation_task = asyncio.create_task(engine.evaluate())
         else:

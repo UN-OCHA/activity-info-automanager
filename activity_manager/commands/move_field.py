@@ -7,6 +7,7 @@ from typing import Any
 
 from ..command_creator import CommandCreatorDefinition, ParameterDefinition
 from ..command_parser import command_error, parse_string_parameters
+from .field_selector import find_field_index
 from .models import CommandDefinition
 from ..command_execution import ExecutionResult
 
@@ -37,43 +38,38 @@ class MoveFieldCommand:
         if self.position not in ('Beginning', 'End', 'Before field', 'After field'):
             return ExecutionResult.error(schema, f'MoveField has an invalid position: {self.position!r}.', 'invalid_position')
 
-        result = deepcopy(schema)
-        result_elements = result['elements']
-        field_index = next(
-            (
-                index for index, element in enumerate(result_elements)
-                if isinstance(element, dict) and element.get('code') == self.field_code
-            ),
-            None,
-        )
+        try:
+            field_index = find_field_index(self.field_code, elements,
+                                           exact_code=bool(context and context.exact_field_code))
+        except ValueError as exc:
+            return ExecutionResult.error(schema, f'MoveField: {exc}', 'ambiguous_target')
         if field_index is None:
-            return ExecutionResult.warning(schema, f'MoveField could not find field code {self.field_code!r}. Command skipped; schema unchanged.', 'missing_target')
+            return ExecutionResult.warning(schema, f'MoveField could not find field {self.field_code!r}. Command skipped; schema unchanged.', 'missing_target')
 
         if self.position in ('Before field', 'After field'):
             if not self.before_after_field:
                 return ExecutionResult.error(schema, 'MoveField requires beforeAfterField for this position.', 'missing_relative_field')
-            if self.before_after_field == self.field_code:
+            try:
+                relative_index = find_field_index(self.before_after_field, elements,
+                                                  exact_code=bool(context and context.exact_anchor))
+            except ValueError as exc:
+                return ExecutionResult.error(schema, f'MoveField beforeAfterField: {exc}', 'ambiguous_relative_target')
+            if relative_index is None:
+                return ExecutionResult.warning(schema, f'MoveField could not find before/after field {self.before_after_field!r}. Command skipped; schema unchanged.', 'missing_relative_target')
+            if relative_index == field_index:
                 return ExecutionResult.error(schema, 'MoveField cannot position a field relative to itself.', 'self_relative_move')
 
+        result = deepcopy(schema)
+        result_elements = result['elements']
         field = result_elements.pop(field_index)
         if self.position == 'Beginning':
             result_elements.insert(0, field)
         elif self.position == 'End':
             result_elements.append(field)
         else:
-            relative_index = next(
-                (
-                    index for index, element in enumerate(result_elements)
-                    if isinstance(element, dict)
-                    and element.get('code') == self.before_after_field
-                ),
-                None,
-            )
-            if relative_index is None:
-                return ExecutionResult.warning(schema, f'MoveField could not find before/after field code {self.before_after_field!r}. Command skipped; schema unchanged.', 'missing_relative_target')
-            insertion_index = relative_index + (self.position == 'After field')
+            insertion_index = relative_index - (field_index < relative_index) + (self.position == 'After field')
             result_elements.insert(insertion_index, field)
-        return ExecutionResult(result)
+        return ExecutionResult(result, target_member_ids=(field['id'],) if field.get('id') else ())
 
 
 def create_move_field(values: Mapping[str, Any]) -> MoveFieldCommand:

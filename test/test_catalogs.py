@@ -23,7 +23,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(tuple(COMMANDS_BY_NAME.values()), COMMANDS)
         self.assertEqual([creator.key for creator in COMMAND_CREATORS],
                          ['move_field', 'delete_field', 'add_field', 'modify_field', 'add_modify_field',
-                          'set_variable', 'with_form', 'modify_form', 'move_form', 'add_form', 'add_modify_form',
+                          'set_variable', 'with_database', 'with_form', 'modify_form', 'move_form', 'add_form', 'add_modify_form',
                           'delete_form'])
         for definition in COMMANDS:
             self.assertIs(COMMANDS_BY_NAME[definition.name.casefold()], definition)

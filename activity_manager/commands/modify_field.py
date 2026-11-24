@@ -6,6 +6,7 @@ import json
 import math
 
 from ..command_creator import CommandCreatorDefinition
+from .field_selector import find_field_index
 from .models import CommandDefinition
 from ..command_execution import ExecutionResult
 from ..command_parser import command_error, parse_literal_parameters
@@ -65,11 +66,13 @@ class ModifyFieldCommand:
                          if key in self.changes)
         return 'ModifyField(' + ', '.join(f'{key}={edit_syntax(value)}' for key, value in arguments) + ')'
 
-    def _target(self, schema):
+    def _target(self, schema, context):
         if not isinstance(schema, dict) or not isinstance(schema.get('elements'), list):
             return ExecutionResult.error(None, 'ModifyField requires a form schema with an elements list.', 'invalid_schema')
         try:
-            index = find_target(self, schema['elements'])
+            index = find_field_index(self.field_code, schema['elements'],
+                                     exact_code=bool(context and context.exact_field_code),
+                                     label_filter=lambda field: matches_target(self.field_type, self.field_variant, field))
             if index is None:
                 return ExecutionResult.warning(schema, f'ModifyField could not find field {self.field_code!r}.', 'missing_target')
             if not matches_target(self.field_type, self.field_variant, schema['elements'][index]):
@@ -79,7 +82,7 @@ class ModifyFieldCommand:
             return ExecutionResult.error(schema, str(exc), 'invalid_modify_field')
 
     def execute(self, schema, *, context=None):
-        index = self._target(schema)
+        index = self._target(schema, context)
         if isinstance(index, ExecutionResult):
             return index
         requested = self.referenced_form
@@ -91,7 +94,7 @@ class ModifyFieldCommand:
         return self.apply_to_target(schema, index, context)
 
     async def execute_resolved(self, schema, context, resolver):
-        index = self._target(schema)
+        index = self._target(schema, context)
         if isinstance(index, ExecutionResult):
             return index
         target = schema['elements'][index]
@@ -102,7 +105,7 @@ class ModifyFieldCommand:
         result = self.apply_to_target(schema, index, context)
         if result.has_errors:
             return result
-        return await resolver(result.schema)
+        return replace(await resolver(result.schema), target_member_ids=result.target_member_ids)
 
     def apply_to_target(self, schema, index, context):
         try:
@@ -114,7 +117,7 @@ class ModifyFieldCommand:
             target = result['elements'][index]
             apply_edits(command, target, result, context.reserved_identities if context else None)
             validate_result(command, target, result, index)
-            return ExecutionResult(result)
+            return ExecutionResult(result, target_member_ids=(target['id'],) if target.get('id') else ())
         except ValueError as exc:
             return ExecutionResult.error(schema, str(exc), 'invalid_modify_field')
 
@@ -205,28 +208,6 @@ def schema_variant(element):
 
 def matches_target(field_type, field_variant, element):
     return str(element.get('type', '')).casefold() == field_type.casefold() and schema_variant(element) == field_variant
-
-
-def find_coded_target(code, elements):
-    if code is None:
-        return None
-    coded = [index for index, element in enumerate(elements)
-             if isinstance(element, dict) and element.get('code') == code]
-    if len(coded) > 1:
-        raise ValueError(f'Ambiguous field code {code!r}.')
-    return coded[0] if coded else None
-
-
-def find_target(command, elements):
-    coded = find_coded_target(command.field_code, elements)
-    if coded is not None:
-        return coded
-    labelled = [index for index, element in enumerate(elements)
-                if isinstance(element, dict) and element.get('label') == command.field_code
-                and matches_target(command.field_type, command.field_variant, element)]
-    if len(labelled) > 1:
-        raise ValueError(f'Ambiguous field label {command.field_code!r} for this type and variant.')
-    return labelled[0] if labelled else None
 
 
 def target_mismatch(schema, code, property_name):
@@ -581,17 +562,17 @@ def parse_modify_field(text, call):
 
 
 def target_defaults(schema, target):
-    """Suggest target selectors from cached fields, preferring exact codes."""
+    """Suggest target selectors using the single-mode lookup."""
     elements = schema.get('elements', []) if schema else []
     if not target or not isinstance(elements, list):
         return {}
-    fields = [element for element in elements if isinstance(element, dict)]
-    matches = [element for element in fields if element.get('code') == target]
-    if not matches:
-        matches = [element for element in fields if element.get('label') == target]
-    if len(matches) != 1:
+    try:
+        index = find_field_index(target, elements)
+    except ValueError:
         return {}
-    field = matches[0]
+    if index is None:
+        return {}
+    field = elements[index]
     kind = FIELD_TYPES_BY_CASE.get(str(field.get('type', '')).casefold())
     if kind is None:
         return {}

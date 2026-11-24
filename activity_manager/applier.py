@@ -68,6 +68,7 @@ class Applier:
         self._plan_builder.observe(self._workspace.state.baselines.entries.values())
         self._variables = {}
         self.scope = None
+        self.database_scope = ()
         self.assigned = set()
         self.resolve_schema = resolve_schema
         self.lookup_variable = lookup_variable
@@ -276,6 +277,7 @@ class Applier:
 
     def evaluate_local(self):
         from .commands.delete_form import DeleteFormCommand
+        from .commands.with_database import WithDatabaseCommand
 
         current = deepcopy(self.source_schema)
         stopped = False
@@ -286,6 +288,12 @@ class Applier:
             if stopped:
                 message = 'Did not execute: no form schema selected.' if current is None else 'Did not execute.'
                 self.executions[index] = CommandExecution('not_executed', None, message)
+                continue
+            if isinstance(command, WithDatabaseCommand):
+                self._exit_database_scope()
+                self.executions[index] = self._snapshot_execution(CommandExecution.from_result(command.execute(None)))
+                current = None
+                stopped = True
                 continue
             replacing = self._replaces_form_context(command)
             if replacing:
@@ -318,7 +326,7 @@ class Applier:
         await self._load_initial_context()
         if not self.is_current():
             return
-        if self.resolve_schema is None:
+        if self.resolve_schema is None and self.form_service is None:
             return self.evaluate_local()
         await self._resolve_commands(self._evaluation_version, deepcopy(self.source_schema), self.commands)
 
@@ -423,9 +431,11 @@ class Applier:
             return CommandExecution.from_result(self._save_result(self._failed_result(
                 ExecutionResult.error(current, str(exc), 'invalid_selector'), current)))
         if not targets:
-            return replace(CommandExecution.from_result(ExecutionResult.warning(
-                current, f'No field codes matched pattern {command.field_pattern!r}. Schema unchanged.', 'no_matches')),
-                field_iterations=True)
+            warning = ExecutionResult.warning(
+                current, f'No field codes matched pattern {command.field_pattern!r}. Schema unchanged.', 'no_matches')
+            execution = CommandExecution.from_result(warning)
+            return replace(execution, field_iterations=True,
+                           message=self._iteration_line(self._console_form_path(current), execution.message))
         children = [CommandExecution('not_executed', None, 'Waiting for the previous iteration.',
                                      field_code=target.original_code, target=target,
                                      target_keys=(target_key,)) for target in targets]
@@ -464,22 +474,57 @@ class Applier:
         return replace(self._summarize_iterations(children, current), field_iterations=True)
 
 
+    def _console_form_path(self, schema):
+        identity = (schema or {}).get('databaseId') or self.workspace.state.active_database_id
+        path = (f'Database ({self.database_names.get(identity, identity)})',) if identity else ()
+        if schema:
+            path += (f'Form ({schema.get("label") or schema["id"]})',)
+        return path
+
     @staticmethod
-    def _summarize_iterations(children, current):
+    def _iteration_line(path, message, iteration=None):
+        prefix = ' / '.join(path)
+        parts = (prefix, f'Iteration {iteration}' if iteration is not None else '')
+        return '\n'.join(' — '.join((*filter(None, parts), line)) for line in message.splitlines())
+
+    def _summarize_iterations(self, children, current, *, nested=False):
         statuses = [child.status for child in children]
         status = next((value for value in ('error', 'resolving', 'warning', 'not_executed')
                        if value in statuses), 'applied')
-        diagnostics = tuple(Diagnostic(item.severity,
-            f'Iteration {index + 1} ({child.application_label}): {item.message}', code=item.code)
-            for index, child in enumerate(children) for item in child.diagnostics)
-        message = '\n'.join(f'Iteration {index + 1} ({child.application_label}): {child.message}'
-                            for index, child in enumerate(children))
-        if 'error' in statuses:
-            message = f'Stopped at iteration {statuses.index("error") + 1}.\n' + message
+        leaves, lines, diagnostics = [], [], []
+
+        def visit(items, context=(), targets=(), console_path=()):
+            for index, child in enumerate(items, 1):
+                path = context + (child.application_context or ((child.field_code,) if child.field_code else ()))
+                keys = child.target_keys or targets
+                if not keys and child.schema is not None:
+                    keys = (ResourceKey.form(child.schema['id']),)
+                segment = child.console_path or (f'Field {index} ({child.application_label})',)
+                full_path = console_path + segment
+                if child.iterations:
+                    visit(child.iterations, path, keys, full_path)
+                    continue
+                is_application = not (child.field_iterations or child.form_iterations)
+                if not is_application and not child.diagnostics:
+                    continue
+                iteration = len(leaves) + 1 if is_application else None
+                message = child.message if is_application else '\n'.join(
+                    item.console_line() for item in child.diagnostics)
+                line = self._iteration_line(full_path, message, iteration)
+                lines.append(line)
+                if is_application:
+                    leaf = replace(child, application_context=path, target_keys=keys) if nested else child
+                    leaves.append(replace(leaf, console_message=line))
+                diagnostics.extend(Diagnostic(item.severity,
+                    self._iteration_line(full_path, item.message, iteration), code=item.code)
+                    for item in child.diagnostics)
+
+        visit(children, console_path=() if nested else self._console_form_path(current))
+        message = '\n'.join(lines)
         reached = [child for child in children if child.schema is not None]
         final = reached[-1] if reached else None
         return CommandExecution(status, current, message, final.names_schema if final else None,
-            diagnostics, tuple(children), snapshot_issues=final.issues if final else (), form_snapshots=final.form_snapshots if final else (),
+            tuple(diagnostics), tuple(leaves), snapshot_issues=final.issues if final else (), form_snapshots=final.form_snapshots if final else (),
             form_issues=final.form_issues if final else None,
             display_state=final.display_state if final else None,
             rejected_candidate=final.rejected_candidate if final else None,
@@ -540,9 +585,9 @@ class Applier:
             if isinstance(prepared, DeleteFormCommand):
                 return await self._delete_form(prepared, current, scope_member=scope_member)
             if isinstance(prepared, AddFormCommand):
-                return await self._add_form(prepared, current)
+                return await self._add_form(prepared, current, scope_context=scope_context)
             if isinstance(prepared, AddModifyFormCommand):
-                return await self._add_modify_form(prepared, current)
+                return await self._add_modify_form(prepared, current, scope_context=scope_context)
             if isinstance(prepared, MoveFormCommand) and prepared.current_form:
                 if self.form_service is None:
                     return prepared.execute(current)
@@ -556,14 +601,12 @@ class Applier:
                 try:
                     schema = (current if isinstance(prepared, ModifyFormCommand) and prepared.current_form else
                               await self.workspace.select(prepared.form, self.form_service) if scope_member else
-                              await self.workspace.switch(prepared.form, self.form_service, current, self.related_schemas))
+                              await self._switch_form(prepared.form))
                 except FormSelectionError as exc:
                     return ExecutionResult.warning(current, str(exc), 'form_switch_failed', skipped=True)
                 tree_warnings = await self.workspace.load_form_tree(schema, self.form_service, self.related_schemas)
                 if scope_context is not None:
-                    scope_id, keys = scope_context
-                    self.plan_builder.begin_scope(scope_id, keys)
-                    self.plan_builder.select_form(self.workspace.key_for(schema), scope_id=scope_id)
+                    self._plan_form_selection(self.workspace.key_for(schema), scope_context)
                 elif not (isinstance(prepared, ModifyFormCommand) and prepared.current_form):
                     self.plan_builder.select_form(self.workspace.key_for(schema))
                 context_warnings = await self._load_context_database(schema['databaseId'])
@@ -589,11 +632,12 @@ class Applier:
         async def resolve(schema):
             self.related_schemas.update(self.workspace.latest)
             self.related_schemas[schema.get('id')] = schema
-            return await self.resolve_schema(schema)
+            return await self.resolve_schema(schema) if self.resolve_schema is not None else ExecutionResult(schema)
         async def lookup(command, schema):
             return await self.lookup_variable(command, schema if schema is not None else
                                               {'databaseId': self.workspace.state.active_database_id})
-        result = await apply_command(PreparedCommand(prepared), current, resolve,
+        application = application if isinstance(application, PreparedCommand) else PreparedCommand(prepared)
+        result = await apply_command(application, current, resolve,
             related_schemas=self.related_schemas, database_names=self.database_names,
             variables=variables, lookup_variable=lookup if self.lookup_variable is not None else None,
             reserved_identities=self.workspace.reserved.get((current or {}).get("id")))
@@ -603,8 +647,322 @@ class Applier:
         return result
 
 
+    async def _switch_form(self, selector):
+        from .schema_resolution import CachedResolutionService
+        service = CachedResolutionService(self.form_service, self.resolution_cache)
+        return await self.workspace.switch(selector, service)
+
+    def _plan_form_selection(self, key, scope_context):
+        if scope_context is None:
+            self.plan_builder.select_form(key)
+            return
+        scope_id, keys = scope_context
+        if keys is None:
+            self.plan_builder.add_scope_form(scope_id, key)
+        else:
+            self.plan_builder.begin_scope(scope_id, keys)
+        self.plan_builder.select_form(key, scope_id=scope_id)
+
+    @property
+    def active_database_ids(self):
+        if self.database_scope:
+            return tuple(branch['id'] for branch in self.database_scope)
+        identity = self.workspace.state.active_database_id
+        return (identity,) if identity else ()
+
+    @property
+    def active_form_schemas(self):
+        state = self.workspace.state
+        if self.scope is not None:
+            keys = (target['form_key'] for target in self.scope)
+        elif self.database_scope:
+            keys = (branch['form_key'] for branch in self.database_scope)
+        else:
+            keys = (state.active_form_key,)
+        return tuple(resource.payload.to_dict() for key in dict.fromkeys(keys)
+                     if (resource := state.resources.get(key)) is not None
+                     and resource.lifecycle != Lifecycle.DELETED)
+
+    def _select_database(self, identity):
+        state = self.workspace.state
+        state.active_form_key = None
+        state.active_database_id = identity
+
+    def _exit_database_scope(self):
+        self.database_scope = ()
+        self.variables = {key: value for key, value in self.variables.items()
+                          if not key.startswith('database.') and key not in self.assigned}
+        self._clear_form_context()
+        self._select_database(None)
+        self.plan_builder.finish_deletions()
+        self.plan_builder.select_form(None)
+
+    async def _database_directory(self):
+        from .schema_resolution import CachedResolutionService
+        if self.form_service is None:
+            raise ValueError('WithDatabase requires a connected database directory.')
+        if self.database_names:
+            return self.database_names
+        service = CachedResolutionService(self.form_service, self.resolution_cache)
+        names = await service.get_database_names()
+        if self.is_current():
+            self.database_names.update(names)
+        return names
+
+    def _selector_result(self, message, code='database_selector_failed'):
+        return self._snapshot_execution(CommandExecution.from_result(ExecutionResult.error(None, message, code)))
+
+    async def _switch_database(self, command):
+        from .command_iteration import compile_pattern
+        from .command_templates import substitute_text
+        from .commands.with_database import WithDatabaseCommand
+        from .name_lookup import require_named_id
+        from .schema_resolution import CachedResolutionService
+
+        self._exit_database_scope()
+        try:
+            names = await self._database_directory()
+            if command.database_pattern is None:
+                value = substitute_text(command.database, self.variables, namespaces={'vars'})
+                identity = require_named_id(value, names, kind='Database')
+                matches = [(identity, names[identity], {})]
+            else:
+                pattern = compile_pattern(substitute_text(command.database_pattern, self.variables,
+                                                          namespaces={'vars'}), kind='database')
+                matches = []
+                for identity, name in sorted(names.items(), key=lambda item: (item[1].casefold(), item[0])):
+                    if (match := pattern.fullmatch(name)) is not None:
+                        variables = self._match_variables('database', name, len(matches) + 1, match)
+                        matches.append((identity, name, variables))
+                if not matches:
+                    raise ValueError('No database names matched the pattern.')
+        except Exception as exc:
+            return self._selector_result(str(exc))
+        if not self.is_current():
+            return None
+
+        children, branches = [], []
+        service = CachedResolutionService(self.form_service, self.resolution_cache)
+        for position, (identity, name, captures) in enumerate(matches, 1):
+            self._select_database(identity)
+            warnings = await self._load_context_database(identity)
+            try:
+                await service.get_form_names(identity)
+            except (AttributeError, ValueError):
+                pass
+            if not self.is_current():
+                return None
+            result = with_prepared_command(
+                ExecutionResult(None, warnings, success_message=f'Active database: {name}'),
+                WithDatabaseCommand(database=identity))
+            key = ResourceKey.database(identity)
+            display = self.snapshot_builder.capture(self.workspace.state, self.related_schemas,
+                self.database_names, self.workspace.issues, active=key)
+            children.append(self._snapshot_execution(replace(CommandExecution.from_result(result),
+                application_context=(name,), target_keys=(key,), display_state=display,
+                console_path=(f'Database {position} ({name})',))))
+            branches.append(dict(id=identity, name=name, form_key=None, console_path=(f'Database {position} ({name})',),
+                                 variables={**self.variables, **captures}))
+        if len(branches) == 1:
+            self.variables.update(matches[0][2])
+            self._sync_context()
+            return children[0]
+        self.database_scope = tuple(branches)
+        return self._form_summary(children, None)
+
+    @staticmethod
+    def _match_variables(namespace, name, index, match):
+        return {f'{namespace}.name': name, f'{namespace}.index': index,
+                **{f'{namespace}.{i}': value for i, value in enumerate(match.groups(), 1)},
+                **{f'{namespace}.{key}': value for key, value in match.groupdict().items()}}
+
+    @staticmethod
+    def _form_selector(command):
+        if isinstance(getattr(command, 'form_name', None), str):
+            return 'form_name'
+        if isinstance(getattr(command, 'form', None), str):
+            return 'form'
+        return None
+
+    async def _qualified_form(self, command, parameter, selectors, variable_maps, deleting):
+        from .command_templates import command_parameters
+        from .commands.add_form import AddFormCommand
+        from .name_lookup import find_named_id, require_named_id
+        from .schema_resolution import CachedResolutionService
+
+        by_database = {branch['id']: branch['variables'] for branch in self.database_scope}
+        self._exit_database_scope()
+        try:
+            names = await self._database_directory()
+            destinations = []
+            for selector in selectors:
+                if '/' not in selector:
+                    raise ValueError('The form selector mixes qualified and unqualified destinations.')
+                database, form = selector.split('/', 1)
+                destinations.append((require_named_id(database, names, kind='Database'), form))
+            identity, form = destinations[0]
+            if any(db != identity for db, _ in destinations):
+                raise ValueError('The qualified form selector resolves to multiple destinations.')
+            form_selectors = {name for _, name in destinations}
+            if len(form_selectors) > 1:
+                directory = {}
+                if not isinstance(command, AddFormCommand):
+                    service = CachedResolutionService(self.form_service, self.resolution_cache)
+                    directory = await self.workspace.form_directory(service, identity)
+                keys = set()
+                for name in form_selectors:
+                    form_id = find_named_id(name, directory, kind='Form')
+                    keys.add(('id', form_id) if form_id is not None else ('name', name.casefold()))
+                if len(keys) > 1:
+                    raise ValueError('The qualified form selector resolves to multiple destinations.')
+            variables = by_database.get(identity, variable_maps[0]).copy()
+            prepared = replace(command_parameters(command, variables), **{parameter: form})
+        except Exception as exc:
+            return self._selector_result(str(exc), 'qualified_form_selector_failed')
+        if not self.is_current():
+            return None
+        self._select_database(identity)
+        result = await self._apply_actual(PreparedCommand(prepared), None, variables)
+        if result is None or not self.is_current():
+            return None
+        if result.application_failed:
+            self._select_database(None)
+        if deleting:
+            self._clear_form_context()
+            self.plan_builder.exit_deleted_scope()
+        return self._snapshot_execution(replace(CommandExecution.from_result(result),
+                                                display_state=None if result.application_failed else result.display_state))
+
+    async def _run_database_scope(self, index, version, *, selecting=False, deleting=False):
+        if isinstance(self.commands[index], IterativeCommand) and all(branch['form_key'] for branch in self.database_scope):
+            targets = []
+            for branch in self.database_scope:
+                key = branch['form_key']
+                schema = self.workspace.state.resources[key].payload.schema
+                name = schema.get('label') or key.identity
+                targets.append(dict(identity=key.identity, name=name, form_key=key,
+                                    variables=branch['variables'], path=(branch['name'], name),
+                                    console_path=branch['console_path'] + (f'Form 1 ({name})',)))
+            return await self._run_form_scope(index, targets, None, version)
+
+        children = [CommandExecution('not_executed', None, 'Did not execute: an earlier database failed.',
+                                     application_context=(branch['name'],), console_path=branch['console_path'])
+                    for branch in self.database_scope]
+        current = None
+        for position, branch in enumerate(self.database_scope):
+            key = None if selecting else branch['form_key']
+            self._select_database(branch['id'])
+            if key is not None:
+                self.workspace.state.activate(key)
+            current = self.workspace.active_schema
+            if selecting:
+                scope_context = None if deleting else (self.authored_commands[index].authored_id, None)
+                result = await self._apply_actual(self.commands[index], None, branch['variables'],
+                                                  scope_context=scope_context)
+                execution = CommandExecution.from_result(result) if result is not None else None
+                branch['form_key'] = self.workspace.state.active_form_key
+            else:
+                execution = await self._run_connected_command(index, current, branch['variables'], version,
+                                                               publish=False, form_key=key)
+            if execution is None or not self.is_current():
+                return None
+            current = execution.schema
+            label = (current or {}).get('label')
+            target_keys = execution.target_keys
+            if deleting and execution.effect_ids:
+                effect = next((effect for effect in reversed(self.effects)
+                               if effect.effect_id in execution.effect_ids and isinstance(effect, FormDeleteEffect)), None)
+                if effect is not None:
+                    target_keys = (effect.subjects[0],)
+                    schema = self.workspace.state.resources[target_keys[0]].payload.schema
+                    label = schema.get('label') or target_keys[0].identity
+            path = (branch['name'], label) if label else (branch['name'],)
+            command = self.commands[index]
+            if label and not isinstance(command, IterativeCommand) and isinstance(getattr(command, 'field_code', None), str):
+                from .command_templates import substitute_selector
+                try:
+                    path += (substitute_selector(command.field_code, branch['variables']),)
+                except ValueError:
+                    path += (command.field_code,)
+            console_path = branch['console_path']
+            if label:
+                console_path += (f'Form 1 ({label})',)
+            if len(path) == 3:
+                console_path += (f'Field 1 ({path[-1]})',)
+            children[position] = replace(execution, application_context=path, target_keys=target_keys,
+                                         console_path=console_path)
+            if deleting:
+                branch['form_key'] = None
+            self.executions[index] = self._form_summary(children, current)
+            self._publish_evaluation()
+            if execution.status == 'error':
+                break
+        self._sync_context()
+        summary = self._form_summary(children, current)
+        return self._finish_form_deletion(summary) if deleting else summary
+
+    def _finish_form_deletion(self, execution):
+        for branch in self.database_scope:
+            branch['form_key'] = None
+        self._clear_form_context()
+        self.plan_builder.exit_deleted_scope()
+        return self._without_active_form(execution)
+
+    async def _run_form_selection(self, index, version, current, *, replacing, deleting):
+        from .command_templates import substitute_text
+
+        command = self.commands[index]
+        variables = {name: value for name, value in self.variables.items() if name not in self.assigned}
+        branches = self.database_scope
+        variable_maps = [branch['variables'] for branch in branches] if branches else [variables]
+        parameter = self._form_selector(command)
+        if parameter:
+            authored_selector = getattr(command, parameter)
+            selectors = []
+            try:
+                for bindings in variable_maps:
+                    selectors.append(substitute_text(authored_selector, bindings))
+            except ValueError as exc:
+                if '/' in authored_selector or any('/' in selector for selector in selectors):
+                    self._exit_database_scope()
+                else:
+                    for branch in branches:
+                        branch['form_key'] = None
+                    self._clear_form_context()
+                return self._selector_result(str(exc), 'invalid_selector')
+            if any('/' in selector for selector in selectors):
+                return await self._qualified_form(command, parameter, selectors, variable_maps, deleting)
+
+        if replacing or branches:
+            self._clear_form_context()
+            current = None
+        if getattr(command, 'form_pattern', None) is not None:
+            scope, execution = await self._start_form_scope(command, current, variables, branches)
+        elif branches:
+            for branch in branches:
+                branch['form_key'] = None
+            return await self._run_database_scope(index, version, selecting=True, deleting=deleting)
+        else:
+            scope = None
+            execution = await self._run_connected_command(index, current, variables, version)
+        if execution is None or not self.is_current():
+            return None
+        if deleting:
+            return self._finish_form_deletion(execution)
+        if scope is None and (execution.form_iterations or execution.schema is None):
+            self._clear_form_context()
+            self.plan_builder.select_form(None)
+            return self._without_active_form(execution)
+        self.scope = scope
+        self.variables.clear()
+        self.variables.update(variables)
+        self._sync_context()
+        return execution
+
     async def _resolve_commands(self, version, current, commands):
         from .commands.delete_form import DeleteFormCommand
+        from .commands.with_database import WithDatabaseCommand
+
         for index, command in enumerate(commands):
             if not self.is_current():
                 return
@@ -613,36 +971,23 @@ class Applier:
             self._publish_evaluation()
             replacing = self._replaces_form_context(command)
             deleting = isinstance(command, DeleteFormCommand)
-            if replacing or (deleting and not command.current_form):
-                variables = {name: value for name, value in self.variables.items() if name not in self.assigned}
-                if replacing:
-                    self._clear_form_context()
-                    current = None
-                if getattr(command, 'form_pattern', None) is not None:
-                    scope, execution = await self._start_form_scope(command, current, variables)
-                else:
-                    scope = None
-                    execution = await self._run_connected_command(index, current, variables, version)
+            if isinstance(command, WithDatabaseCommand):
+                execution = await self._switch_database(command)
+            elif replacing or (deleting and not command.current_form):
+                execution = await self._run_form_selection(index, version, current,
+                                                           replacing=replacing, deleting=deleting)
             elif self.scope is not None:
                 execution = await self._run_form_scope(index, self.scope, current, version)
+                if deleting and execution is not None:
+                    execution = self._finish_form_deletion(execution)
+            elif self.database_scope:
+                execution = await self._run_database_scope(index, version, deleting=deleting)
             else:
                 execution = await self._run_connected_command(index, current, self.variables, version)
-            if not self.is_current():
+                if deleting and execution is not None:
+                    execution = self._finish_form_deletion(execution)
+            if execution is None or not self.is_current():
                 return
-            if deleting:
-                self._clear_form_context()
-                self.plan_builder.exit_deleted_scope()
-                execution = self._without_active_form(execution)
-            elif replacing:
-                if scope is None and (execution.form_iterations or execution.schema is None):
-                    self._clear_form_context()
-                    self.plan_builder.select_form(None)
-                    execution = self._without_active_form(execution)
-                else:
-                    self.scope = scope
-                    self.variables.clear()
-                    self.variables.update(variables)
-                    self._sync_context()
             current = execution.schema
             self.executions[index] = execution
             if execution.status == 'error':
@@ -669,45 +1014,49 @@ class Applier:
         except StopIteration as finished:
             return self._snapshot_execution(finished.value)
 
-    async def _start_form_scope(self, command, current, variables):
+    async def _start_form_scope(self, command, current, variables, branches=()):
         from .command_iteration import compile_pattern
         from .command_templates import substitute_text
-        scope = []
-        draft = self._new_draft(variables)
-        failure = None
-        token = ACTIVE_DRAFT.set(draft)
+        from .schema_resolution import CachedResolutionService
+
+        scope, empty_branches = [], []
+        databases = branches or ({'id': self.workspace.state.active_database_id,
+                                   'name': None, 'variables': variables},)
         try:
-            database_id = self.workspace.state.active_database_id
-            if not database_id:
+            if not databases[0]['id']:
                 failure = ExecutionResult.warning(current, 'An active database is required for a form pattern.',
                                                   'missing_database', skipped=True)
-            if failure is not None:
                 return None, self._snapshot_execution(CommandExecution.from_result(failure))
             if self.form_service is None:
                 raise ValueError('WithForm requires a connected form loader.')
-            pattern = compile_pattern(substitute_text(command.form_pattern, variables, namespaces={'vars'}), kind='form')
-            names = dict(await self.form_service.get_form_names(database_id))
-            if not self.is_current():
-                return None, None
-            deleted = {key.identity for key, state in self.workspace.state.resources.items() if state.lifecycle == Lifecycle.DELETED}
-            names = {identity: name for identity, name in names.items() if identity not in deleted}
-            names.update({identity: schema.get('label') or identity
-                          for identity, schema in self.workspace.latest.items()
-                          if schema.get('databaseId') == database_id})
-            for identity, name in sorted(names.items(), key=lambda item: (item[1].casefold(), item[0])):
-                match = pattern.fullmatch(name)
-                if match is None:
-                    continue
-                local = {**variables, 'form.name': name, 'form.index': len(scope) + 1}
-                local.update({f'form.{i}': value for i, value in enumerate(match.groups(), 1)})
-                local.update({f'form.{key}': value for key, value in match.groupdict().items()})
-                scope.append(dict(identity=identity, name=name, variables=local, form_key=None))
+            service = CachedResolutionService(self.form_service, self.resolution_cache)
+            for branch in databases:
+                bindings = branch['variables']
+                pattern = compile_pattern(substitute_text(command.form_pattern, bindings,
+                                                          namespaces={'vars', 'database'}), kind='form')
+                names = await self.workspace.form_directory(service, branch['id'])
+                if not self.is_current():
+                    return None, None
+                count = 0
+                for identity, name in sorted(names.items(), key=lambda item: (item[1].casefold(), item[0])):
+                    if (match := pattern.fullmatch(name)) is None:
+                        continue
+                    count += 1
+                    local = {**bindings, **self._match_variables('form', name, count, match)}
+                    path = (branch['name'], name) if branches else (name,)
+                    console_path = branch.get('console_path', self._console_form_path(None)) + (f'Form {count} ({name})',)
+                    scope.append(dict(identity=identity, name=name, variables=local, form_key=None,
+                                      path=path, console_path=console_path))
+                if branches and not count:
+                    warning = ExecutionResult.warning(None, 'No form names matched the pattern.', 'no_matches')
+                    empty_branches.append((len(scope), replace(CommandExecution.from_result(warning),
+                        console_path=branch['console_path'], form_iterations=True)))
         except Exception as exc:
-            failure = ExecutionResult.error(current, str(exc), 'form_selector_failed')
-        finally:
-            ACTIVE_DRAFT.reset(token)
-        if failure is not None:
-            return None, self._snapshot_execution(CommandExecution.from_result(failure))
+            return None, self._selector_result(str(exc), 'form_selector_failed')
+
+        if branches:
+            for branch in branches:
+                branch['form_key'] = None
         scope_id = self.authored_commands[self._index].authored_id
         scope_keys = tuple(ResourceKey.form(target['identity']) for target in scope)
         children = self._pending_forms(scope)
@@ -726,36 +1075,34 @@ class Applier:
             if not result.application_failed:
                 target['form_key'] = ResourceKey.form(target['identity'])
             children[i] = replace(CommandExecution.from_result(result), field_code=target['name'],
-                                  target_keys=(ResourceKey.form(target['identity']),))
+                                     application_context=target['path'], console_path=target['console_path'],
+                                     target_keys=(ResourceKey.form(target['identity']),))
             current = result.schema
-            if result.application_failed:
-                return None, self._form_summary(children, current)
-        return scope or None, self._form_summary(children, current)
+            if result.has_errors or (result.application_failed and not branches):
+                break
+        for position, warning in reversed(empty_branches):
+            children.insert(position, warning)
+        summary = self._form_summary(children, current)
+        if summary.status == 'error' or (not branches and scope and any(not target['form_key'] for target in scope)):
+            return None, summary
+        selected = [target for target in scope if target['form_key'] is not None]
+        return (selected if branches else selected or None), summary
 
     @staticmethod
     def _pending_forms(scope):
         return [CommandExecution('not_executed', None, 'Did not execute: an earlier form failed.',
-                                 field_code=target['name'],
+                                 field_code=target['name'], application_context=target['path'], console_path=target['console_path'],
                                  target_keys=(ResourceKey.form(target['identity']),)) for target in scope]
 
 
     def _form_summary(self, children, current):
         if not children:
-            return replace(self._snapshot_execution(CommandExecution.from_result(ExecutionResult.warning(
-                current, 'No form names matched. No applications in this scope.', 'no_matches'))), form_iterations=True)
-        summary = self._summarize_iterations(children, current)
-        def flatten(items, context=(), targets=()):
-            for child in items:
-                path = context + (child.application_context or ((child.field_code,) if child.field_code else ()))
-                keys = child.target_keys or targets
-                if not keys and child.schema is not None:
-                    keys = (ResourceKey.form(child.schema['id']),)
-                if child.iterations or child.field_iterations or child.form_iterations:
-                    yield from flatten(child.iterations, path, keys)
-                else:
-                    yield replace(child, application_context=path, target_keys=keys)
-        return replace(self._snapshot_execution(summary), form_iterations=True, iterations=tuple(flatten(children)))
-
+            warning = ExecutionResult.warning(current, 'No form names matched. No applications in this scope.', 'no_matches')
+            execution = self._snapshot_execution(CommandExecution.from_result(warning))
+            return replace(execution, form_iterations=True,
+                           message=self._iteration_line(self._console_form_path(None), execution.message))
+        summary = self._summarize_iterations(children, current, nested=True)
+        return replace(self._snapshot_execution(summary), form_iterations=True)
 
     async def _run_form_scope(self, index, scope, current, version):
         from .commands.set_variable import SetVariableCommand
@@ -763,14 +1110,17 @@ class Applier:
         plans = [None] * len(scope)
         command = self.commands[index]
         for i, target in enumerate(scope):
-            context = (target['name'],)
+            context = target['path']
             if not isinstance(command, IterativeCommand) and isinstance(getattr(command, 'field_code', None), str):
                 from .command_templates import substitute_selector
                 try:
                     context += (substitute_selector(command.field_code, target['variables']),)
                 except ValueError:
                     context += (command.field_code,)
-            children[i] = replace(children[i], application_context=context)
+            console_path = target['console_path']
+            if len(context) > len(target['path']):
+                console_path += (f'Field 1 ({context[-1]})',)
+            children[i] = replace(children[i], application_context=context, console_path=console_path)
         if isinstance(command, IterativeCommand):
             # Plan every form before applying any field, so an early failure still
             # leaves the complete set of unexecuted applications visible.
@@ -787,8 +1137,10 @@ class Applier:
         for i, target in enumerate(scope):
             state = self.workspace.state.resources.get(target['form_key'])
             if state is None or state.lifecycle == Lifecycle.DELETED:
-                children[i] = self._snapshot_execution(CommandExecution.from_result(ExecutionResult.warning(
+                warning = self._snapshot_execution(CommandExecution.from_result(ExecutionResult.warning(
                     self.workspace.active_schema, 'Form deleted. Command skipped.', 'deleted_form', skipped=True)))
+                children[i] = replace(warning, application_context=children[i].application_context,
+                                      console_path=children[i].console_path, target_keys=children[i].target_keys)
                 continue
             current = deepcopy(state.payload.to_dict())
             execution = await self._run_connected_command(index, current, target['variables'], version,
@@ -799,6 +1151,7 @@ class Applier:
                 return None
             children[i] = replace(execution, field_code=target['name'],
                                   application_context=children[i].application_context,
+                                  console_path=children[i].console_path,
                                   target_keys=children[i].target_keys)
             current = execution.schema
             self.executions[index] = self._form_summary(children, current)
@@ -842,7 +1195,7 @@ class Applier:
         return ResourceProjection(before, after, (Footprint(before.key, schema['id'], ('label',)),
             Footprint(before.key, schema['id'], existence=True), Footprint(before.key, schema['id'], ('type',))))
 
-    async def _add_modify_form(self, command, current):
+    async def _add_modify_form(self, command, current, *, scope_context=None):
         from .commands.move_form import MoveFormCommand
 
         if self.form_service is None:
@@ -852,19 +1205,20 @@ class Applier:
         if warnings:
             return ExecutionResult(current, warnings, skipped=True)
         state = await self._database(database)
-        matches = [identity for identity, entry in state.payload.entries.items()
-                   if entry.get('type') == 'FORM' and entry.get('label') == command.form_name]
-        if len(matches) > 1:
-            return ExecutionResult.warning(current,
-                f'Form name {command.form_name!r} matches multiple top-level forms in the active database.',
-                'ambiguous_form_name', skipped=True)
-        if not matches:
-            result = await self._add_form(command.as_add_form(), current)
+        from .name_lookup import find_named_id
+        names = {identity: entry.get('label') for identity, entry in state.payload.entries.items()
+                 if entry.get('type') == 'FORM'}
+        try:
+            identity = find_named_id(command.form_name, names, kind='Form')
+        except ValueError as exc:
+            return ExecutionResult.warning(current, str(exc), 'ambiguous_form_name', skipped=True)
+        if identity is None:
+            result = await self._add_form(command.as_add_form(), current, scope_context=scope_context)
             return with_prepared_command(result, command)
 
         try:
-            schema = await self.workspace.select(matches[0], self.form_service)
-            if schema.get('databaseId') != database or schema.get('label') != command.form_name:
+            schema = await self.workspace.select(identity, self.form_service)
+            if schema.get('databaseId') != database:
                 raise FormSelectionError('The selected schema does not match the form name in the active database.')
         except asyncio.CancelledError:
             raise
@@ -872,7 +1226,7 @@ class Applier:
             return ExecutionResult.warning(current, f'Could not select form {command.form_name!r}. {exc}',
                                            'form_switch_failed', skipped=True)
         tree_warnings = await self.workspace.load_form_tree(schema, self.form_service, self.related_schemas)
-        self.plan_builder.select_form(self.workspace.key_for(schema))
+        self._plan_form_selection(self.workspace.key_for(schema), scope_context)
         if command.folder is None:
             result = ExecutionResult(schema, success_message=f'Active form: {command.form_name}')
         else:
@@ -882,7 +1236,7 @@ class Applier:
                 result = replace(result, skipped=False)
         return with_prepared_command(replace(result, diagnostics=tree_warnings + result.diagnostics), command)
 
-    async def _add_form(self, command, current):
+    async def _add_form(self, command, current, *, scope_context=None):
         from .form_folders import resolve_folder
         database = self.workspace.state.active_database_id
         warnings = await self._load_context_database(database)
@@ -907,7 +1261,7 @@ class Applier:
             Footprint(before_db.key, identity, (prop,)) for prop in ('type', 'label', 'parentId')))
         prerequisites = (MemberRef(before_db.key, parent),) if parent != database else ()
         self.plan_builder.observe(self.workspace.state.baselines.entries.values())
-        self.plan_builder.select_form(key)
+        self._plan_form_selection(key, scope_context)
         effect = SchemaEffect(self._attempt_id + ':create', self._attempt_id, key, before, after,
                               prerequisites=prerequisites, projections=(projection,), creation=True)
         self.plan_builder.add(effect)
@@ -961,7 +1315,7 @@ class Applier:
             elif scope_member:
                 schema = await self.workspace.select(command.form, self.form_service)
             else:
-                schema = await self.workspace.switch(command.form, self.form_service, current, self.related_schemas)
+                schema = await self._switch_form(command.form)
         except ValueError as exc:
             return ExecutionResult.warning(current, str(exc), 'form_selector_failed', skipped=True)
         finally:

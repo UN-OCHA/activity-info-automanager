@@ -1,4 +1,4 @@
-"""Select, create, or move one top-level form by its exact name."""
+"""Select, create, or move one top-level form by name or ID."""
 
 from dataclasses import dataclass, replace
 import json

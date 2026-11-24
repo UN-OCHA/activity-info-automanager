@@ -181,6 +181,10 @@ class _ParameterEditor:
 
     def _options(self):
         if self.definition.option_source == 'field_codes':
+            if self.definition.key in ('field_code', 'before_after_field', 'relative_field_code'):
+                suggestions = self.owner.option_sources.get('active_field_codes')
+                if suggestions is not None:
+                    return suggestions
             return field_codes_from_schema(self.owner.schema)
         if self.definition.option_source in self.owner.option_sources:
             return self.owner.option_sources[self.definition.option_source]
@@ -365,7 +369,7 @@ class CommandCreatorRenderer:
     """
 
     def __init__(self, definitions: tuple[CommandCreatorDefinition, ...], *, on_add=None, on_parameter_change=None):
-        order = ('set_variable', 'with_form', 'add_form', 'add_modify_form', 'modify_form', 'move_form',
+        order = ('set_variable', 'with_database', 'with_form', 'add_form', 'add_modify_form', 'modify_form', 'move_form',
                  'delete_form', 'add_field', 'modify_field', 'add_modify_field', 'move_field', 'delete_field')
         by_key = {definition.key: definition for definition in definitions}
         self.definitions = {key: by_key.pop(key) for key in order if key in by_key}
@@ -377,7 +381,7 @@ class CommandCreatorRenderer:
         self.parameter_containers: dict[str, ui.element] = {}
         self.editors: list[_ParameterEditor] = []
         self.schema: dict[str, Any] | None = None
-        self.option_sources: dict[str, list[str]] = {}
+        self.option_sources: dict[str, list[str] | dict[str, str]] = {}
         self.enabled = True
         self._updating = False
         ui.add_css('''
@@ -441,6 +445,9 @@ class CommandCreatorRenderer:
         from .command_iteration import ITERABLE_CREATORS
         return self.command_select.value in ITERABLE_CREATORS and self.target_mode.value == 'Multiple'
 
+    def _multiple_databases(self):
+        return self.command_select.value == 'with_database' and self.target_mode.value == 'Multiple'
+
     def _multiple_forms(self):
         return (self.command_select.value in ('with_form', 'modify_form', 'move_form', 'delete_form')
                 and not self._current_form() and self.target_mode.value == 'Multiple')
@@ -459,7 +466,7 @@ class CommandCreatorRenderer:
             self.parameter_containers.clear()
             definition = self.definitions.get(self.command_select.value)
             from .command_iteration import ITERABLE_CREATORS
-            supports_multiple = self.command_select.value in ITERABLE_CREATORS or self.command_select.value in ('with_form', 'modify_form', 'move_form', 'delete_form')
+            supports_multiple = self.command_select.value in ITERABLE_CREATORS or self.command_select.value in ('with_database', 'with_form', 'modify_form', 'move_form', 'delete_form')
             self.target_mode.set_visibility(supports_multiple)
             self.target_label.set_visibility(supports_multiple)
             with self.parameters:
@@ -488,14 +495,21 @@ class CommandCreatorRenderer:
         if self.command_select.value in ('modify_form', 'move_form', 'delete_form'):
             self.target_mode.set_visibility(not self._current_form())
             self.target_label.set_visibility(not self._current_form())
-        self.target_help.set_visibility(self._multiple_fields() or self._multiple_forms())
+        self.target_help.set_visibility(self._multiple_fields() or self._multiple_forms() or self._multiple_databases())
         self.target_help.set_text(
+            'Whole-name regex; captures: (?P<year>...). Values: ${database.year}. Literal escape: $${'
+            if self._multiple_databases() else
             'Whole-name regex; captures: (?P<year>...). Values: ${form.year}. Literal escape: $${'
             if self._multiple_forms() else
             'Whole-code regex; captures: (?P<year>...). Values: ${field.year}. Literal escape: $${')
         record_label = self.controls.get('record_label_field_id')
         if record_label is not None and self._multiple_forms():
             record_label.set_options([])
+        database_target = self.controls.get('database')
+        if database_target is not None:
+            database_target.set_label('Database Name Pattern' if self._multiple_databases() else 'Database Name')
+            if self._multiple_databases():
+                database_target.set_options([])
         form_target = self.controls.get('form')
         if form_target is not None:
             form_target.set_label('Form Name Pattern' if self._multiple_forms() else 'Form Name')
@@ -566,6 +580,9 @@ class CommandCreatorRenderer:
         if self._multiple_forms():
             from .command_iteration import validate_pattern
             validate_pattern(values.get('form'), kind='form')
+        if self._multiple_databases():
+            from .command_iteration import validate_pattern
+            validate_pattern(values.get('database'), kind='database')
         from .command_templates import substitute_selector, substitute_value
         if isinstance(values.get('field_code'), str):
             substitute_selector(values['field_code'])
@@ -589,6 +606,8 @@ class CommandCreatorRenderer:
         if definition:
             try:
                 values = self.values()
+                if self._multiple_databases():
+                    values['database_pattern'] = values.pop('database')
                 if self._multiple_forms():
                     values['form_pattern'] = values.pop('form')
                 command = definition.create_command(values)
@@ -614,7 +633,7 @@ class CommandCreatorRenderer:
         self._parameter_changed(None)
 
     def set_suggestions(self, source: str, values):
-        self.option_sources[source] = list(values)
+        self.option_sources[source] = dict(values) if isinstance(values, Mapping) else list(values)
         self._update_conditional_visibility()
         self._update_target_controls()
         self._update_add_button()

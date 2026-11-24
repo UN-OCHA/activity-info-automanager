@@ -45,6 +45,8 @@ class CommandContext:
     database_names: dict | None = None
     variables: dict | None = None
     reserved_identities: set | None = None
+    exact_field_code: bool = False
+    exact_anchor: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,8 @@ class CommandExecution:
     target_member_ids: tuple[str, ...] = ()
     rejected_candidate: DiagnosticAttachment | None = None
     effect_ids: tuple[str, ...] = ()
+    console_path: tuple[str, ...] = ()
+    console_message: str | None = None
 
     @property
     def application_label(self):
@@ -146,8 +150,8 @@ class CommandExecution:
 def with_prepared_command(result, command, source_schema=None):
     concrete = getattr(command, 'command', command)
     code = getattr(concrete, 'field_code', None)
-    members = ()
-    if isinstance(code, str):
+    members = result.target_member_ids
+    if not members and isinstance(code, str):
         for schema in (source_schema, result.schema):
             members = tuple(field['id'] for field in (schema or {}).get('elements', [])
                             if field.get('code') == code and field.get('id'))
@@ -196,6 +200,8 @@ async def apply_command(command, schema, resolver, *, related_schemas=None, data
     context = CommandContext(related_schemas, database_names, variables if variables is not None else {}, reserved_identities)
     try:
         prepared = command.command if isinstance(command, PreparedCommand) else command_parameters(command, context.variables)
+        if isinstance(command, PreparedCommand):
+            context = replace(context, exact_field_code=command.exact_field_code, exact_anchor=command.exact_anchor)
     except ValueError as exc:
         return ExecutionResult.error(schema, str(exc), 'invalid_parameter')
     except Exception as exc:

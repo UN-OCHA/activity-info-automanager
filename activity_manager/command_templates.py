@@ -13,7 +13,6 @@ NAMESPACE_MEMBERS = {
     'form': ITERATION_MEMBER,
     'database': ITERATION_MEMBER,
 }
-RESERVED_NAMESPACES = frozenset({'database'})
 FIELD_BUILTINS = frozenset({'code', 'index'})
 
 
@@ -37,8 +36,6 @@ def substitute_text(text, variables=None, *, namespaces=None):
             if variables is None:
                 result.append(text[index:end + 1])
             else:
-                if namespace in RESERVED_NAMESPACES:
-                    raise ValueError(f'Namespace {namespace!r} is reserved; its iteration context is not available yet.')
                 if reference not in variables or variables[reference] is None:
                     raise ValueError(f'Variable ${{{reference}}} is undefined or its capture group did not match.')
                 result.append(str(variables[reference]))
@@ -51,7 +48,7 @@ def substitute_text(text, variables=None, *, namespaces=None):
 
 def substitute_selector(text, variables=None):
     """Field selectors resolve before matching, without field iteration context."""
-    return substitute_text(text, variables, namespaces={'vars', 'form'})
+    return substitute_text(text, variables, namespaces={'vars', 'form', 'database'})
 
 
 def substitute_value(value, variables=None):

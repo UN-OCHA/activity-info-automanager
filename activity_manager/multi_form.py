@@ -5,7 +5,7 @@ from copy import deepcopy
 from .command_execution import Diagnostic
 from .resource_state import ApplicationState, FormPayload, Lifecycle, ResourceKey
 
-from .schema_names import resolve_form_names
+from .name_lookup import require_named_id
 from .schema_identity import schema_identities
 
 
@@ -59,35 +59,28 @@ class FormWorkspace:
         self.state.activate(self.key_for(schema))
         self.reserved.setdefault(schema.get("id"), set()).update(schema_identities(schema))
 
-    async def switch(self, form, service, current, related):
+    async def switch(self, form, service):
         database_id = self.state.active_database_id
-        if not database_id and '/' not in form:
-            raise FormSelectionError('An active database or a database-qualified form name is required.')
-        from .schema_resolution import CachedResolutionService
-        service = CachedResolutionService(service, {'deleted_form_ids': {k.identity for k, v in self.state.resources.items() if v.lifecycle == Lifecycle.DELETED}})
-        probe = {**(current or {}), 'databaseId': database_id, 'elements': [{'type': 'reference', 'typeParameters': {
-            'range': [{'formId': form}]}}]}
         try:
-            resolved = await resolve_form_names(service, probe, related, load_related=False)
+            names = await self.form_directory(service, database_id)
+            identity = require_named_id(form, names, kind='Form')
         except ValueError as exc:
             raise FormSelectionError(str(exc)) from exc
-        identity = resolved['elements'][0]['typeParameters']['range'][0]['formId']
-        if self.state.resources.get(ResourceKey.form(identity)) is not None and self.state.resources[ResourceKey.form(identity)].lifecycle == Lifecycle.DELETED:
-            raise FormSelectionError('Form deleted. Command skipped.')
-        if current is not None and identity == current.get('id'):
-            return deepcopy(current)
-        local = self.state.resources.get(ResourceKey.form(identity))
-        if local is not None and local.lifecycle == Lifecycle.DELETED:
-            raise FormSelectionError('Form deleted. Command skipped.')
-        schema = self.latest.get(identity)
-        if schema is None:
-            schema = await service.get_form_schema(identity)
-            if (schema.get('id') != identity or not isinstance(schema.get('elements'), list)
-                    or not schema.get('databaseId')):
-                raise ValueError('The selected form has an invalid schema or no database ID.')
-            self.state.load_form(schema, affected=True)
-        self.state.activate(self.key_for(schema))
-        return deepcopy(schema)
+        schema = await self.select(identity, service)
+        if schema.get('databaseId') != database_id:
+            raise FormSelectionError('The selected form is outside the active database.')
+        return schema
+
+    async def form_directory(self, service, database_id):
+        if not database_id:
+            raise FormSelectionError('An active database or a database-qualified form name is required.')
+        names = dict(await service.get_form_names(database_id))
+        names.update({identity: schema.get('label') or identity
+                      for identity, schema in self.latest.items()
+                      if schema.get('databaseId') == database_id})
+        return {identity: name for identity, name in names.items()
+                if not ((state := self.state.resources.get(ResourceKey.form(identity)))
+                        and state.lifecycle == Lifecycle.DELETED)}
 
     async def select(self, identity, service):
         """Select a frozen scope member by identity, loading it once."""

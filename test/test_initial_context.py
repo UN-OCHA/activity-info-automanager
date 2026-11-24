@@ -63,11 +63,11 @@ class InitialContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.executions[0].status, 'applied')
         self.assertEqual(engine.workspace.active_schema['id'], 'a')
 
-    async def test_failed_qualified_selection_leaves_database_only_context(self):
+    async def test_failed_qualified_selection_clears_both_contexts(self):
         engine, _ = await self.evaluate('WithForm(form="Remote/Missing")\nWithForm(form="A")', database='db')
-        self.assertEqual([e.status for e in engine.executions], ['warning', 'applied'])
+        self.assertEqual([e.status for e in engine.executions], ['warning', 'warning'])
         self.assertIsNone(engine.executions[0].schema)
-        self.assertEqual(engine.workspace.state.active_database_id, 'db')
+        self.assertIsNone(engine.workspace.state.active_database_id)
 
     async def test_unqualified_selection_without_database_never_reads_forms(self):
         engine, service = await self.evaluate('WithForm(form="A")')
@@ -81,11 +81,14 @@ class InitialContextTests(unittest.IsolatedAsyncioTestCase):
         for selector in ('Missing', 'Remote/Missing', 'MissingDatabase/B'):
             with self.subTest(selector=selector):
                 engine, _ = await self.evaluate(f'ModifyForm(currentForm=False, form="{selector}", name="Rejected")\nAddField(fieldCode="kept", label="Kept")', initial=form('a', 'A'))
-                self.assertEqual([e.status for e in engine.executions], ['warning', 'warning'])
-                self.assertEqual(engine.executions[-1].diagnostics[0].code, 'missing_form')
+                if selector == 'MissingDatabase/B':
+                    self.assertEqual([e.status for e in engine.executions], ['error', 'not_executed'])
+                else:
+                    self.assertEqual([e.status for e in engine.executions], ['warning', 'warning'])
+                    self.assertEqual(engine.executions[-1].diagnostics[0].code, 'missing_form')
                 self.assertIsNone(engine.workspace.active_schema)
                 self.assertEqual(engine.workspace.latest['a']['label'], 'A')
-                self.assertEqual(engine.workspace.state.active_database_id, 'db')
+                self.assertEqual(engine.workspace.state.active_database_id, None if '/' in selector else 'db')
                 self.assertFalse(engine.effects)
 
     async def test_literal_variable_can_establish_selector_without_initial_context(self):

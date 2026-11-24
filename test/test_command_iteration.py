@@ -42,20 +42,17 @@ class TemplateTests(unittest.TestCase):
             with self.subTest(reference=reference), self.assertRaises(CommandTextError):
                 parse_command_text('ModifyField(fieldCode="anchor", fieldType="quantity", label="${' + reference + '}")')
 
-    def test_future_namespaces_validate_but_have_no_execution_context(self):
-        for namespace in ('database',):
-            for member in ('code', 'index', 'region', '1'):
-                text = '${' + namespace + '.' + member + '}'
-                with self.subTest(text=text):
-                    self.assertEqual(substitute_text(text), text)
-                    # Reserved namespaces cannot be supplied accidentally by a caller.
-                    with self.assertRaisesRegex(ValueError, 'iteration context is not available'):
-                        substitute_text(text, {namespace + '.' + member: 'unexpected'})
-                    command = parse_command_text('ModifyField(fieldCode="anchor", fieldType="quantity", label="' + text + '")')[0]
-                    result = apply_command_locally(command, source())
-                    self.assertEqual(result.status, 'error')
-                    self.assertIn('iteration context is not available', result.message)
-                    self.assertEqual(result.schema, source())
+    def test_database_namespace_requires_a_binding(self):
+        for member in ('name', 'index', 'region', '1'):
+            text = '${database.' + member + '}'
+            with self.subTest(text=text):
+                self.assertEqual(substitute_text(text), text)
+                self.assertEqual(substitute_text(text, {'database.' + member: 'captured'}), 'captured')
+                command = parse_command_text('ModifyField(fieldCode="anchor", fieldType="quantity", label="' + text + '")')[0]
+                result = apply_command_locally(command, source())
+                self.assertEqual(result.status, 'error')
+                self.assertIn('undefined', result.message)
+                self.assertEqual(result.schema, source())
 
     def test_namespace_member_rules(self):
         for text in ('${unknown.code}', '${field.0}', '${form.-1}', '${database.name.extra}',
@@ -126,7 +123,7 @@ DeleteField(fieldPattern="${{vars.pattern}}")''')
 
     def test_selectors_reject_iteration_context(self):
         for selector in ('fieldCode', 'fieldPattern'):
-            for reference in ('field.code', 'field.year', 'field.1', 'field.index', 'database.index'):
+            for reference in ('field.code', 'field.year', 'field.1', 'field.index'):
                 text = f'DeleteField({selector}="${{{reference}}}")'
                 with self.subTest(text=text), self.assertRaises(CommandTextError) as error:
                     parse_command_text(text)
@@ -148,6 +145,17 @@ class IterationTests(unittest.TestCase):
                 self.assertEqual(len(result.iterations), 2)
                 self.assertEqual(result.iterations[1].concrete_command.position, 'After field')
                 self.assertEqual(result.iterations[1].concrete_command.before_after_field, 'cost_2024')
+
+    def test_move_iterations_keep_exact_targets_and_generated_anchors(self):
+        schema = source()
+        schema['elements'].append({'id': 'upper', 'code': 'COST_2024', 'label': 'Upper', 'type': 'quantity'})
+        schema['elements'][0]['label'] = 'Start here'
+        with Client(ui.page('/')), ui.column():
+            instance = manager('MoveField(fieldPattern="cost_.*", position="Before field", beforeAfterField="START HERE")',
+                               schema=schema)
+            result = instance.executions[0]
+            self.assertEqual(result.status, 'applied')
+            self.assertEqual([field['id'] for field in result.schema['elements']], ['a', 'b', 'x', 'y', 'z', 'upper'])
 
     def test_rename_capture_function_and_subsequent_command(self):
         with Client(ui.page('/')), ui.column():
@@ -178,7 +186,7 @@ DeleteField(fieldCode="last")''')
             parent = instance.executions[0]
             self.assertEqual(parent.status, 'error')
             self.assertEqual([child.status for child in parent.iterations], ['applied', 'error'])
-            self.assertIn('Stopped at iteration 2', parent.message)
+            self.assertIn('Field 2 (cost_2025) — Iteration 2 — Error:', parent.message)
             self.assertEqual(parent.schema['elements'][1]['code'], 'same')
             self.assertEqual(parent.schema['elements'][3]['code'], 'cost_2025')
             self.assertEqual(instance.executions[1].status, 'not_executed')
@@ -275,7 +283,7 @@ DeleteField(fieldCode="last")''')
 class AsyncIterationTests(unittest.IsolatedAsyncioTestCase):
     async def test_resolution_per_step_warnings_and_snapshot_annotations(self):
         async def resolve(data):
-            warning = Diagnostic('warning', 'Check field', ('elements', 0, 'code'))
+            warning = Diagnostic('warning', 'Check field\nCheck source', ('elements', 0, 'code'))
             return ExecutionResult(data, (warning,) if len(data['elements']) == 4 else (), deepcopy(data))
         resolver = AsyncMock(side_effect=resolve)
         with Client(ui.page('/')), ui.column():
@@ -284,7 +292,9 @@ class AsyncIterationTests(unittest.IsolatedAsyncioTestCase):
             parent = instance.executions[0]
             self.assertEqual(resolver.await_count, 2)
             self.assertEqual(parent.status, 'warning')
-            self.assertIn('Iteration 1 (cost_2024): Warning: Check field', parent.message)
+            self.assertIn('Field 1 (cost_2024) — Iteration 1 — Warning: Check field', parent.message)
+            self.assertIn('Field 1 (cost_2024) — Iteration 1 — Check source', parent.message)
+            self.assertEqual(parent.iterations[0].console_message.splitlines(), parent.message.splitlines()[:2])
             self.assertEqual(len(parent.iterations[0].issues), 1)
             self.assertEqual(parent.issues, ())
             self.assertTrue(instance.execute_button.enabled)

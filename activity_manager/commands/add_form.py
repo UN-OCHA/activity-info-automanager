@@ -35,7 +35,7 @@ def parse_add_form(text, call):
 
 ADD_FORM = CommandCreatorDefinition(
     key='add_form', label='Add form', create_command=lambda values: AddFormCommand(**values),
-    parameters=(ParameterDefinition('form_name', 'Name', 'text', required=True),
+    parameters=(ParameterDefinition('form_name', 'Name', 'combobox', required=True, option_source='form_names'),
         ParameterDefinition('folder', 'Destination folder', 'combobox', required=True, default='/',
             option_source='folder_paths', help='Folder name, full path or ID in the active database. / selects the database root.')),
 )

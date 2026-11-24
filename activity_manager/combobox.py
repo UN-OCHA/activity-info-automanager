@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from nicegui import events, ui
 
@@ -12,12 +12,12 @@ class FreeTextCombobox(ui.input):
     def __init__(
         self,
         label: str,
-        options: Iterable[str] = (),
+        options: Iterable[str] | Mapping[str, str] = (),
         *,
         value: str | None = None,
         on_change=None,
     ) -> None:
-        self.options = list(dict.fromkeys(options))
+        self._set_option_labels(options)
         self._external_change_handler = on_change
         super().__init__(
             label=label,
@@ -36,9 +36,13 @@ class FreeTextCombobox(ui.input):
     def entered_value(self) -> str | None:
         return self.value
 
-    def set_options(self, options: Iterable[str], *, value=_KEEP_VALUE):
-        """Update suggestions, optionally replacing the current value."""
+    def _set_option_labels(self, options):
         self.options = list(dict.fromkeys(options))
+        self._option_labels = dict(options) if isinstance(options, Mapping) else {}
+
+    def set_options(self, options: Iterable[str] | Mapping[str, str], *, value=_KEEP_VALUE):
+        """Update suggestions, optionally replacing the current value."""
+        self._set_option_labels(options)
         self.set_autocomplete(self.options)
         self._render_options()
         if value is not _KEEP_VALUE:
@@ -57,7 +61,7 @@ class FreeTextCombobox(ui.input):
                 return
             for option in self.options:
                 ui.item(
-                    option,
+                    self._option_labels.get(option, option),
                     on_click=lambda option=option: self._select_option(option),
                 )
 
