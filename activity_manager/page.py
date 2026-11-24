@@ -151,6 +151,10 @@ def connection_page():
         .console-panel {
             grid-column: 2 / 4;
             grid-row: 3;
+            flex-wrap: nowrap;
+        }
+        .console-panel > .panel-body {
+            flex: 1 1 0;
         }
         .panel-body {
             min-height: 0;
