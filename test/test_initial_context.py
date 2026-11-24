@@ -15,6 +15,34 @@ from activity_manager.listbox import DatabaseListbox
 
 
 class InitialContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_form_selection_loads_related_schemas_for_each_scope_member(self):
+        reference = {'id': 'ref', 'code': 'REF', 'type': 'reference',
+                     'typeParameters': {'range': [{'formId': 'target'}]}}
+        service = MemoryService([form('a', 'A', elements=[reference]),
+                                 form('b', 'B', elements=[reference]), form('target', 'Target')])
+        async def tree(identity):
+            return {key: service.schemas[key] for key in (identity, 'target')}
+        service.get_form_tree = AsyncMock(side_effect=tree)
+        engine = Applier(commands=parse_command_text('WithForm(formPattern="A|B")\nWithForm(form="A")'),
+                         initial_database_id='db', form_service=service, resolve_schema=AsyncMock())
+        await engine.evaluate()
+        for execution in (*engine.executions[0].iterations, engine.executions[1]):
+            self.assertEqual(execution.status, 'applied')
+            self.assertEqual(execution.names_schema['elements'][0]['typeParameters']['range'],
+                             [{'formId': 'Target'}])
+        self.assertEqual([call.args[0] for call in service.get_form_tree.await_args_list], ['a', 'b'])
+        self.assertNotIn('target', engine.workspace.latest)
+
+    async def test_form_tree_failure_warns_and_keeps_the_selected_form(self):
+        service = MemoryService([form('a', 'A')])
+        service.get_form_tree = AsyncMock(side_effect=ValueError('Tree unavailable'))
+        engine = Applier(commands=parse_command_text('WithForm(form="A")'),
+                         initial_database_id='db', form_service=service, resolve_schema=AsyncMock())
+        await engine.evaluate()
+        self.assertEqual(engine.executions[0].status, 'warning')
+        self.assertEqual(engine.executions[0].diagnostics[0].code, 'form_tree_unavailable')
+        self.assertEqual(engine.workspace.active_schema['id'], 'a')
+
     async def evaluate(self, text, *, initial=None, database=None):
         service = MemoryService([form('a', 'A'), form('b', 'B', 'remote')])
         engine = Applier(initial, parse_command_text(text), initial_database_id=database,

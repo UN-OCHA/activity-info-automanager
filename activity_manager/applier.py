@@ -559,7 +559,7 @@ class Applier:
                               await self.workspace.switch(prepared.form, self.form_service, current, self.related_schemas))
                 except FormSelectionError as exc:
                     return ExecutionResult.warning(current, str(exc), 'form_switch_failed', skipped=True)
-                self.related_schemas.update(self.workspace.latest)
+                tree_warnings = await self.workspace.load_form_tree(schema, self.form_service, self.related_schemas)
                 if scope_context is not None:
                     scope_id, keys = scope_context
                     self.plan_builder.begin_scope(scope_id, keys)
@@ -569,18 +569,18 @@ class Applier:
                 context_warnings = await self._load_context_database(schema['databaseId'])
                 if isinstance(prepared, MoveFormCommand):
                     if context_warnings:
-                        return with_prepared_command(ExecutionResult(schema, context_warnings), prepared)
+                        return with_prepared_command(ExecutionResult(schema, context_warnings + tree_warnings), prepared)
                     result = await self._move_form(replace(prepared, form=schema['id']), schema)
                     # A destination warning leaves the successfully selected form active.
-                    return replace(result, skipped=False)
+                    return replace(result, diagnostics=tree_warnings + result.diagnostics, skipped=False)
                 if isinstance(prepared, ModifyFormCommand):
                     result = apply_command_locally(PreparedCommand(replace(prepared, form=None if prepared.current_form else schema['id'], form_pattern=None)), schema,
                         self.related_schemas, self.database_names, variables=variables)
                     if not result.has_errors and prepared.new_name is not None:
                         projection = await self._project_resource_label(schema, result.schema)
                         result = replace(result, resource_projections=(projection,) if projection is not None else ())
-                    return replace(result, diagnostics=context_warnings + result.diagnostics)
-                return with_prepared_command(ExecutionResult(schema, context_warnings, names_schema=readable_schema(
+                    return replace(result, diagnostics=context_warnings + tree_warnings + result.diagnostics)
+                return with_prepared_command(ExecutionResult(schema, context_warnings + tree_warnings, names_schema=readable_schema(
                         schema, self.related_schemas, self.database_names),
                     snapshot_issues=self.workspace.issues.get(schema.get('id'), ()),
                     success_message=f'Active form: {schema.get("label") or schema["id"]}'), prepared)
@@ -871,7 +871,7 @@ class Applier:
         except Exception as exc:
             return ExecutionResult.warning(current, f'Could not select form {command.form_name!r}. {exc}',
                                            'form_switch_failed', skipped=True)
-        self.related_schemas.update(self.workspace.latest)
+        tree_warnings = await self.workspace.load_form_tree(schema, self.form_service, self.related_schemas)
         self.plan_builder.select_form(self.workspace.key_for(schema))
         if command.folder is None:
             result = ExecutionResult(schema, success_message=f'Active form: {command.form_name}')
@@ -880,7 +880,7 @@ class Applier:
             if result.skipped:
                 # Keep the selected form active when only the destination failed.
                 result = replace(result, skipped=False)
-        return with_prepared_command(result, command)
+        return with_prepared_command(replace(result, diagnostics=tree_warnings + result.diagnostics), command)
 
     async def _add_form(self, command, current):
         from .form_folders import resolve_folder

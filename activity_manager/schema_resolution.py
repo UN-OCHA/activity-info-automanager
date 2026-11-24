@@ -28,7 +28,10 @@ class CachedResolutionService:
             raise ValueError('Form has been deleted in this application.')
         key = (method, json.dumps(args, sort_keys=True, ensure_ascii=False))
         if key not in self.cache:
-            self.cache[key] = await getattr(self.service, method)(*args)
+            value = await getattr(self.service, method)(*args)
+            if method == 'get_form_tree' and not isinstance(value, dict):
+                raise ValueError('The server returned an invalid form tree response.')
+            self.cache[key] = value
         value = deepcopy(self.cache[key])
         if method == 'get_form_names':
             value = {i: n for i, n in value.items() if i not in deleted}

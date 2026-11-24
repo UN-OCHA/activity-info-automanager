@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 
+from .command_execution import Diagnostic
 from .resource_state import ApplicationState, FormPayload, Lifecycle, ResourceKey
 
 from .schema_names import resolve_form_names
@@ -23,6 +24,7 @@ class FormWorkspace:
                 self.state.put(self.key_for(initial), FormPayload(initial), lifecycle=Lifecycle.NEW)
         self.reserved = {}
         self.issues = {}
+        self.loaded_form_trees = set()
         if initial is not None:
             self.state.activate(self.key_for(initial))
 
@@ -100,3 +102,26 @@ class FormWorkspace:
             self.state.load_form(schema, affected=True)
         self.state.activate(self.key_for(schema))
         return deepcopy(schema)
+
+    async def load_form_tree(self, schema, service, related):
+        """Enrich a selected existing form without replacing local schemas."""
+        related.update(self.latest)
+        key = self.key_for(schema)
+        if key.identity in self.loaded_form_trees or self.state.resources[key].lifecycle == Lifecycle.NEW:
+            return ()
+        try:
+            tree = await service.get_form_tree(key.identity)
+            if not isinstance(tree, dict) or key.identity not in tree:
+                raise ValueError('The form tree did not contain the selected form schema.')
+        except AttributeError:
+            # Schema-only services do not provide related-form reads.
+            return ()
+        except Exception as exc:
+            return (Diagnostic('warning', f'Form {schema.get("label") or key.identity!r}: '
+                               f'related schemas could not be loaded. {exc}', code='form_tree_unavailable'),)
+        for identity, data in tree.items():
+            state = self.state.resources.get(ResourceKey.form(identity))
+            if state is None or state.lifecycle != Lifecycle.DELETED:
+                related.setdefault(identity, data)
+        self.loaded_form_trees.add(key.identity)
+        return ()
