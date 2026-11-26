@@ -156,7 +156,9 @@ def _function_value(text, node, parameter, command_name):
 
 
 def _literal_value(text: str, node: ast.AST):
-    """Read JSON-like literals plus Python booleans; never evaluate calls/code."""
+    """Read literals, including either spelling of booleans, without evaluation."""
+    if isinstance(node, ast.Name) and node.id in ('true', 'false'):
+        return node.id == 'true'
     if isinstance(node, ast.Constant) and type(node.value) in (str, bool, int, float, type(None)):
         if isinstance(node.value, float) and not math.isfinite(node.value):
             raise command_error(text, node, 'Numbers must be finite.')

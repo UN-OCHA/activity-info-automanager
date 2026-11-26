@@ -109,7 +109,7 @@ class AddFieldTests(unittest.TestCase):
         self.assertTrue(creator.add_button.props['disable'])
 
     def test_type_and_boolean_text_roundtrip_and_schema_values(self):
-        text = ('addfield(REQUIRED=True, UNIQUE=False, KEY=True, LABEL="Name", '
+        text = ('addfield(REQUIRED=True, UNIQUE=false, KEY=true, LABEL="Name", '
                 'fieldcode="name", FIELDTYPE="free_text")')
         command = parse_command_text(text)[0]
         self.assertEqual(command.to_syntax(),
@@ -122,7 +122,7 @@ class AddFieldTests(unittest.TestCase):
         narrative = AddFieldCommand('notes', 'Notes', field_type='NARRATIVE')
         self.assertEqual(narrative.execute(schema()).schema['elements'][-1]['type'], 'NARRATIVE')
         for argument in ('key="True"', 'unique=0', 'required=None', 'required=bool(1)',
-                         'key=true', 'key=True, KEY=False', 'fieldType="unknown"'):
+                         'key=enabled', 'key=True, KEY=False', 'fieldType="unknown"'):
             with self.subTest(argument=argument), self.assertRaises(CommandTextError) as error:
                 parse_command_text(f'AddField(fieldCode="name", label="Name", {argument})')
             self.assertEqual(error.exception.line, 1)

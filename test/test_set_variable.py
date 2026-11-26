@@ -145,7 +145,7 @@ ModifyField(fieldPattern="cost_.*", fieldType="quantity", label="${vars.prefix} 
             creator._parameter_changed(None)
             creator._add_command()
             self.assertEqual(added[-1], SetVariableCommand('target', 'literal', 'example'))
-            creator.controls['method'].set_value('lookup')
+            creator.controls['method'].set_value('data lookup')
             creator._parameter_changed(None)
             creator.set_suggestions('form_names', ['Database/Settings'])
             self.assertIn('Database/Settings', creator.controls['referenced_form'].options)
@@ -154,12 +154,54 @@ ModifyField(fieldPattern="cost_.*", fieldType="quantity", label="${vars.prefix} 
             creator.controls['return_formula'].set_value('TARGET')
             creator._parameter_changed(None)
             creator._add_command()
-            self.assertEqual(added[-1].method, 'lookup')
+            self.assertEqual(added[-1].method, 'data lookup')
             self.assertIsNone(added[-1].value)
             self.assertEqual(parse_command_text(added[-1].to_syntax()), [added[-1]])
+            separator = next(editor for editor in creator.editors if editor.definition.key == 'separator')
+            self.assertFalse(separator.container.visible)
+            self.assertFalse(creator.controls['multiple'].value)
+            creator.controls['multiple'].set_value(True)
+            self.assertTrue(separator.container.visible)
+            self.assertEqual(separator.control.value, '|')
+            self.assertEqual(separator.control.props['maxlength'], 3)
+            creator._add_command()
+            self.assertTrue(added[-1].multiple)
+            self.assertIn('multiple=True', added[-1].to_syntax())
+            self.assertIsNone(added[-1].separator)
+            separator.control.set_value('')
+            creator._add_command()
+            self.assertEqual(added[-1].separator, '')
+            self.assertEqual(parse_command_text(added[-1].to_syntax()), [added[-1]])
+            creator.controls['multiple'].set_value(False)
+            self.assertFalse(separator.container.visible)
 
 
 class LookupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_multiple_matches_use_optional_separator_and_validate_every_value(self):
+        prefix = ('SetVariable(name="x", multiple=true, method="data lookup", '
+                  'referencedForm="Settings", filter="ACTIVE", returnFormula="TARGET"')
+        rows = [{'value': 'a'}, {'value': 0}, {'value': False}]
+        for option, expected in [('', 'a|0|False'), (', separator=""', 'a0False'),
+                                 (', separator=" "', 'a 0 False'), (', separator=" / "', 'a / 0 / False')]:
+            with self.subTest(option=option):
+                command, = parse_command_text(prefix + option + ')')
+                self.assertEqual(parse_command_text(command.to_syntax()), [command])
+                variables = {}
+                result = await apply_command(command, source(), AsyncMock(), variables=variables,
+                                             lookup_variable=AsyncMock(return_value=rows))
+                self.assertEqual(result.status, 'applied')
+                self.assertEqual(variables['vars.x'], expected)
+        variables = {'vars.x': 'previous'}
+        result = await apply_command(command, source(), AsyncMock(), variables=variables,
+                                     lookup_variable=AsyncMock(return_value=[*rows, {'value': None}]))
+        self.assertEqual(result.status, 'error')
+        self.assertEqual(variables['vars.x'], 'previous')
+        for syntax in (prefix + ', separator="long")', prefix + ', multiple=True)',
+                       prefix.replace('multiple=true, ', '') + ', separator="")',
+                       prefix.replace('multiple=true, ', 'multiple, ') + ')'):
+            with self.subTest(syntax=syntax), self.assertRaises(ValueError):
+                parse_command_text(syntax)
+
     async def test_value_validation_warning_and_atomic_reassignment(self):
         command = SetVariableCommand('x', 'lookup', referenced_form='Settings', filter='ACTIVE', return_formula='TARGET')
         resolver = AsyncMock()

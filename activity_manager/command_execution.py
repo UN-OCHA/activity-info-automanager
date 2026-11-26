@@ -192,7 +192,7 @@ def apply_command_locally(command, schema, related_schemas=None, database_names=
 
 async def apply_command(command, schema, resolver, *, related_schemas=None, database_names=None, variables=None, lookup_variable=None, reserved_identities=None):
     """Run transformation then resolution, preserving diagnostics in order."""
-    from .commands.set_variable import SetVariableCommand
+    from .commands.set_variable import DATA_LOOKUP, SetVariableCommand
     from .commands.add_modify_field import AddModifyFieldCommand
     from .commands.modify_field import ModifyFieldCommand
     from .command_iteration import PreparedCommand
@@ -209,7 +209,7 @@ async def apply_command(command, schema, resolver, *, related_schemas=None, data
     if isinstance(prepared, SetVariableCommand):
         try:
             result = (await prepared.execute_lookup(schema, context, lookup_variable)
-                      if prepared.method == 'lookup' else prepared.execute(schema, context=context))
+                      if prepared.method == DATA_LOOKUP else prepared.execute(schema, context=context))
             return with_prepared_command(replace(result,
                 names_schema=readable_schema(result.schema, related_schemas, database_names) if result.schema is not None else None), prepared)
         except asyncio.CancelledError:

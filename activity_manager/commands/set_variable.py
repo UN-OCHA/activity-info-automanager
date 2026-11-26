@@ -14,6 +14,11 @@ from ..schema_names import resolve_form_names
 from .models import CommandDefinition
 
 
+DATA_LOOKUP = 'data lookup'
+DEFAULT_SEPARATOR = '|'
+MAX_SEPARATOR_LENGTH = 3
+
+
 def variable_text(value):
     if type(value) not in (str, int, float, bool) or (isinstance(value, float) and not math.isfinite(value)):
         raise ValueError('Variable value must be nonblank text, a finite number, or a boolean.')
@@ -36,24 +41,38 @@ class SetVariableCommand:
     referenced_form: str | None = None
     filter: str | None = None
     return_formula: str | None = None
+    multiple: bool = False
+    separator: str | None = None
 
     def __post_init__(self):
         error = name_error(self.name)
         if error:
             raise ValueError(error)
-        if not isinstance(self.method, str) or self.method.casefold() not in ('literal', 'lookup'):
-            raise ValueError('SetVariable method must be literal or lookup.')
-        object.__setattr__(self, 'method', self.method.casefold())
+        method = self.method.casefold() if isinstance(self.method, str) else None
+        if method == 'lookup':
+            method = DATA_LOOKUP
+        if method not in ('literal', DATA_LOOKUP):
+            raise ValueError('SetVariable method must be literal or data lookup.')
+        object.__setattr__(self, 'method', method)
+        if type(self.multiple) is not bool:
+            raise ValueError('Return multiple matches must be a boolean.')
+        if self.multiple and method != DATA_LOOKUP:
+            raise ValueError('Return multiple matches requires the data lookup method.')
+        if self.separator is not None:
+            if not self.multiple:
+                raise ValueError('Separator requires Return multiple matches.')
+            if not isinstance(self.separator, str) or len(self.separator) > MAX_SEPARATOR_LENGTH:
+                raise ValueError(f'Separator must be text of at most {MAX_SEPARATOR_LENGTH} characters.')
         if self.method == 'literal':
             object.__setattr__(self, 'value', variable_text(self.value))
             if any(value is not None for value in (self.referenced_form, self.filter, self.return_formula)):
                 raise ValueError('Literal method only accepts value.')
         else:
             if self.value is not None:
-                raise ValueError('Lookup method does not accept value.')
+                raise ValueError('Data lookup method does not accept value.')
             for label, value in [('referencedForm', self.referenced_form), ('filter', self.filter), ('returnFormula', self.return_formula)]:
                 if not isinstance(value, str) or not value.strip():
-                    raise ValueError(f'Lookup method requires nonblank {label}.')
+                    raise ValueError(f'Data lookup method requires nonblank {label}.')
 
     def to_syntax(self):
         values = {'name': self.name, 'method': self.method}
@@ -61,7 +80,12 @@ class SetVariableCommand:
             values['value'] = self.value
         else:
             values.update(referencedForm=self.referenced_form, filter=self.filter, returnFormula=self.return_formula)
-        return 'SetVariable(' + ', '.join(f'{key}={json.dumps(value, ensure_ascii=False)}' for key, value in values.items()) + ')'
+        if self.separator is not None:
+            values['separator'] = self.separator
+        arguments = [f'{key}={json.dumps(value, ensure_ascii=False)}' for key, value in values.items()]
+        if self.multiple:
+            arguments.append('multiple=True')
+        return 'SetVariable(' + ', '.join(arguments) + ')'
 
     def store(self, schema, context, value, diagnostics=()):
         text = variable_text(value)
@@ -72,7 +96,7 @@ class SetVariableCommand:
             success_message=f'Variable vars.{self.name} set to {json.dumps(text, ensure_ascii=False)}.')
 
     def execute(self, schema, *, context=None):
-        if self.method == 'lookup':
+        if self.method == DATA_LOOKUP:
             return ExecutionResult.error(schema, 'Lookup requires a connected query service.', 'lookup_unavailable')
         return self.store(schema, context, self.value)
 
@@ -84,6 +108,9 @@ class SetVariableCommand:
             raise ValueError('Lookup returned an invalid row response.')
         if not rows:
             raise ValueError(f'Lookup for variable {self.name!r} returned no records.')
+        if self.multiple:
+            separator = DEFAULT_SEPARATOR if self.separator is None else self.separator
+            return self.store(schema, context, separator.join(variable_text(row.get('value')) for row in rows))
         diagnostics = (Diagnostic('warning',
             f'Lookup for variable {self.name!r} matched multiple records; the first record in API order was used.',
             code='multiple_lookup_matches'),) if len(rows) > 1 else ()
@@ -104,6 +131,8 @@ async def query_variable(service, command, schema, related_schemas=None):
 
 
 def create_set_variable(values):
+    if values.get('separator') == DEFAULT_SEPARATOR:
+        values = {key: value for key, value in values.items() if key != 'separator'}
     return SetVariableCommand(**values)
 
 
@@ -111,7 +140,8 @@ def parse_set_variable(text, call):
     values = parse_literal_parameters(text, call, 'SetVariable', types={
         'name': str, 'method': str, 'value': (str, int, float, bool),
         'referencedForm': str, 'filter': str, 'returnFormula': str,
-    }, required={'name', 'method'})
+        'multiple': bool, 'separator': str,
+    }, required={'name', 'method'}, allow_empty={'separator'})
     if 'referencedForm' in values:
         values['referenced_form'] = values.pop('referencedForm')
     if 'returnFormula' in values:
@@ -119,18 +149,23 @@ def parse_set_variable(text, call):
     return SetVariableCommand(**values)
 
 
-LOOKUP = ('method', ('lookup',))
+LOOKUP = ('method', (DATA_LOOKUP,))
 LITERAL = ('method', ('literal',))
 SET_VARIABLE = CommandCreatorDefinition(
     key='set_variable', label='Set variable', create_command=create_set_variable,
     parameters=(
         P('name', 'Variable name', 'text', required=True, validate=name_error),
-        P('method', 'Method', 'select', required=True, options=('literal', 'lookup'), default='literal'),
+        P('method', 'Method', 'select', required=True, options=('literal', DATA_LOOKUP), default='literal'),
         P('value', 'Value', 'text', visible_when=LITERAL, required_when=LITERAL),
         replace(next(p for p in FIELD_PARAMETERS if p.key == 'referenced_form'),
                 visible_when=LOOKUP, required_when=LOOKUP),
         P('filter', 'Filter formula', 'text', visible_when=LOOKUP, required_when=LOOKUP),
         P('return_formula', 'Return formula', 'text', visible_when=LOOKUP, required_when=LOOKUP),
+        P('multiple', 'Return multiple matches', 'boolean', default=False,
+          visible_when=LOOKUP, required_when=LOOKUP),
+        P('separator', 'Separator', 'text', default=DEFAULT_SEPARATOR, initially_active=True,
+          visible_when=lambda values: values.get('method') == DATA_LOOKUP and values.get('multiple') is True,
+          max_length=MAX_SEPARATOR_LENGTH, preserve_whitespace=True),
     ),
 )
 COMMAND = CommandDefinition('SetVariable', parse_set_variable, SET_VARIABLE)

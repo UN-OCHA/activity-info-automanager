@@ -1,3 +1,4 @@
+import ast
 from dataclasses import FrozenInstanceError, replace
 import unittest
 
@@ -50,6 +51,39 @@ class CatalogTests(unittest.TestCase):
         for name in ('not.a.name', 'class', ''):
             with self.assertRaises(ValueError):
                 index_definitions((replace(original, name=name),))
+
+    def test_named_parameters_are_order_independent_across_the_catalog(self):
+        examples = {
+            'MoveField': 'fieldCode="x", position="Before field", beforeAfterField="y"',
+            'DeleteField': 'fieldPattern="x.*"',
+            'AddField': 'fieldCode="x", label="true", fieldType="quantity", required=True, readOnly=False',
+            'ModifyField': 'fieldPattern="x.*", fieldType="quantity", required=False, readOnly=True',
+            'AddModifyField': 'fieldCode="x", label="X", fieldType="quantity", required=True, readOnly=False',
+            'SetVariable': 'name="x", method="data lookup", multiple=True, referencedForm="X", '
+                           'filter="true", returnFormula="CODE", separator=""',
+            'WithDatabase': 'databasePattern="X.*"',
+            'WithForm': 'form="Database/X"',
+            'ModifyForm': 'currentForm=True, name="New"',
+            'MoveForm': 'currentForm=False, form="X", folder="/Archive"',
+            'AddForm': 'name="X", folder="/Archive"',
+            'AddModifyForm': 'name="X", folder="/Archive"',
+            'DeleteForm': 'currentForm=False, form="X"',
+        }
+        self.assertEqual(set(examples), {definition.name for definition in COMMANDS})
+        for name, arguments in examples.items():
+            with self.subTest(command=name):
+                syntax = f'{name}({arguments})'
+                expected, = parse_command_text(syntax)
+                serialized = expected.to_syntax()
+                self.assertEqual(parse_command_text(serialized), [expected])
+                call = ast.parse(syntax, mode='eval').body
+                reordered = []
+                for keyword in reversed(call.keywords):
+                    value = ast.get_source_segment(syntax, keyword.value)
+                    if isinstance(keyword.value, ast.Constant) and type(keyword.value.value) is bool:
+                        value = value.lower()
+                    reordered.append(f'{keyword.arg}={value}')
+                self.assertEqual(parse_command_text(f'{name}({", ".join(reordered)})'), [expected])
 
     def test_function_definition_copies_mutable_metadata(self):
         types = [str]

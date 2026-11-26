@@ -37,6 +37,8 @@ class ParameterDefinition:
     inline_rows: bool = False
     fixed_when: Callable[[Mapping[str, Any]], Any] | None = None
     parse_text: Callable[[str], Any] | None = None
+    max_length: int | None = None
+    preserve_whitespace: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,8 @@ class _ParameterEditor:
             self.control = ui.input(
                 definition.label, value='' if value is None else str(value), on_change=on_change,
             ).props('dense')
+            if definition.max_length is not None:
+                self.control.props['maxlength'] = definition.max_length
 
     def _render_multiline_menu(self):
         label = self.definition.label
@@ -286,7 +290,8 @@ class _ParameterEditor:
             if was_relevant and not self.relevant:
                 self.control.set_value(
                     [] if definition.control == 'multi_select'
-                    else False if definition.control in ('boolean', 'toggle') else None
+                    else False if definition.control in ('boolean', 'toggle')
+                    else definition.default if definition.control == 'text' else None
                 )
             getattr(self.control, 'enable' if active and fixed is None else 'disable')()
             if isinstance(self.control, FreeTextCombobox):
@@ -325,7 +330,12 @@ class _ParameterEditor:
             value = [self.owner._collect(row) for row in self.rows]
         else:
             value = self.raw_value()
-            blank = value is None or isinstance(value, str) and not value.strip()
+            if isinstance(value, str):
+                if definition.max_length is not None and len(value) > definition.max_length:
+                    raise ValueError(f'{definition.label} must be at most {definition.max_length} characters.')
+                blank = not (value if definition.preserve_whitespace else value.strip())
+            else:
+                blank = value is None
             if definition.control == 'multi_select':
                 if not isinstance(value, list) or any(item not in definition.options for item in value):
                     raise ValueError(f'{definition.label} must contain only listed choices.')

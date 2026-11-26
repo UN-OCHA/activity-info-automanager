@@ -6,6 +6,8 @@ this reference covers the available commands and functions.
 ## Commands
 
 Use the command creator to see the available parameters for each command.
+Text view accepts named parameters in any order. Write boolean values as
+`True` or `true`, and `False` or `false`.
 
 | Command | Purpose |
 | --- | --- |
@@ -115,7 +117,7 @@ starts with no variables; reordering or deleting commands recalculates them.
 
 ```python
 SetVariable(name="year", method="literal", value="2027")
-SetVariable(name="threshold", method="lookup",
+SetVariable(name="threshold", method="data lookup",
             referencedForm="Configuration/Targets",
             filter="YEAR == ${vars.year}", returnFormula="TARGET * 2")
 ModifyField(fieldCode="amount", fieldType="quantity",
@@ -129,12 +131,22 @@ the same form ID, local form name, or `Database/Form` selection as AddField.
 endpoint, after variable substitution. `returnFormula` is used because `return`
 is reserved in the command syntax. Formula text is sent directly to ActivityInfo.
 
-A lookup uses the first record in API response order. Multiple matches produce a
-warning and later commands continue; no stable ordering is implied. No records,
-a missing/null value, empty text, or whitespace-only text produce an error and
-stop the chain. The same blank-value rule applies to literals, including after
-substitution. Zero and false are valid; nonblank text retains its whitespace.
-Lookup/API/form-resolution errors stop the chain without replacing a prior value.
+By default, a data lookup uses the first record in API response order and warns
+if there are multiple matches. Enable **Return multiple matches** in the creator
+or set `multiple=True` in Text view to join all
+matched values in API response order. The optional `separator` is up to three
+characters and defaults to `|`. Use `separator=""` to concatenate directly.
+
+```python
+SetVariable(name="codes", method="data lookup", multiple=True,
+            referencedForm="Configuration/Targets",
+            filter="ACTIVE", returnFormula="CODE", separator=", ")
+```
+
+No records or an invalid returned value stop the chain. Returned values must be
+nonblank text, finite numbers, or booleans. Zero and false are valid, and text
+retains its whitespace. Lookup errors preserve any prior value. Saved commands
+using `method="lookup"` still work.
 
 `ModifyField` identifies its target by exact field code, then falls back to an exact
 label with the specified type and variant. `MoveField` and `DeleteField` identify
