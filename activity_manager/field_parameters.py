@@ -46,6 +46,7 @@ DEFAULT_TYPES = frozenset(('FREE_TEXT', 'NARRATIVE', 'quantity', 'date', 'month'
                            'epiweek', 'fortnight', 'enumerated', 'reference', 'geopoint'))
 READ_ONLY_TYPES = DEFAULT_TYPES
 DEFAULT_FORMULA_TYPES = frozenset(('FREE_TEXT', 'NARRATIVE', 'quantity', 'date'))
+TRANSLATION_TYPES = ('FREE_TEXT', 'NARRATIVE', 'calculated')
 
 
 FIELD_VARIANTS = {
@@ -109,8 +110,9 @@ def parameter_applies(key, values):
     if key == 'default_formula':
         return kind in {item.casefold() for item in DEFAULT_FORMULA_TYPES}
     if key in ('translation', 'translation_field', 'translation_language'):
-        return kind == 'free_text' and values.get('field_variant') != 'barcode' and values.get('barcode') is not True and (
-            key == 'translation' or values.get('translation') is True)
+        return for_types(*TRANSLATION_TYPES)(values) and (
+            kind != 'free_text' or (values.get('field_variant') != 'barcode' and values.get('barcode') is not True)
+        ) and (key == 'translation' or values.get('translation') is True)
     if key == 'referenced_form':
         return kind in ('reference', 'multiselectreference', 'subform', 'reversereference') and not user_reference(values)
     if key == 'lookup_fields':
@@ -154,7 +156,7 @@ FIELD_PARAMETERS = (
       help='Disabled until the API mapping is confirmed in the generated client.'),
     P('read_only', 'Read only', 'boolean'),
     P('translation', 'Translation', 'boolean', visible_when=applies('translation')),
-    P('translation_field', 'Translation field', 'combobox', option_source='field_codes',
+    P('translation_field', 'Translation field', 'combobox', option_source='translation_field_codes',
       visible_when=translation_enabled),
     P('translation_language', 'Translation language', 'combobox', options=('en', 'fr', 'es', 'ar', 'de', 'pt'),
       visible_when=translation_enabled,

@@ -13,7 +13,8 @@ from ..command_creator import CommandCreatorDefinition
 from ..command_parser import command_error, parse_literal_parameters
 from ..schema_identity import field_code_error, allocate_pending_field_id, pending_row_id, schema_identities
 from ..field_parameters import (
-    FIELD_ARGUMENTS, FIELD_VARIANTS, FIELD_TYPES_BY_CASE, FILE_TYPES, UPLOAD_TYPES, field_type_error,
+    FIELD_ARGUMENTS, FIELD_VARIANTS, FIELD_TYPES_BY_CASE, FILE_TYPES, TRANSLATION_TYPES,
+    UPLOAD_TYPES, field_type_error,
 )
 from .add_field_parameters import ADD_FIELD_PARAMETERS
 
@@ -178,9 +179,9 @@ class AddFieldCommand:
         if self.reviewer_only is not None:
             fail('reviewer_only', 'Reviewer only is disabled until its API mapping is confirmed.')
         applicable = {
-            'translation': ('FREE_TEXT', 'NARRATIVE', 'calculated'),
-            'translation_field': ('FREE_TEXT', 'NARRATIVE', 'calculated'),
-            'translation_language': ('FREE_TEXT', 'NARRATIVE', 'calculated'),
+            'translation': TRANSLATION_TYPES,
+            'translation_field': TRANSLATION_TYPES,
+            'translation_language': TRANSLATION_TYPES,
             'indentation_level': ('section',), 'prefix_formula': ('serial',),
             'input_mask': ('FREE_TEXT',), 'barcode': ('FREE_TEXT',), 'calculation_formula': ('calculated',),
             'metadata': ('reference',), 'units': ('quantity',),

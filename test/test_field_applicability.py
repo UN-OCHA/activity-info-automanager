@@ -4,7 +4,7 @@ from nicegui import ui
 from nicegui.client import Client
 
 from activity_manager.command_creator import CommandCreatorRenderer
-from activity_manager.commands import ADD_FIELD
+from activity_manager.commands import ADD_FIELD, ADD_MODIFY_FIELD, MODIFY_FIELD
 from activity_manager.command_parser import parse_command_text
 from activity_manager.field_parameters import parameter_applies
 from activity_manager.schema_identity import prepare_schema_for_put
@@ -27,7 +27,7 @@ class FieldApplicabilityTests(unittest.TestCase):
         # Expected profiles are independent of the implementation's type sets.
         profiles = {
             'FREE_TEXT': (True, True, True, True, True, True, True, True, True, True, True),
-            'NARRATIVE': (False, False, True, True, True, True, True, True, True, True, False),
+            'NARRATIVE': (False, False, True, True, True, True, True, True, True, True, True),
             'quantity': (False, False, True, True, True, True, True, True, True, True, False),
             'date': (True, True, True, True, True, True, True, True, True, True, False),
             'month': (True, True, True, True, True, True, True, True, True, False, False),
@@ -38,7 +38,7 @@ class FieldApplicabilityTests(unittest.TestCase):
             'attachment': (False, False, True, True, False, True, True, False, False, False, False),
             'geopoint': (False, False, True, True, True, True, True, True, True, False, False),
             'serial': (True, True, False, True, True, False, False, False, False, False, False),
-            'calculated': (False, True, False, True, True, True, False, False, False, False, False),
+            'calculated': (False, True, False, True, True, True, False, False, False, False, True),
             'reversereference': (False, False, False, False, True, False, False, False, False, False, False),
             'section': (False, False, False, False, False, True, False, False, False, False, False),
             'note': (False, False, False, False, False, True, False, False, False, False, False),
@@ -72,6 +72,35 @@ class FieldApplicabilityTests(unittest.TestCase):
             self.assertNotIn(key, creator.values())
         self.assertTrue(creator.parameter_containers['default_value'].visible)
         self.assertTrue(creator.parameter_containers['default_formula'].visible)
+
+    def test_translation_choices_match_field_type_and_exclude_the_target(self):
+        kinds = ('FREE_TEXT', 'NARRATIVE', 'calculated')
+        schema = {'elements': [
+            {'type': kind, 'id': f'{kind}_{code}', 'code': f'{kind}_{code}', 'label': f'{kind} {code}'}
+            for kind in kinds for code in ('source', 'target')
+        ]}
+        for definition in (ADD_FIELD, MODIFY_FIELD, ADD_MODIFY_FIELD):
+            with Client(ui.page('/')), ui.column():
+                creator = CommandCreatorRenderer((definition,))
+            creator.set_schema(schema)
+            for kind in kinds:
+                with self.subTest(command=definition.key, kind=kind):
+                    selector = f'{kind} source' if definition is MODIFY_FIELD else f'{kind}_source'
+                    creator.controls['field_code'].set_value(selector)
+                    creator.controls['field_type'].set_value(kind)
+                    if kind == 'FREE_TEXT':
+                        creator.controls['field_variant'].set_value('text')
+                    creator.activations['translation'].set_value(True)
+                    creator.controls['translation'].set_value(True)
+                    creator._parameter_changed(None)
+                    self.assertTrue(creator.parameter_containers['translation_field'].visible)
+                    self.assertTrue(creator.parameter_containers['translation_language'].visible)
+                    self.assertEqual(creator.controls['translation_field'].options, [f'{kind}_target'])
+            if definition is MODIFY_FIELD:
+                creator.target_mode.set_value('Multiple')
+                creator.controls['field_code'].set_value('calculated_source')
+                creator._parameter_changed(None)
+                self.assertEqual(creator.controls['translation_field'].options, ['calculated_target'])
 
     def test_serial_flags_are_checked_locked_and_written(self):
         creator = self.creator('serial')
@@ -157,7 +186,7 @@ class FieldApplicabilityTests(unittest.TestCase):
                                    'hide_from_entry', 'hide_in_table'})
 
     def test_shared_policy_does_not_require_creation_defaults(self):
-        self.assertFalse(parameter_applies('translation', {'field_type': 'NARRATIVE'}))
+        self.assertTrue(parameter_applies('translation', {'field_type': 'NARRATIVE'}))
         self.assertFalse(parameter_applies('default_formula', {'field_type': 'reference'}))
 
 

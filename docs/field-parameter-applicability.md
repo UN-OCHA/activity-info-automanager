@@ -2,7 +2,7 @@
 
 Confirmed by the user in the normal ActivityInfo designer, 2026-11-17.
 These UI checks take precedence over broader or incomplete API descriptions.
-This is the shared applicability contract for AddField and the ModifyField creator.
+This is the shared applicability contract for AddField, ModifyField and AddModifyField.
 It describes exposed settings, not every property the API can preserve.
 
 ## Common parameters
@@ -16,7 +16,7 @@ Both hides means Hide from entry and Hide in table.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | FREE_TEXT, Barcode=false | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
 | FREE_TEXT, Barcode=true | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | - |
-| NARRATIVE | Y | Y | Y | - | - | Y | Y | Y | Y | Y | Y | Y | Y | Y | - |
+| NARRATIVE | Y | Y | Y | - | - | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y |
 | quantity | Y | Y | Y | - | - | Y | Y | Y | Y | Y | Y | Y | Y | Y | - |
 | date | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | - |
 | month | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | Y | - | - |
@@ -30,7 +30,7 @@ Both hides means Hide from entry and Hide in table.
 | attachment | Y | Y | Y | - | - | Y | Y | - | Y | Y | Y | - | - | - | - |
 | geopoint | Y | Y | Y | - | - | Y | Y | Y | Y | Y | Y | Y | Y | - | - |
 | serial | Y | Y | Y | F | F | - | Y | Y | - | - | Y | - | - | - | - |
-| calculated | Y | Y | Y | - | Y | - | Y | Y | Y | - | Y | - | - | - | - |
+| calculated | Y | Y | Y | - | Y | - | Y | Y | Y | - | Y | - | - | - | Y |
 | reversereference | Y | Y | Y | - | - | - | - | Y | - | - | - | - | - | - | - |
 | section | Y | - | Y | - | - | - | - | - | Y | - | - | - | - | - | - |
 | note | Y | - | Y | - | - | - | - | - | Y | - | - | - | - | - | - |
@@ -43,6 +43,10 @@ defaults or Translation. Referenced form identifies the child form. Revisit if
 the designer differs.
 
 ## Type-specific parameters
+
+`translation`, `translationField` and `translationLanguage` are supported for
+Free Text (Text variant), Narrative and Calculated fields. The translation
+field is the code of a different field of the same type in the form.
 
 | Type/variant | Additional controls and fixed behaviour |
 |---|---|

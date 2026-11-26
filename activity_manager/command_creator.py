@@ -179,7 +179,9 @@ class _ParameterEditor:
         self.control.set_value(self.multiline_input.value)
         self.multiline_menu.close()
 
-    def _options(self):
+    def _options(self, values=None):
+        if self.definition.option_source == 'translation_field_codes':
+            return self.owner._translation_field_codes(values or {})
         if self.definition.option_source == 'field_codes':
             if self.definition.key in ('field_code', 'before_after_field', 'relative_field_code'):
                 suggestions = self.owner.option_sources.get('active_field_codes')
@@ -288,7 +290,7 @@ class _ParameterEditor:
                 )
             getattr(self.control, 'enable' if active and fixed is None else 'disable')()
             if isinstance(self.control, FreeTextCombobox):
-                options = list(self._options())
+                options = list(self._options(siblings))
                 if self.control.options != options:
                     self.control.set_suggestions(options)
         for button in self.buttons:
@@ -455,6 +457,35 @@ class CommandCreatorRenderer:
     def _current_form(self):
         control = self.controls.get('current_form')
         return control is not None and control.value is True
+
+    def _translation_field_codes(self, values):
+        from .command_iteration import compile_pattern
+        from .commands.field_selector import find_field_index
+        from .commands.modify_field import matches_target
+
+        elements = (self.schema or {}).get('elements', [])
+        kind = str(values.get('field_type') or '').casefold()
+        if not kind or not isinstance(elements, list):
+            return []
+        selector = values.get('field_code')
+        target = pattern = None
+        try:
+            if self._multiple_fields():
+                pattern = compile_pattern(selector)
+            elif self.command_select.value == 'modify_field':
+                variant = values.get('field_variant')
+                target = find_field_index(selector, elements, label_filter=lambda field: matches_target(kind, variant, field))
+            else:
+                target = find_field_index(selector, elements, exact_code=True)
+        except ValueError:
+            return []
+
+        return list(dict.fromkeys(
+            code for index, field in enumerate(elements)
+            if index != target and isinstance(field, dict) and str(field.get('type')).casefold() == kind
+            and isinstance(code := field.get('code'), str) and code
+            and (pattern is None or not pattern.fullmatch(code))
+        ))
 
     def _render_selected_command(self):
         self._updating = True

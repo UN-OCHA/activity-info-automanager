@@ -395,6 +395,39 @@ class ModifyFieldPipelineTests(unittest.IsolatedAsyncioTestCase):
             'translation_field': 'missing', 'translation_language': 'fr'}), source, resolver)
         self.assertTrue(result.has_errors)
 
+    async def test_narrative_and_calculated_translation_commands_from_text(self):
+        async def resolver(candidate):
+            return await resolve_command_schema(SimpleNamespace(), candidate, {}, {}, {}, {})
+
+        for kind in ('NARRATIVE', 'calculated'):
+            calculation = ', calculationFormula="1"' if kind == 'calculated' else ''
+            for name, existing in (('AddField', False), ('ModifyField', True),
+                                   ('AddModifyField', False), ('AddModifyField', True)):
+                with self.subTest(kind=kind, command=name, existing=existing):
+                    translated = element(kind, code='french', identity='frenchid', params={'formula': '1'} if calculation else {})
+                    target = element(kind, params={'formula': '1'} if calculation else {})
+                    source = form(translated, target) if existing else form(translated)
+                    creation = '' if existing else f', label="Target"{calculation}'
+                    command, = parse_command_text(
+                        f'{name}(fieldType="{kind}", fieldCode="target"{creation}, '
+                        'translation=True, translationField="french", translationLanguage="fr, de")'
+                    )
+                    result = await apply_command(command, source, resolver)
+                    self.assertEqual(result.status, 'applied', result.message)
+                    edited = next(field for field in result.schema['elements'] if field['code'] == 'target')
+                    self.assertEqual(edited['typeParameters']['translationConfig'],
+                                     {'fieldId': 'frenchid', 'languages': ['fr', 'de']})
+
+            for invalid_target in ('target', 'different'):
+                with self.subTest(kind=kind, invalid_target=invalid_target):
+                    command, = parse_command_text(
+                        f'ModifyField(fieldType="{kind}", fieldCode="target", '
+                        f'translation=True, translationField="{invalid_target}", translationLanguage="fr")'
+                    )
+                    source = form(element(kind), element('FREE_TEXT', code='different', identity='differentid'))
+                    result = await apply_command(command, source, resolver)
+                    self.assertTrue(result.has_errors, result.message)
+
     async def test_lookup_formulas_resolve_in_referenced_form(self):
         source = form(element('reference', params={'range': [{'formId': 'remote'}],
             'lookupConfigs': [{'id': 'lookup', 'lookupLabel': 'Name', 'formula': 'old'}]}))
