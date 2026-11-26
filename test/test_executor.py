@@ -13,7 +13,7 @@ from test.test_planning import schema_state, schema_effect
 from test.test_confirmed_plan import field
 
 
-def setup_plan(sequence=('a', 'b'), *, deletion=False):
+def setup_plan(sequence=('a', 'b'), *, deletion=False, edit_existing=False):
     initial = {identity: schema_state(identity, fields=[field('original')]) for identity in set(sequence)}
     current = dict(initial)
     builder = PlanBuilder()
@@ -21,6 +21,8 @@ def setup_plan(sequence=('a', 'b'), *, deletion=False):
     for index, identity in enumerate(sequence):
         before = current[identity]
         fields = [] if deletion else [*before.payload.to_dict()['elements'], field(f'new{index}')]
+        if edit_existing:
+            fields[0]['label'] = f'Renamed {index}'
         effect = schema_effect(before, fields, f'edit{index}')
         builder.add(effect)
         current[identity] = effect.after
@@ -62,6 +64,12 @@ class MemoryEvidenceService:
             self.schemas[identity] = deepcopy(schema)
         elif mode.startswith('divergent'):
             self.schemas[identity] = dict(deepcopy(schema), label='Unowned change')
+        elif mode.startswith('partial'):
+            actual = deepcopy(schema)
+            actual['elements'][0]['label'] = self.schemas[identity]['elements'][0]['label']
+            if mode == 'partial_conflict':
+                actual['elements'][0]['description'] = 'Concurrent edit'
+            self.schemas[identity] = actual
         receipt = EndpointReceipt(200, {'ETag': 'receipt'}, '{}', {'version': '2'}, '2')
         if mode.endswith('error'):
             return WriteEvidence(receipt, EndpointFailure(FailureKind.UNAVAILABLE, 'lost response', receipt))
@@ -69,8 +77,9 @@ class MemoryEvidenceService:
 
 
 class ExecutorTests(unittest.IsolatedAsyncioTestCase):
-    async def run_plan(self, *, sequence=('a', 'b'), modes=(), choice='leave', configure=None, deletion=False):
-        initial, candidate, binding, attempt = setup_plan(sequence, deletion=deletion)
+    async def run_plan(self, *, sequence=('a', 'b'), modes=(), choice='leave', configure=None, deletion=False,
+                       edit_existing=False):
+        initial, candidate, binding, attempt = setup_plan(sequence, deletion=deletion, edit_existing=edit_existing)
         service = MemoryEvidenceService(initial, modes)
         executor = Executor(service)
         if configure:
@@ -149,6 +158,37 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(service.writes), 2)
             self.assertEqual(report.journal[-1].outcome, Outcome.DIVERGENT)
             self.assertEqual(report.journal[-1].recovery[-1].status, 'blocked')
+
+    async def test_partial_schema_update_restores_preimage_after_read_back_or_reconciliation(self):
+        for failures in (set(), {3}):
+            with self.subTest(failed_reads=failures):
+                report, service, _, _ = await self.run_plan(
+                    sequence=('a',), edit_existing=True, modes=('partial',), choice='rollback_all',
+                    configure=lambda service, _: service.fail_reads.update(failures))
+                self.assertEqual(report.status, 'rolled_back_all')
+                self.assertEqual(len(service.writes), 2)
+                self.assertEqual(report.actual_schemas['a'], report.journal[0].preimage.state.payload.to_dict())
+                self.assertEqual(report.journal[0].recovery[-1].status, 'verified_restored')
+
+    async def test_partial_schema_update_with_unexpected_change_abandons_rollback(self):
+        report, service, _, _ = await self.run_plan(
+            sequence=('a',), edit_existing=True, modes=('partial_conflict',), choice='rollback_all')
+        self.assertEqual(report.status, 'recovery_blocked')
+        self.assertEqual(len(service.writes), 1)
+        self.assertIn('$["elements"][id="original"]["description"]', report.console_messages[-1])
+
+    async def test_partial_schema_update_is_rechecked_before_rollback(self):
+        def configure(service, executor):
+            def mutate(count, key):
+                if count == 4:
+                    service.schemas['a']['elements'][0]['description'] = 'Concurrent edit'
+            service.before_read = mutate
+
+        report, service, _, _ = await self.run_plan(
+            sequence=('a',), edit_existing=True, modes=('partial',), choice='rollback_last', configure=configure)
+        self.assertEqual(report.status, 'recovery_blocked')
+        self.assertEqual(len(service.writes), 1)
+        self.assertIn('$["elements"][id="original"]["description"]', report.console_messages[-1])
 
     async def test_unknown_reconciles_to_intended_before_recovery(self):
         report, service, _, _ = await self.run_plan(sequence=('a',), choice='rollback_all',

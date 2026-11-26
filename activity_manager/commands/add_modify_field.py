@@ -97,6 +97,9 @@ class AddModifyFieldCommand(AddFieldCommand):
             return target_mismatch(schema, self.field_code, 'metadata kind')
         if kind == 'attachment' and params.get('cardinality', 'multiple') != (self.attachment_cardinality or 'multiple'):
             return target_mismatch(schema, self.field_code, 'attachment cardinality')
+        if (kind == 'geopoint' and self.manual_entry_allowed is not None
+                and params.get('manualEntryAllowed', True) != self.manual_entry_allowed):
+            return target_mismatch(schema, self.field_code, 'manual coordinate entry')
         return kind, variant
 
     def _requested_form(self, schema, variant):

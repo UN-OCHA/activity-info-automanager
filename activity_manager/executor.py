@@ -15,6 +15,7 @@ from .immutable import thaw
 from .execution_presentation import recovery_console_message
 from .planning import ActionKind, PlanError
 from .resource_state import Existence, ResourceKind
+from .schema_change import unexpected_schema_changes
 
 
 class Outcome(StrEnum):
@@ -367,25 +368,30 @@ class Executor:
             action = entry.reviewed.action
             handler = self.handler(action)
             current = await self.observe_action(action)
-            if entry.outcome == Outcome.DIVERGENT:
+            schema_update = action.kind == ActionKind.FORM_SCHEMA_UPDATE
+            if entry.outcome == Outcome.DIVERGENT and not schema_update:
                 reason = 'Divergent state does not establish ownership; automatic recovery blocked.'
                 self.record_recovery(index, 'blocked', current, message=reason)
                 self.message(reason)
                 return self.report('recovery_blocked')
-            if entry.outcome == Outcome.UNKNOWN:
-                reconciled = self.classify(handler, action, entry.preimage, current)
-                self.record_recovery(index, 'reconciled', current, message=reconciled.value)
-                if reconciled == Outcome.UNCHANGED:
+            outcome = entry.outcome
+            if outcome == Outcome.UNKNOWN:
+                outcome = self.classify(handler, action, entry.preimage, current)
+                self.record_recovery(index, 'reconciled', current, message=outcome.value)
+                if outcome == Outcome.UNCHANGED:
                     await self.step('rollback_skip', entry.reviewed)
                     continue
-                safe = reconciled == Outcome.INTENDED
+                reason = ('Recovery stopped: outcome is unresolved or the observed postimage changed.'
+                          if outcome != Outcome.INTENDED and not (schema_update and outcome == Outcome.DIVERGENT)
+                          else '')
             else:
-                safe = self.matches_observation(handler, action, entry.postimage, current)
-            if not safe:
-                reason = 'Recovery stopped: outcome is unresolved or the observed postimage changed.'
-                self.record_recovery(index, 'blocked', current, message=reason)
-                self.message(reason)
-                return self.report('recovery_blocked')
+                reason = self.recovery_state_change(handler, action, entry.postimage, current)
+            if not reason and schema_update and outcome == Outcome.DIVERGENT:
+                reason = self.partial_schema_recovery_block(action, entry.preimage, current)
+                if not reason:
+                    self.message(f'{self.action_label(action)}: partial update detected. Restoring the previous schema.')
+            if reason:
+                return self.block_recovery(index, current, reason, schema_update)
             # Restore the immediate observed preimage, never a stale plan baseline.
             try:
                 request = (handler.recovery_request(action, entry.preimage.state, entry.evidence)
@@ -397,11 +403,9 @@ class Executor:
             await self.step('rollback', entry.reviewed, request)
             if self.step_control is not None:
                 latest = await self.observe_action(action)
-                if not self.matches_observation(handler, action, current, latest):
-                    reason = 'Recovery stopped: observed state changed while awaiting execution.'
-                    self.record_recovery(index, 'blocked', latest, message=reason)
-                    self.message(reason)
-                    return self.report('recovery_blocked')
+                reason = self.recovery_state_change(handler, action, current, latest, paused=True)
+                if reason:
+                    return self.block_recovery(index, latest, reason, schema_update)
             self.record_recovery(index, 'attempted', current, request=request)
             evidence = await self.write(handler, request)
             actual = await self.observe_action(action)
@@ -423,3 +427,33 @@ class Executor:
                 break
         self.message(f'{restored} update(s) restored and verified.')
         return self.report('rolled_back_all' if choice == 'rollback_all' else 'rolled_back_last')
+
+    def block_recovery(self, index, observed, reason, schema_update):
+        self.record_recovery(index, 'blocked', observed, message=reason)
+        if schema_update:
+            self._messages.append(reason)
+        else:
+            self.message(reason)
+        return self.report('recovery_blocked')
+
+    def recovery_state_change(self, handler, action, expected, observed, *, paused=False):
+        if action.kind == ActionKind.FORM_SCHEMA_UPDATE and all(
+                item.existence == Existence.PRESENT for item in (expected, observed)):
+            before = expected.state.payload.to_dict()
+            paths = unexpected_schema_changes(before, before, observed.state.payload.to_dict())
+            if paths:
+                return 'Recovery stopped: unexpected schema changes since read-back:\n' + '\n'.join(paths)
+        if self.matches_observation(handler, action, expected, observed):
+            return ''
+        return ('Recovery stopped: observed state changed while awaiting execution.' if paused else
+                'Recovery stopped: outcome is unresolved or the observed postimage changed.')
+
+    def partial_schema_recovery_block(self, action, before, observed):
+        if (not observed.complete or observed.existence != Existence.PRESENT
+                or not self.matches_related(action, tuple(item.state for item in before.related), observed)):
+            return 'Recovery stopped: the current schema or related state could not be verified.'
+        paths = unexpected_schema_changes(before.state.payload.to_dict(), action.after.payload.to_dict(),
+                                          observed.state.payload.to_dict())
+        if paths:
+            return 'Recovery stopped: unexpected schema changes outside the partial update:\n' + '\n'.join(paths)
+        return ''

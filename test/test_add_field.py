@@ -77,7 +77,7 @@ class AddFieldTests(unittest.TestCase):
             'input_mask', 'barcode', 'calculation_formula', 'metadata', 'units', 'upload_type',
             'attachment_cardinality',
             'allowed_file_types', 'geo_accuracy', 'option_list', 'referenced_form',
-            'reverse_reference_field', 'lookup_fields', 'default_value', 'default_formula',
+            'reverse_reference_field', 'lookup_fields', 'default_value', 'default_formula', 'manual_entry_allowed',
         ])
         self.assertEqual(creator.controls['field_type'].value, 'FREE_TEXT')
         for name in ('field_type', 'field_variant', 'field_code', 'label', 'required'):

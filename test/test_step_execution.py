@@ -15,8 +15,8 @@ from test.test_executor import setup_plan, MemoryEvidenceService
 
 
 class StepExecutionTests(unittest.IsolatedAsyncioTestCase):
-    async def run_interactive(self, choices, *, modes=(), mutate=None):
-        initial, candidate, binding, attempt = setup_plan()
+    async def run_interactive(self, choices, *, modes=(), mutate=None, edit_existing=False):
+        initial, candidate, binding, attempt = setup_plan(edit_existing=edit_existing)
         service = MemoryEvidenceService(initial, modes)
         with Client(ui.page('/')):
             class RecordingDialog(StepExecutionDialog):
@@ -79,6 +79,8 @@ class StepExecutionTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(dialog.next.enabled)
                         if report.status == 'rolled_back_all':
                             self.assertIn('update(s) restored and verified', dialog.console.text)
+                        if report.status == 'recovery_blocked':
+                            self.assertIn(report.console_messages[-1], dialog.console.text)
                     dialog.submit('back' if dialog.rolling_back else 'continue')
                 await asyncio.wait_for(finish, 3)
                 remaining = iter(report.console_messages)
@@ -108,6 +110,20 @@ class StepExecutionTests(unittest.IsolatedAsyncioTestCase):
             ('execute', ['execute'])], modes=['unchanged_error'])
         self.assertEqual(report.status, 'rolled_back_all')
         self.assertEqual(len(service.writes), 1)
+
+    async def test_partial_schema_update_can_be_rolled_back(self):
+        report, service = await self.run_interactive([
+            ('execute', ['execute']), ('rollback', ['rollback'])], modes=['partial'], edit_existing=True)
+        self.assertEqual(report.status, 'rolled_back_all')
+        self.assertEqual(len(service.writes), 2)
+        self.assertEqual(report.actual_schemas['a'], report.journal[0].preimage.state.payload.to_dict())
+
+    async def test_partial_schema_conflict_is_shown_and_abandons_rollback(self):
+        report, service = await self.run_interactive([
+            ('execute', ['execute'])], modes=['partial_conflict'], edit_existing=True)
+        self.assertEqual(report.status, 'recovery_blocked')
+        self.assertEqual(len(service.writes), 1)
+        self.assertIn('$["elements"][id="original"]["description"]', report.console_messages[-1])
 
     async def test_stop_before_write(self):
         report, service = await self.run_interactive([('stop', ['execute'])])
@@ -176,6 +192,7 @@ class StepExecutionTests(unittest.IsolatedAsyncioTestCase):
         report = await executor.execute(attempt, binding, candidate, None)
         self.assertEqual(report.status, 'recovery_blocked')
         self.assertEqual(len(service.writes), 1)
+        self.assertIn('$["label"]', report.console_messages[-1])
 
     def test_recovery_console_uses_plain_language(self):
         for outcome, expected in (

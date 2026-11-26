@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 from .move_field import MOVE_FIELD
+from ..command_creator import ParameterDefinition as P
 
 from ..field_parameters import (
     configure_field_parameters,
@@ -41,4 +42,6 @@ ADD_FIELD_PARAMETERS = (
     replace(MOVE_FIELD.parameters[1], required=False, blank_action='unset'),
     replace(MOVE_FIELD.parameters[2], key='before_after_field'),
     *_FIELD_PARAMETERS,
+    P('manual_entry_allowed', 'Allow manual coordinate entry', 'boolean',
+      default=True, visible_when=for_types('geopoint')),
 )

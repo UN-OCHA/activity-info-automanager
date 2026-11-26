@@ -24,6 +24,7 @@ ARGUMENTS = {
     'position': 'position',
     'before_after_field': 'beforeAfterField',
     **{key: value for key, value in FIELD_ARGUMENTS.items() if key != 'field_type'},
+    'manual_entry_allowed': 'manualEntryAllowed',
 }
 
 
@@ -97,6 +98,7 @@ class AddFieldCommand:
     position: str | None = None
     before_after_field: str | None = None
     field_variant: str | None = None
+    manual_entry_allowed: bool | None = None
 
     def __post_init__(self):
         # Creation parses values only. Cross-parameter and schema checks belong
@@ -166,7 +168,7 @@ class AddFieldCommand:
         if not isinstance(self.label, str) or not self.label.strip():
             fail('label', 'Field label is required.')
         bools = ('key', 'unique', 'required', 'hide_from_entry', 'hide_in_table',
-                 'reviewer_only', 'read_only', 'translation', 'barcode')
+                 'reviewer_only', 'read_only', 'translation', 'barcode', 'manual_entry_allowed')
         texts = ('description', 'translation_field', 'prefix_formula', 'input_mask',
                  'calculation_formula', 'metadata', 'units', 'referenced_form', 'default_formula',
                  'relevance_condition', 'required_condition', 'validation_condition', 'validation_message',
@@ -188,6 +190,7 @@ class AddFieldCommand:
             'upload_type': ('attachment',), 'allowed_file_types': ('attachment',),
             'attachment_cardinality': ('attachment',),
             'geo_accuracy': ('geopoint',), 'option_list': ('enumerated',),
+            'manual_entry_allowed': ('geopoint',),
             'referenced_form': ('reference', 'multiselectreference', 'subform', 'reversereference'),
             'lookup_fields': ('reference',),
             'reverse_reference_field': ('reversereference',),
@@ -370,6 +373,10 @@ class AddFieldCommand:
                 parameters[wire_key] = deepcopy(value)
         if self.field_type == 'attachment' and self.attachment_cardinality is None:
             parameters['cardinality'] = 'multiple'
+        if self.field_type == 'geopoint':
+            parameters['manualEntryAllowed'] = (
+                True if self.manual_entry_allowed is None else self.manual_entry_allowed
+            )
         if self.translation:
             parameters['translationConfig'] = {
                 'fieldId': 'field-code:' + self.translation_field,
@@ -453,7 +460,7 @@ def parse_add_field_arguments(text, call, *, command_name='AddField', require_la
                               function_parameters=(), blank_parameters=()):
     types = {argument: str for argument in ARGUMENTS.values()}
     for key in ('key', 'unique', 'required', 'hide_from_entry', 'hide_in_table', 'reviewer_only',
-                'read_only', 'translation', 'barcode'):
+                'read_only', 'translation', 'barcode', 'manual_entry_allowed'):
         types[ARGUMENTS[key]] = bool
     types.update({'indentationLevel': int, 'geoAccuracy': (int, float),
                   'translationLanguage': (str, list), 'uploadType': list, 'allowedFileTypes': list,

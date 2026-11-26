@@ -157,8 +157,8 @@ class StepExecutionDialog:
     async def finish(self, executor, outcome):
         self.show(executor, None)
         if not self.stopped and not self.ended:
-            rolling_back = self.rolling_back or outcome.status in ('recovery_blocked', 'recovery_failed')
-            end_button = self.back if rolling_back else self.next
+            self.rolling_back = self.rolling_back or outcome.status in ('recovery_blocked', 'recovery_failed')
+            end_button = self.back if self.rolling_back else self.next
             end_button.set_text('End')
             try:
                 await self.wait(end_button)

@@ -282,7 +282,7 @@ class SchemaChangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('HTTP 500', outcome.messages[0])
         self.assertEqual(outcome.report.journal[0].outcome, 'unchanged')
 
-    async def test_partial_change_can_be_left_but_divergent_recovery_is_blocked(self):
+    async def test_unexpected_partial_change_is_preserved_and_blocks_recovery(self):
         loaded = self.schema('A', 'B')
         target = self.schema('B', 'A')
         partial = self.schema('A', 'C', version=2)
@@ -335,7 +335,9 @@ class SchemaChangeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(failed.status, 'recovery_blocked')
         self.assertEqual(failed.actual_schema, partial)
-        self.assertIn('Divergent', failed.messages[-1])
+        self.assertIn('unexpected schema changes', failed.messages[-1])
+        self.assertIn('$["elements"][id="field-B"]', failed.messages[-1])
+        self.assertIn('$["elements"][id="field-C"]', failed.messages[-1])
 
 
 class CommandParserTests(unittest.TestCase):
