@@ -159,30 +159,40 @@ ModifyField(fieldPattern="cost_.*", fieldType="quantity", label="${vars.prefix} 
             self.assertEqual(parse_command_text(added[-1].to_syntax()), [added[-1]])
             separator = next(editor for editor in creator.editors if editor.definition.key == 'separator')
             self.assertFalse(separator.container.visible)
-            self.assertFalse(creator.controls['multiple'].value)
-            creator.controls['multiple'].set_value(True)
+            mode = creator.controls['mode']
+            self.assertEqual(mode.value, 'first')
+            self.assertIn('mode="first"', added[-1].to_syntax())
+            mode.set_value('all')
             self.assertTrue(separator.container.visible)
             self.assertEqual(separator.control.value, '|')
             self.assertEqual(separator.control.props['maxlength'], 3)
             creator._add_command()
-            self.assertTrue(added[-1].multiple)
-            self.assertIn('multiple=True', added[-1].to_syntax())
+            self.assertIn('mode="all"', added[-1].to_syntax())
             self.assertIsNone(added[-1].separator)
             separator.control.set_value('')
+            mode.set_value('unique')
+            self.assertTrue(separator.container.visible)
             creator._add_command()
+            self.assertIn('mode="unique"', added[-1].to_syntax())
             self.assertEqual(added[-1].separator, '')
             self.assertEqual(parse_command_text(added[-1].to_syntax()), [added[-1]])
-            creator.controls['multiple'].set_value(False)
+            mode.set_value('first')
             self.assertFalse(separator.container.visible)
 
 
 class LookupTests(unittest.IsolatedAsyncioTestCase):
     async def test_multiple_matches_use_optional_separator_and_validate_every_value(self):
-        prefix = ('SetVariable(name="x", multiple=true, method="data lookup", '
+        prefix = ('SetVariable(name="x", method="data lookup", '
                   'referencedForm="Settings", filter="ACTIVE", returnFormula="TARGET"')
-        rows = [{'value': 'a'}, {'value': 0}, {'value': False}]
-        for option, expected in [('', 'a|0|False'), (', separator=""', 'a0False'),
-                                 (', separator=" "', 'a 0 False'), (', separator=" / "', 'a / 0 / False')]:
+        rows = [{'value': value} for value in ['a', 0, 'a', False, '0', 'A']]
+        for option, expected in [
+            (', mode="All"', 'a|0|a|False|0|A'),
+            (', mode="all", separator=" "', 'a 0 a False 0 A'),
+            (', mode="all", separator=" / "', 'a / 0 / a / False / 0 / A'),
+            (', mode="unique"', 'a|0|False|A'),
+            (', mode="Unique", separator=""', 'a0FalseA'),
+            (', multiple=true', 'a|0|a|False|0|A'),
+        ]:
             with self.subTest(option=option):
                 command, = parse_command_text(prefix + option + ')')
                 self.assertEqual(parse_command_text(command.to_syntax()), [command])
@@ -196,14 +206,15 @@ class LookupTests(unittest.IsolatedAsyncioTestCase):
                                      lookup_variable=AsyncMock(return_value=[*rows, {'value': None}]))
         self.assertEqual(result.status, 'error')
         self.assertEqual(variables['vars.x'], 'previous')
-        for syntax in (prefix + ', separator="long")', prefix + ', multiple=True)',
-                       prefix.replace('multiple=true, ', '') + ', separator="")',
-                       prefix.replace('multiple=true, ', 'multiple, ') + ')'):
+        for syntax in (prefix + ', mode="all", separator="long")',
+                       prefix + ', mode="unique", multiple=True)',
+                       prefix + ', separator="")', prefix + ', mode="other")'):
             with self.subTest(syntax=syntax), self.assertRaises(ValueError):
                 parse_command_text(syntax)
 
     async def test_value_validation_warning_and_atomic_reassignment(self):
         command = SetVariableCommand('x', 'lookup', referenced_form='Settings', filter='ACTIVE', return_formula='TARGET')
+        self.assertEqual(command.mode, 'first')
         resolver = AsyncMock()
         for rows, status, expected in [
             ([{'value': 0}], 'applied', '0'),

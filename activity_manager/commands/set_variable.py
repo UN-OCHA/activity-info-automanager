@@ -15,6 +15,7 @@ from .models import CommandDefinition
 
 
 DATA_LOOKUP = 'data lookup'
+LOOKUP_MODES = ('first', 'all', 'unique')
 DEFAULT_SEPARATOR = '|'
 MAX_SEPARATOR_LENGTH = 3
 
@@ -41,7 +42,7 @@ class SetVariableCommand:
     referenced_form: str | None = None
     filter: str | None = None
     return_formula: str | None = None
-    multiple: bool = False
+    mode: str | None = None
     separator: str | None = None
 
     def __post_init__(self):
@@ -54,13 +55,16 @@ class SetVariableCommand:
         if method not in ('literal', DATA_LOOKUP):
             raise ValueError('SetVariable method must be literal or data lookup.')
         object.__setattr__(self, 'method', method)
-        if type(self.multiple) is not bool:
-            raise ValueError('Return multiple matches must be a boolean.')
-        if self.multiple and method != DATA_LOOKUP:
-            raise ValueError('Return multiple matches requires the data lookup method.')
+        if method == DATA_LOOKUP:
+            mode = 'first' if self.mode is None else self.mode
+            if not isinstance(mode, str) or mode.casefold() not in LOOKUP_MODES:
+                raise ValueError('Mode must be First, All, or Unique.')
+            object.__setattr__(self, 'mode', mode.casefold())
+        elif self.mode is not None:
+            raise ValueError('Mode requires the data lookup method.')
         if self.separator is not None:
-            if not self.multiple:
-                raise ValueError('Separator requires Return multiple matches.')
+            if self.mode not in ('all', 'unique'):
+                raise ValueError('Separator requires All or Unique mode.')
             if not isinstance(self.separator, str) or len(self.separator) > MAX_SEPARATOR_LENGTH:
                 raise ValueError(f'Separator must be text of at most {MAX_SEPARATOR_LENGTH} characters.')
         if self.method == 'literal':
@@ -79,13 +83,11 @@ class SetVariableCommand:
         if self.method == 'literal':
             values['value'] = self.value
         else:
-            values.update(referencedForm=self.referenced_form, filter=self.filter, returnFormula=self.return_formula)
+            values.update(referencedForm=self.referenced_form, filter=self.filter,
+                          returnFormula=self.return_formula, mode=self.mode)
         if self.separator is not None:
             values['separator'] = self.separator
-        arguments = [f'{key}={json.dumps(value, ensure_ascii=False)}' for key, value in values.items()]
-        if self.multiple:
-            arguments.append('multiple=True')
-        return 'SetVariable(' + ', '.join(arguments) + ')'
+        return 'SetVariable(' + ', '.join(f'{key}={json.dumps(value, ensure_ascii=False)}' for key, value in values.items()) + ')'
 
     def store(self, schema, context, value, diagnostics=()):
         text = variable_text(value)
@@ -108,9 +110,12 @@ class SetVariableCommand:
             raise ValueError('Lookup returned an invalid row response.')
         if not rows:
             raise ValueError(f'Lookup for variable {self.name!r} returned no records.')
-        if self.multiple:
+        if self.mode in ('all', 'unique'):
             separator = DEFAULT_SEPARATOR if self.separator is None else self.separator
-            return self.store(schema, context, separator.join(variable_text(row.get('value')) for row in rows))
+            values = [variable_text(row.get('value')) for row in rows]
+            if self.mode == 'unique':
+                values = list(dict.fromkeys(values))
+            return self.store(schema, context, separator.join(values))
         diagnostics = (Diagnostic('warning',
             f'Lookup for variable {self.name!r} matched multiple records; the first record in API order was used.',
             code='multiple_lookup_matches'),) if len(rows) > 1 else ()
@@ -140,12 +145,18 @@ def parse_set_variable(text, call):
     values = parse_literal_parameters(text, call, 'SetVariable', types={
         'name': str, 'method': str, 'value': (str, int, float, bool),
         'referencedForm': str, 'filter': str, 'returnFormula': str,
-        'multiple': bool, 'separator': str,
+        'mode': str, 'separator': str, 'multiple': bool,
     }, required={'name', 'method'}, allow_empty={'separator'})
     if 'referencedForm' in values:
         values['referenced_form'] = values.pop('referencedForm')
     if 'returnFormula' in values:
         values['return_formula'] = values.pop('returnFormula')
+    if 'multiple' in values:
+        multiple = values.pop('multiple')
+        if 'mode' in values:
+            raise ValueError('Specify only mode when replacing the previous multiple parameter.')
+        if multiple:
+            values['mode'] = 'all'
     return SetVariableCommand(**values)
 
 
@@ -161,10 +172,10 @@ SET_VARIABLE = CommandCreatorDefinition(
                 visible_when=LOOKUP, required_when=LOOKUP),
         P('filter', 'Filter formula', 'text', visible_when=LOOKUP, required_when=LOOKUP),
         P('return_formula', 'Return formula', 'text', visible_when=LOOKUP, required_when=LOOKUP),
-        P('multiple', 'Return multiple matches', 'boolean', default=False,
-          visible_when=LOOKUP, required_when=LOOKUP),
+        P('mode', 'Mode', 'single_select', options=LOOKUP_MODES, default='first',
+          option_labels={mode: mode.title() for mode in LOOKUP_MODES}, visible_when=LOOKUP, required_when=LOOKUP),
         P('separator', 'Separator', 'text', default=DEFAULT_SEPARATOR, initially_active=True,
-          visible_when=lambda values: values.get('method') == DATA_LOOKUP and values.get('multiple') is True,
+          visible_when=lambda values: values.get('method') == DATA_LOOKUP and values.get('mode') in ('all', 'unique'),
           max_length=MAX_SEPARATOR_LENGTH, preserve_whitespace=True),
     ),
 )

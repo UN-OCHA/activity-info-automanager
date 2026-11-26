@@ -131,14 +131,19 @@ the same form ID, local form name, or `Database/Form` selection as AddField.
 endpoint, after variable substitution. `returnFormula` is used because `return`
 is reserved in the command syntax. Formula text is sent directly to ActivityInfo.
 
-By default, a data lookup uses the first record in API response order and warns
-if there are multiple matches. Enable **Return multiple matches** in the creator
-or set `multiple=True` in Text view to join all
-matched values in API response order. The optional `separator` is up to three
-characters and defaults to `|`. Use `separator=""` to concatenate directly.
+The data lookup **Mode** offers three choices:
+
+- **First** uses the first record in API response order and warns if there are
+  multiple matches. This is the default when `mode` is omitted.
+- **All** joins all matched values in API response order.
+- **Unique** joins distinct text values in order of first appearance. Comparison
+  is case-sensitive.
+
+In All and Unique modes, the optional `separator` is up to three characters
+and defaults to `|`. Use `separator=""` to concatenate directly.
 
 ```python
-SetVariable(name="codes", method="data lookup", multiple=True,
+SetVariable(name="codes", method="data lookup", mode="unique",
             referencedForm="Configuration/Targets",
             filter="ACTIVE", returnFormula="CODE", separator=", ")
 ```
@@ -146,7 +151,7 @@ SetVariable(name="codes", method="data lookup", multiple=True,
 No records or an invalid returned value stop the chain. Returned values must be
 nonblank text, finite numbers, or booleans. Zero and false are valid, and text
 retains its whitespace. Lookup errors preserve any prior value. Saved commands
-using `method="lookup"` still work.
+using `method="lookup"` or the old `multiple` boolean still work.
 
 `ModifyField` identifies its target by exact field code, then falls back to an exact
 label with the specified type and variant. `MoveField` and `DeleteField` identify

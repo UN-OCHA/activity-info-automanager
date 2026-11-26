@@ -59,7 +59,7 @@ class CatalogTests(unittest.TestCase):
             'AddField': 'fieldCode="x", label="true", fieldType="quantity", required=True, readOnly=False',
             'ModifyField': 'fieldPattern="x.*", fieldType="quantity", required=False, readOnly=True',
             'AddModifyField': 'fieldCode="x", label="X", fieldType="quantity", required=True, readOnly=False',
-            'SetVariable': 'name="x", method="data lookup", multiple=True, referencedForm="X", '
+            'SetVariable': 'name="x", method="data lookup", mode="unique", referencedForm="X", '
                            'filter="true", returnFormula="CODE", separator=""',
             'WithDatabase': 'databasePattern="X.*"',
             'WithForm': 'form="Database/X"',

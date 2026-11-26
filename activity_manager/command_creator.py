@@ -291,7 +291,7 @@ class _ParameterEditor:
                 self.control.set_value(
                     [] if definition.control == 'multi_select'
                     else False if definition.control in ('boolean', 'toggle')
-                    else definition.default if definition.control == 'text' else None
+                    else definition.default if definition.control in ('text', 'single_select') else None
                 )
             getattr(self.control, 'enable' if active and fixed is None else 'disable')()
             if isinstance(self.control, FreeTextCombobox):
